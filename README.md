@@ -1,8 +1,8 @@
 # Princi
 
-Princi is a programming language and compiler project. The v0.1 compiler CLI,
-source loader, diagnostics, and lexer are implemented in Rust. The parser and
-later stages are still being developed.
+Princi is a programming language and compiler project. Its v0.1 Rust frontend
+includes source loading, located diagnostics, a lexer, an AST, and a parser.
+Semantic analysis and executable generation are still under development.
 
 ## v0.1 compiler contract
 
@@ -62,10 +62,38 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `codegen` | Lower typed representation through LLVM IR to Windows output. |
 | `runtime` | Provide only runtime support required by v0.1 programs. |
 
-The CLI, source loader, diagnostics, lexer, compiler options, and pipeline entry
-point are implemented. The remaining compiler modules will be filled in as the
-source grammar, type rules, entry-point convention, and runtime surface are
-specified.
+The CLI, source loader, diagnostics, lexer, AST, parser, compiler options, and
+pipeline entry point are implemented. Semantic analysis, typed representation,
+LLVM lowering, Windows executable generation, and runtime support remain under
+development.
+
+## v0.1 syntax
+
+The parser accepts top-level `import` paths, `fn` declarations, `class`
+declarations, and `struct` declarations. Functions and methods have typed
+parameters, an optional `-> ReturnType`, and a block. Classes and structs may
+contain typed fields, methods, and `init` constructors.
+
+Function bodies support `let` and `var` declarations (inferred or explicitly
+typed), assignments, nested blocks, `if`/`else`, `while`, `for name in
+start..end`, `return`, and expression statements. Expressions include
+identifiers, `self`, integer/floating-point/string/boolean literals, list
+literals, `Type { field: value }` construction, calls, member access, indexing,
+parentheses, unary `+`/`-`/`!`, ranges, and the binary operators listed in the
+lexical syntax section.
+
+Semicolons may separate statements; a line break also separates statements
+when the next token cannot continue the preceding expression. Newlines after an
+operator continue the expression. The range operator is non-associative unless
+parenthesized. Binary operators associate left-to-right. From low to high, the
+precedence is `..`, `||`, `&&`, `==`/`!=`, comparisons, `+`/`-`, `*`/`/`/`%`,
+unary operators, then calls, member access, and indexing.
+
+The parser retains end-exclusive UTF-8 byte spans throughout the AST and
+reports source-positioned syntax diagnostics. It recovers at statement,
+member, and declaration boundaries so a build can report multiple parse errors.
+These syntax features define the v0.1 parser boundary; they do not imply that
+semantic analysis or executable generation is complete.
 
 ## Supported lexical syntax
 
@@ -125,7 +153,7 @@ princi build hello.princi
 princi build hello.prnc -o program.exe
 ```
 
-The CLI validates and normalizes the input and output paths, lexes the source,
-then reports that the parser stage is incomplete. It exits non-zero and does not
-claim to have produced an executable until the remaining compilation stages are
-implemented.
+The CLI validates and normalizes the input and output paths, then runs the
+lexer and parser. Until semantic analysis and native code generation are
+implemented, valid programs receive an explicit incomplete-stage diagnostic
+and the command exits non-zero without claiming to have produced an executable.

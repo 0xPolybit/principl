@@ -63,6 +63,43 @@ impl fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiagnosticBundle {
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl DiagnosticBundle {
+    pub fn from_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
+        Self { diagnostics }
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+}
+
+impl From<Diagnostic> for DiagnosticBundle {
+    fn from(diagnostic: Diagnostic) -> Self {
+        Self {
+            diagnostics: vec![diagnostic],
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if index > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DiagnosticBundle {}
+
 #[cfg(test)]
 mod tests {
     use super::Diagnostic;

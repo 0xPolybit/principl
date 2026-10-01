@@ -37,6 +37,8 @@ fn both_extensions_reach_the_compiler_pipeline() {
 
     for name in ["hello.prnc", "hello.princi"] {
         let source = dir.source(name);
+        fs::write(&source, "fn main() { let value: Int = 1 + 2 * 3 }")
+            .expect("valid Princi program should be written");
         let output = dir.0.join("program.exe");
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))
             .arg("build")
@@ -49,7 +51,7 @@ fn both_extensions_reach_the_compiler_pipeline() {
         assert!(!result.status.success(), "incomplete pipeline must fail");
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("the parser stage is not implemented yet"),
+            stderr.contains("the semantic analysis stage is not implemented yet"),
             "expected a pipeline diagnostic for {name}, got: {stderr}"
         );
         assert!(

@@ -1,17 +1,19 @@
+pub mod ast;
 pub mod cli;
 pub mod compiler;
 pub mod diagnostics;
 pub mod lexer;
+pub mod parser;
 pub mod source;
 
 use std::ffi::OsString;
 
 use crate::cli::parse_build_args;
 use crate::compiler::{BuildOptions, Compiler};
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::DiagnosticBundle;
 
-pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), Diagnostic> {
-    let parsed = parse_build_args(args)?;
-    let options = BuildOptions::from_parsed(parsed)?;
+pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), DiagnosticBundle> {
+    let parsed = parse_build_args(args).map_err(DiagnosticBundle::from)?;
+    let options = BuildOptions::from_parsed(parsed).map_err(DiagnosticBundle::from)?;
     Compiler::build(&options)
 }
