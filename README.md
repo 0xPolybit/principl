@@ -1,8 +1,9 @@
 # Princi
 
-Princi is a programming language and compiler project. This repository defines
-the v0.1 scope and the compiler architecture; the source-language grammar and
-construct-level semantics have not yet been specified.
+Princi is a programming language and compiler project. The v0.1 compiler CLI is
+implemented in Rust. The source-language grammar and construct-level semantics
+are still being specified, so compilation currently stops with a diagnostic at
+the lexer stage.
 
 ## v0.1 compiler contract
 
@@ -47,8 +48,7 @@ source
   → .exe
 ```
 
-The intended implementation language for the compiler is Rust. The internal
-module boundaries are:
+The compiler is implemented in Rust. The internal module boundaries are:
 
 | Module | Responsibility |
 | --- | --- |
@@ -62,11 +62,9 @@ module boundaries are:
 | `codegen` | Lower typed representation through LLVM IR to Windows output. |
 | `runtime` | Provide only runtime support required by v0.1 programs. |
 
-These are architecture boundaries, not a claim that compiler implementation
-already exists. The current repository contains no compiler source or build
-configuration. The construct-level language grammar, type rules, and runtime
-surface must be specified before they can be implemented without inventing
-language behavior.
+The CLI and build-option layer are implemented. The remaining compiler modules
+will be filled in as the source grammar, type rules, entry-point convention, and
+runtime surface are specified.
 
 ## Out of scope for v0.1
 
@@ -81,3 +79,32 @@ The following are explicitly excluded:
 
 See [the v0.1 scope and architecture](docs/v0.1-scope.md) for the canonical
 boundary and details.
+
+## Installation and development
+
+Install the Rust stable toolchain with Cargo, then build or install the CLI from
+the repository root:
+
+```text
+cargo build --release
+cargo install --path .
+```
+
+Run the automated tests with:
+
+```text
+cargo test
+```
+
+The build command accepts either source extension:
+
+```text
+princi build hello.prnc
+princi build hello.princi
+princi build hello.prnc -o program.exe
+```
+
+The CLI validates and normalizes the input and output paths, then enters the
+compiler pipeline. Until the lexer and later compilation stages are implemented,
+valid build commands report that stage limitation and exit non-zero; they do not
+claim to have produced an executable.
