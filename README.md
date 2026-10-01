@@ -1,0 +1,2 @@
+# princi
+an ergonomic language.
