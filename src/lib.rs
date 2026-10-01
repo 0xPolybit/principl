@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod compiler;
 pub mod diagnostics;
+pub mod lexer;
+pub mod source;
 
 use std::ffi::OsString;
 

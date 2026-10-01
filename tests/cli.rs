@@ -49,7 +49,7 @@ fn both_extensions_reach_the_compiler_pipeline() {
         assert!(!result.status.success(), "incomplete pipeline must fail");
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("the lexer stage is not implemented yet"),
+            stderr.contains("the parser stage is not implemented yet"),
             "expected a pipeline diagnostic for {name}, got: {stderr}"
         );
         assert!(
@@ -80,4 +80,32 @@ fn unsupported_extensions_and_missing_sources_exit_nonzero() {
             "CLI failure should include a useful diagnostic"
         );
     }
+}
+
+#[test]
+fn malformed_source_reports_its_file_line_and_column() {
+    let dir = TestDir::new();
+    let source = dir.0.join("hello.prnc");
+    fs::write(
+        &source,
+        "fn main() {\n  let value = 1;\n  let other = 2;\n           \"unfinished\n}\n",
+    )
+    .expect("malformed source should be written");
+    let expected_path = fs::canonicalize(&source).expect("source should canonicalize");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        .arg("build")
+        .arg(&source)
+        .output()
+        .expect("CLI process should start");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "{}:4:12: error: unterminated string literal",
+            expected_path.display()
+        )),
+        "expected located lexical diagnostic, got: {stderr}"
+    );
 }

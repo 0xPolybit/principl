@@ -1,9 +1,8 @@
 # Princi
 
-Princi is a programming language and compiler project. The v0.1 compiler CLI is
-implemented in Rust. The source-language grammar and construct-level semantics
-are still being specified, so compilation currently stops with a diagnostic at
-the lexer stage.
+Princi is a programming language and compiler project. The v0.1 compiler CLI,
+source loader, diagnostics, and lexer are implemented in Rust. The parser and
+later stages are still being developed.
 
 ## v0.1 compiler contract
 
@@ -54,6 +53,7 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | --- | --- |
 | `cli` | Parse `princi build`, source paths, and `-o`; select the v0.1 target. |
 | `diagnostics` | Report source locations and actionable compilation errors. |
+| `source` | Load source text and map byte spans to file, line, and column. |
 | `lexer` | Convert source text into tokens. |
 | `parser` | Parse tokens into the syntax tree. |
 | `ast` | Define the source-oriented abstract syntax tree. |
@@ -62,9 +62,30 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `codegen` | Lower typed representation through LLVM IR to Windows output. |
 | `runtime` | Provide only runtime support required by v0.1 programs. |
 
-The CLI and build-option layer are implemented. The remaining compiler modules
-will be filled in as the source grammar, type rules, entry-point convention, and
-runtime surface are specified.
+The CLI, source loader, diagnostics, lexer, compiler options, and pipeline entry
+point are implemented. The remaining compiler modules will be filled in as the
+source grammar, type rules, entry-point convention, and runtime surface are
+specified.
+
+## Supported lexical syntax
+
+The lexer recognizes identifiers beginning with a Unicode letter or `_` and
+continuing with letters, digits, or `_`; decimal integer and floating-point
+literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
+`\r`, `\t`, and `\0` escapes; and `true`/`false` boolean literals. It recognizes
+the keywords `fn`, `return`, `let`, `var`, `if`, `else`, `while`, `for`, `in`,
+`class`, `struct`, `init`, `self`, and `import`.
+
+Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
+`>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
+parentheses, braces, brackets, comma, dot, colon, semicolon, `->`, and `..`.
+Whitespace and `//` line comments are skipped. The lexer preserves semicolons
+when present; whether they are required at a statement boundary is a parser
+rule.
+
+Each token carries its source file, 1-based line and character column, and
+end-exclusive UTF-8 byte span. Located diagnostics use the format
+`file:line:column: error: message`.
 
 ## Out of scope for v0.1
 
@@ -104,7 +125,7 @@ princi build hello.princi
 princi build hello.prnc -o program.exe
 ```
 
-The CLI validates and normalizes the input and output paths, then enters the
-compiler pipeline. Until the lexer and later compilation stages are implemented,
-valid build commands report that stage limitation and exit non-zero; they do not
-claim to have produced an executable.
+The CLI validates and normalizes the input and output paths, lexes the source,
+then reports that the parser stage is incomplete. It exits non-zero and does not
+claim to have produced an executable until the remaining compilation stages are
+implemented.

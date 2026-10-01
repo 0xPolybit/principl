@@ -1,9 +1,11 @@
 use crate::compiler::BuildOptions;
 use crate::diagnostics::Diagnostic;
+use crate::lexer;
+use crate::source::SourceFile;
 
-pub fn compile(_source: &str, _options: &BuildOptions) -> Result<(), Diagnostic> {
-    // The CLI now enters the compilation pipeline here. Language grammar and
-    // frontend/code-generation stages are intentionally not invented by the
-    // CLI implementation task.
-    Err(Diagnostic::pipeline_stage_incomplete("lexer"))
+pub fn compile(source: &SourceFile, _options: &BuildOptions) -> Result<(), Diagnostic> {
+    let _tokens = lexer::lex(source)?;
+
+    // Parser and later stages are still under development.
+    Err(Diagnostic::pipeline_stage_incomplete("parser"))
 }
