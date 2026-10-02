@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 
 /// A byte range in a source file. The start is inclusive and the end is exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,10 +37,12 @@ impl SourceFile {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Diagnostic> {
         let path = path.as_ref();
         let text = fs::read_to_string(path).map_err(|error| {
-            Diagnostic::new(format!(
-                "could not read source file '{}': {error}",
-                path.display()
-            ))
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                format!("source file '{}' was not found", path.display())
+            } else {
+                format!("could not read source file '{}': {error}", path.display())
+            };
+            Diagnostic::coded(DiagnosticCode::SourceFile, message)
         })?;
 
         Ok(Self::from_text(path.to_path_buf(), text))
@@ -82,6 +84,36 @@ impl SourceFile {
         }
     }
 
+    pub(crate) fn excerpt(&self, span: SourceSpan) -> (String, usize, usize) {
+        let location = self.location(span);
+        let line_index = location.line.saturating_sub(1);
+        let line_start = self.line_starts[line_index];
+        let mut line_end = self
+            .line_starts
+            .get(line_index + 1)
+            .copied()
+            .unwrap_or(self.text.len());
+        while line_end > line_start && matches!(self.text.as_bytes()[line_end - 1], b'\r' | b'\n') {
+            line_end -= 1;
+        }
+
+        let start = self
+            .char_boundary_at_or_before(span.start.min(self.text.len()))
+            .clamp(line_start, line_end);
+        let end = self
+            .char_boundary_at_or_before(span.end.min(self.text.len()))
+            .clamp(start, line_end);
+        let line = &self.text[line_start..line_end];
+        let before = &self.text[line_start..start];
+        let highlighted = &self.text[start..end];
+        let column = visual_width(before, 0);
+        let width = visual_width(highlighted, column)
+            .saturating_sub(column)
+            .max(1);
+        let rendered_line = expand_tabs(line);
+        (rendered_line, column, width)
+    }
+
     fn char_boundary_at_or_before(&self, mut offset: usize) -> usize {
         while !self.text.is_char_boundary(offset) {
             offset -= 1;
@@ -110,6 +142,33 @@ impl SourceFile {
 
         starts
     }
+}
+
+fn visual_width(text: &str, mut column: usize) -> usize {
+    for character in text.chars() {
+        if character == '\t' {
+            column += 4 - (column % 4);
+        } else {
+            column += 1;
+        }
+    }
+    column
+}
+
+fn expand_tabs(text: &str) -> String {
+    let mut expanded = String::new();
+    let mut column = 0;
+    for character in text.chars() {
+        if character == '\t' {
+            let spaces = 4 - (column % 4);
+            expanded.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            expanded.push(character);
+            column += 1;
+        }
+    }
+    expanded
 }
 
 #[cfg(test)]

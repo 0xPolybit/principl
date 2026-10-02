@@ -413,7 +413,7 @@ rule.
 
 Each token carries its source file, 1-based line and character column, and
 end-exclusive UTF-8 byte span. Located diagnostics use the format
-`file:line:column: error: message`.
+`file:line:column: error[Exxxx]: message` and show the relevant source span.
 
 ## Out of scope for v0.1
 
@@ -460,5 +460,33 @@ princi build hello.prnc -o program.exe
 
 The CLI validates and normalizes paths, then runs the lexer, parser, semantic
 analysis, LLVM IR verification, Windows x86-64 object generation, and native
-linker. Frontend and backend errors retain source locations; a failed build
-exits non-zero and does not publish a partial executable.
+linker. Failed builds exit non-zero and do not publish a partial executable.
+
+## Diagnostics and toolchain troubleshooting
+
+Compiler diagnostics have stable error codes. Source errors show the file,
+line, column, source line, and a caret under the relevant span. For example:
+
+```text
+example.prnc:6:12: error[E0201]: expected Int, found String (expression)
+
+    var age: Int = "twenty"
+                   ^^^^^^^^^
+```
+
+Common codes include `E0002` for unsupported extensions, `E0003` for source
+file errors, `E0100` for lexical errors, and `E0101` for syntax errors,
+`E0201` for type mismatches, `E0202` for unknown identifiers or functions,
+`E0203` for unknown types, `E0204` for incorrect argument counts, `E0205` for
+invalid member access, `E0206` for duplicate declarations, `E0207` for a
+missing or invalid `main`, `E0208` for invalid returns, and `E0209` for
+unsupported imports.
+
+Toolchain errors are separate from source errors: `E0401` means LLVM/Clang is
+missing, `E0403` means the Windows MinGW linker is missing or targets the wrong
+platform, and `E0404` means linking failed. Install LLVM/Clang with LLVM IR and
+X86 support and x86-64 MinGW-w64 GCC, or point `PRINCI_CLANG` and `PRINCI_CC` at
+those tools. A generated-IR failure is reported as an internal compiler error
+(`E9002`); set `PRINCI_KEEP_INTERMEDIATES=1` to preserve its `.ll` input for
+investigation. Unexpected compiler failures use `E9001` and exit non-zero
+without exposing a Rust panic or backtrace.

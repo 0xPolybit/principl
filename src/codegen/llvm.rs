@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -11,7 +11,7 @@ use crate::ast::{
     Literal, Statement, StatementKind, TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::semantic::{GlobalSymbol, TypedProgram};
 use crate::source::{SourceFile, SourceSpan};
@@ -20,6 +20,8 @@ use crate::types::{FunctionType, Type};
 const WINDOWS_X86_64_TRIPLE: &str = "x86_64-w64-windows-gnu";
 const WINDOWS_X86_64_DATA_LAYOUT: &str =
     "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+const INTERNAL_CODEGEN_MESSAGE: &str =
+    "compiler invariant failed during native code generation; please report this issue";
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -34,7 +36,8 @@ pub fn generate_llvm_ir(typed: &TypedProgram, source: &SourceFile) -> Result<Str
 /// intermediate files live in a uniquely named temporary directory.
 pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic> {
     if options.compiler.target != Target::WindowsX86_64 {
-        return Err(Diagnostic::new(
+        return Err(Diagnostic::coded(
+            DiagnosticCode::UnsupportedFeature,
             "unsupported native target; expected Windows x86-64",
         ));
     }
@@ -43,10 +46,13 @@ pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic
     let ir_path = build_dir.path.join("program.ll");
     let object_path = build_dir.path.join("program.obj");
     fs::write(&ir_path, ir).map_err(|error| {
-        Diagnostic::new(format!(
-            "could not write temporary LLVM IR '{}': {error}",
-            ir_path.display()
-        ))
+        Diagnostic::coded(
+            DiagnosticCode::BuildOutput,
+            format!(
+                "could not write temporary LLVM IR '{}': {error}",
+                ir_path.display()
+            ),
+        )
     })?;
 
     let clang = std::env::var_os("PRINCI_CLANG").unwrap_or_else(|| OsString::from("clang"));
@@ -60,10 +66,15 @@ pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic
         .arg("-o")
         .arg(native_tool_path(&object_path))
         .output()
-        .map_err(|error| missing_tool("LLVM IR compiler (clang)", &clang, error))?;
+        .map_err(|_| {
+            Diagnostic::coded(
+                DiagnosticCode::LlvmUnavailable,
+                "LLVM/Clang could not be started; install LLVM/Clang with LLVM IR and X86 target support, or set PRINCI_CLANG",
+            )
+        })?;
     require_success(
-        "LLVM IR verification and Windows x86-64 object generation",
-        &clang,
+        DiagnosticCode::LlvmFailure,
+        "generated native code failed LLVM verification or Windows object generation; please report this compiler error",
         &emitted,
     )?;
 
@@ -71,20 +82,23 @@ pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic
     let target = Command::new(&linker)
         .arg("-dumpmachine")
         .output()
-        .map_err(|error| {
-            Diagnostic::new(format!(
-                "could not start Windows linker '{}': {error}; install x86-64 MinGW GCC or set PRINCI_CC",
-                linker.to_string_lossy()
-            ))
+        .map_err(|_| {
+            Diagnostic::coded(
+                DiagnosticCode::LinkerUnavailable,
+                "Windows linker could not be started; install x86-64 MinGW-w64 GCC or set PRINCI_CC",
+            )
         })?;
-    require_success("Windows linker target detection", &linker, &target)?;
+    require_success(
+        DiagnosticCode::LinkerFailure,
+        "could not query the configured Windows linker",
+        &target,
+    )?;
     let target_name = String::from_utf8_lossy(&target.stdout);
     if !target_name.trim().starts_with("x86_64-w64-mingw32") {
-        return Err(Diagnostic::new(format!(
-            "native linker '{}' targets '{}'; v0.1 requires x86_64-w64-mingw32",
-            linker.to_string_lossy(),
-            target_name.trim()
-        )));
+        return Err(Diagnostic::coded(
+            DiagnosticCode::LinkerUnavailable,
+            "configured linker must target x86_64-w64-mingw32; install x86-64 MinGW-w64 GCC or set PRINCI_CC",
+        ));
     }
 
     let mut output_file = TemporaryOutput::beside(&options.output_path)?;
@@ -94,75 +108,75 @@ pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic
         .arg("-o")
         .arg(native_tool_path(&output_file.path))
         .output()
-        .map_err(|error| {
-            Diagnostic::new(format!(
-                "could not start Windows linker '{}': {error}",
-                linker.to_string_lossy()
-            ))
+        .map_err(|_| {
+            Diagnostic::coded(
+                DiagnosticCode::LinkerUnavailable,
+                "Windows linker could not be started; install x86-64 MinGW-w64 GCC or set PRINCI_CC",
+            )
         })?;
-    require_success("Windows executable linking", &linker, &linked)?;
+    require_success(
+        DiagnosticCode::LinkerFailure,
+        "Windows linker failed to create the executable",
+        &linked,
+    )?;
 
     if options.output_path.exists() {
         fs::remove_file(&options.output_path).map_err(|error| {
-            Diagnostic::new(format!(
-                "could not replace output '{}': {error}",
-                options.output_path.display()
-            ))
+            Diagnostic::coded(
+                DiagnosticCode::BuildOutput,
+                format!(
+                    "could not replace output '{}': {error}",
+                    options.output_path.display()
+                ),
+            )
         })?;
     }
     fs::rename(&output_file.path, &options.output_path).map_err(|error| {
-        Diagnostic::new(format!(
-            "could not move executable to '{}': {error}",
-            options.output_path.display()
-        ))
+        Diagnostic::coded(
+            DiagnosticCode::BuildOutput,
+            format!(
+                "could not move executable to '{}': {error}",
+                options.output_path.display()
+            ),
+        )
     })?;
     output_file.keep = true;
     drop(build_dir);
     Ok(())
 }
 
-fn missing_tool(stage: &str, program: &OsStr, error: std::io::Error) -> Diagnostic {
-    let hint = if stage.starts_with("LLVM") {
-        "install LLVM/Clang with LLVM IR support and the X86 target, or set PRINCI_CLANG"
-    } else {
-        "install x86-64 MinGW GCC or set PRINCI_CC"
-    };
-    Diagnostic::new(format!(
-        "could not start {stage} '{}': {error}; {hint}",
-        program.to_string_lossy()
-    ))
-}
-
-fn require_success(stage: &str, program: &OsStr, output: &Output) -> Result<(), Diagnostic> {
+fn require_success(code: DiagnosticCode, message: &str, output: &Output) -> Result<(), Diagnostic> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(Diagnostic::new(format!(
-            "{stage} failed with '{}':\n{}",
-            program.to_string_lossy(),
+        let detail = if code == DiagnosticCode::LlvmFailure {
+            String::new()
+        } else {
             process_output(output)
-        )))
+        };
+        let message = if detail.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{message}: {detail}")
+        };
+        Err(Diagnostic::coded(code, message))
     }
 }
 
 fn process_output(output: &Output) -> String {
     let mut text = String::new();
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stdout.trim().is_empty() {
-        text.push_str(stdout.trim());
-    }
     if !stderr.trim().is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
         text.push_str(stderr.trim());
-    }
-    if text.is_empty() {
-        "the tool produced no diagnostic output".to_owned()
     } else {
-        text
+        text.push_str(String::from_utf8_lossy(&output.stdout).trim());
     }
+
+    if text.is_empty() {
+        return String::new();
+    }
+    let concise = text.lines().take(5).collect::<Vec<_>>().join("\n");
+    concise.chars().take(700).collect()
 }
 
 fn native_tool_path(path: &Path) -> PathBuf {
@@ -202,14 +216,18 @@ impl TemporaryBuildDirectory {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
-                    return Err(Diagnostic::new(format!(
-                        "could not create temporary build directory '{}': {error}",
-                        path.display()
-                    )))
+                    return Err(Diagnostic::coded(
+                        DiagnosticCode::BuildOutput,
+                        format!(
+                            "could not create temporary build directory '{}': {error}",
+                            path.display()
+                        ),
+                    ))
                 }
             }
         }
-        Err(Diagnostic::new(
+        Err(Diagnostic::coded(
+            DiagnosticCode::BuildOutput,
             "could not allocate a unique temporary build directory",
         ))
     }
@@ -240,7 +258,10 @@ impl TemporaryOutput {
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let name = destination.file_name().ok_or_else(|| {
-            Diagnostic::new(format!("invalid output path '{}'", destination.display()))
+            Diagnostic::coded(
+                DiagnosticCode::BuildOutput,
+                format!("invalid output path '{}'", destination.display()),
+            )
         })?;
         let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let mut temporary_name = name.to_os_string();
@@ -282,20 +303,23 @@ impl<'a> IrGenerator<'a> {
             .find(|function| function.name.name == "main")
             .copied()
             .ok_or_else(|| {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::MissingMain,
                     "program must declare fn main() as its entry point",
-                    self.typed.program.span,
+                    SourceSpan::new(0, 0),
                 )
             })?;
         if !main.parameters.is_empty() {
-            return Err(self.error(
+            return Err(self.error_with(
+                DiagnosticCode::MissingMain,
                 "main entry point cannot have parameters",
                 main.parameters[0].span,
             ));
         }
         let main_return = self.function_return_type(main)?;
         if !matches!(main_return, Type::Void | Type::Int) {
-            return Err(self.error(
+            return Err(self.error_with(
+                DiagnosticCode::TypeMismatch,
                 format!("main must return Void or Int, found {main_return}"),
                 main.return_type
                     .as_ref()
@@ -615,8 +639,21 @@ impl<'a> IrGenerator<'a> {
         }
     }
 
-    fn error(&self, message: impl Into<String>, span: SourceSpan) -> Diagnostic {
-        Diagnostic::at(message, self.source.location(span))
+    fn error(&self, _message: impl Into<String>, span: SourceSpan) -> Diagnostic {
+        self.error_with(
+            DiagnosticCode::InternalCompiler,
+            INTERNAL_CODEGEN_MESSAGE,
+            span,
+        )
+    }
+
+    fn error_with(
+        &self,
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        span: SourceSpan,
+    ) -> Diagnostic {
+        Diagnostic::at_source(code, message, self.source, span)
     }
 }
 
@@ -630,9 +667,11 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::List(_) => Ok("ptr".to_owned()),
         Type::Struct(name) => Ok(struct_type_name(name)),
         Type::Void => Ok("void".to_owned()),
-        other => Err(Diagnostic::at(
-            format!("LLVM code generation does not support type {other}"),
-            source.location(span),
+        _ => Err(Diagnostic::at_source(
+            DiagnosticCode::InternalCompiler,
+            INTERNAL_CODEGEN_MESSAGE,
+            source,
+            span,
         )),
     }
 }
@@ -804,7 +843,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         owner: Option<&str>,
     ) -> Result<String, Diagnostic> {
         if signature.return_type.as_ref() != &Type::Void && !block_returns(body) {
-            return Err(self.error(
+            return Err(self.error_with(
+                DiagnosticCode::InvalidReturn,
                 format!(
                     "function '{display_name}' may finish without returning {}",
                     signature.return_type
@@ -1211,7 +1251,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ExpressionKind::Index { object, index } => {
                 self.emit_list_index(object, index, expression.span)
             }
-            ExpressionKind::Range { .. } => Err(self.error(
+            ExpressionKind::Range { .. } => Err(self.error_with(
+                DiagnosticCode::UnsupportedFeature,
                 "this expression is outside the supported v0.1 LLVM backend",
                 expression.span,
             )),
@@ -1692,12 +1733,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         match literal {
             Literal::Integer(value) => {
                 let integer = value.parse::<u128>().map_err(|_| {
-                    self.error("integer literal is outside the supported Int range", span)
+                    self.error_with(
+                        DiagnosticCode::Semantic,
+                        "integer literal is outside the supported Int range",
+                        span,
+                    )
                 })?;
                 if integer > i64::MAX as u128 {
-                    return Err(
-                        self.error("integer literal is outside the supported Int range", span)
-                    );
+                    return Err(self.error_with(
+                        DiagnosticCode::Semantic,
+                        "integer literal is outside the supported Int range",
+                        span,
+                    ));
                 }
                 Ok(IrValue {
                     ty: Type::Int,
@@ -1706,7 +1753,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             Literal::FloatingPoint(value) => {
                 if !matches!(value.parse::<f64>(), Ok(number) if number.is_finite()) {
-                    return Err(self.error(
+                    return Err(self.error_with(
+                        DiagnosticCode::Semantic,
                         "floating-point literal is outside the supported Float range",
                         span,
                     ));
@@ -2298,8 +2346,21 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         value.parse::<u128>().ok() == Some((i64::MAX as u128) + 1)
     }
 
-    fn error(&self, message: impl Into<String>, span: SourceSpan) -> Diagnostic {
-        Diagnostic::at(message, self.source.location(span))
+    fn error(&self, _message: impl Into<String>, span: SourceSpan) -> Diagnostic {
+        self.error_with(
+            DiagnosticCode::InternalCompiler,
+            INTERNAL_CODEGEN_MESSAGE,
+            span,
+        )
+    }
+
+    fn error_with(
+        &self,
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        span: SourceSpan,
+    ) -> Diagnostic {
+        Diagnostic::at_source(code, message, self.source, span)
     }
 
     fn instruction(&mut self, instruction: &str) {
@@ -2400,11 +2461,13 @@ fn statement_returns(statement: &Statement) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_llvm_ir;
+    use super::{generate_llvm_ir, require_success};
+    use crate::diagnostics::DiagnosticCode;
     use crate::lexer;
     use crate::parser;
     use crate::semantic;
     use crate::source::SourceFile;
+    use std::process::Command;
 
     fn lower(text: &str) -> Result<String, String> {
         let source = SourceFile::from_text("backend.prnc", text);
@@ -2726,5 +2789,53 @@ fn main() {
         assert!(ir.contains("call ccc double @native_ratio(double"));
         assert!(ir.contains("call ccc void @native_reset()"));
         assert!(ir.contains("FFI Int32 argument out of range"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_linker_failures_without_echoing_the_tool_command() {
+        let output = Command::new("cmd")
+            .args([
+                "/C",
+                "echo undefined reference to missing_symbol 1>&2 & exit /b 1",
+            ])
+            .output()
+            .expect("cmd should be available on Windows");
+        let error = require_success(
+            DiagnosticCode::LinkerFailure,
+            "Windows linker failed to create the executable",
+            &output,
+        )
+        .expect_err("failed linker status should become a diagnostic");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("toolchain error[E0404]"), "{rendered}");
+        assert!(rendered.contains("missing_symbol"), "{rendered}");
+        assert!(!rendered.contains("cmd.exe"), "{rendered}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hides_raw_llvm_failure_output_from_user_diagnostics() {
+        let output = Command::new("cmd")
+            .args(["/C", "echo internal llvm dump detail 1>&2 & exit /b 1"])
+            .output()
+            .expect("cmd should be available on Windows");
+        let error = require_success(
+            DiagnosticCode::LlvmFailure,
+            "generated native code failed LLVM verification; please report this compiler error",
+            &output,
+        )
+        .expect_err("failed LLVM status should become a diagnostic");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("internal compiler error[E9002]"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("internal llvm dump detail"),
+            "{rendered}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::{SourceFile, SourceLocation, SourceSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,7 +341,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn error(&self, message: impl Into<String>, start: usize, end: usize) -> Diagnostic {
-        Diagnostic::at(message, self.source.location(SourceSpan::new(start, end)))
+        Diagnostic::at_source(
+            DiagnosticCode::Lexical,
+            message,
+            self.source,
+            SourceSpan::new(start, end),
+        )
     }
 }
 
@@ -536,7 +541,7 @@ mod tests {
         assert_eq!(location.span, SourceSpan::new(17, 28));
         assert_eq!(
             error.to_string(),
-            "hello.prnc:2:12: error: unterminated string literal"
+            "hello.prnc:2:12: error[E0100]: unterminated string literal\n\n               \"unfinished\n               ^^^^^^^^^^^"
         );
     }
 

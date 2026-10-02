@@ -6,7 +6,7 @@ use crate::ast::{
     InitializerDeclaration, Literal, Program, Statement, StatementKind, TypeDeclaration,
     TypeDeclarationKind, UnaryOperator, VariableDeclaration,
 };
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::modules::ResolvedModules;
 use crate::source::{SourceFile, SourceSpan};
@@ -193,7 +193,8 @@ impl<'a> Analyzer<'a> {
                 Declaration::Class(type_declaration) | Declaration::Struct(type_declaration) => {
                     let name = &type_declaration.name.name;
                     if is_reserved_type_name(name) || self.globals.contains_key(name) {
-                        self.error(
+                        self.error_with(
+                            DiagnosticCode::DuplicateDeclaration,
                             format!("duplicate or reserved declaration '{name}'"),
                             type_declaration.name.span,
                         );
@@ -213,7 +214,8 @@ impl<'a> Analyzer<'a> {
                 Declaration::Function(function) => {
                     let name = &function.name.name;
                     if self.globals.contains_key(name) || is_reserved_type_name(name) {
-                        self.error(
+                        self.error_with(
+                            DiagnosticCode::DuplicateDeclaration,
                             format!("duplicate declaration '{name}'"),
                             function.name.span,
                         );
@@ -260,7 +262,8 @@ impl<'a> Analyzer<'a> {
                 continue;
             }
             if self.globals.contains_key(name) || is_reserved_type_name(name) {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::DuplicateDeclaration,
                     format!("duplicate or reserved declaration '{name}'"),
                     function.name.span,
                 );
@@ -487,7 +490,11 @@ impl<'a> Analyzer<'a> {
             .get(&owner.name.name)
             .is_some_and(|info| info.initializer.is_some());
         if already_has_initializer {
-            self.error("duplicate init constructor", initializer.span);
+            self.error_with(
+                DiagnosticCode::DuplicateDeclaration,
+                "duplicate init constructor",
+                initializer.span,
+            );
             return;
         }
 
@@ -505,7 +512,8 @@ impl<'a> Analyzer<'a> {
             return false;
         };
         if !info.member_names.insert(name.name.clone()) {
-            self.error(
+            self.error_with(
+                DiagnosticCode::DuplicateDeclaration,
                 format!(
                     "duplicate member '{}' in type '{}'",
                     name.name, owner.name.name
@@ -578,7 +586,8 @@ impl<'a> Analyzer<'a> {
                 .get(name)
                 .map(|info| info.ty.clone())
                 .unwrap_or_else(|| {
-                    self.error(
+                    self.error_with(
+                        DiagnosticCode::UnknownType,
                         format!("unknown type '{}'", type_reference.name),
                         type_reference.span,
                     );
@@ -849,8 +858,9 @@ impl<'a> Analyzer<'a> {
         };
 
         if !target_type.accepts(&value_type) {
-            self.error(
-                format!("assignment expects {}, found {value_type}", target_type),
+            self.error_with(
+                DiagnosticCode::TypeMismatch,
+                format!("expected {target_type}, found {value_type}"),
                 assignment.value.span,
             );
         }
@@ -862,13 +872,15 @@ impl<'a> Analyzer<'a> {
                 if let Some(variable) = self.lookup_variable(&identifier.name).cloned() {
                     (variable.ty, variable.mutable)
                 } else if self.globals.contains_key(&identifier.name) {
-                    self.error(
+                    self.error_with(
+                        DiagnosticCode::InvalidMember,
                         format!("'{}' is not a mutable variable", identifier.name),
                         identifier.span,
                     );
                     (Type::Error, false)
                 } else {
-                    self.error(
+                    self.error_with(
+                        DiagnosticCode::UnknownIdentifier,
                         format!("undefined identifier '{}'", identifier.name),
                         identifier.span,
                     );
@@ -892,7 +904,8 @@ impl<'a> Analyzer<'a> {
                 }
                 let (member_type, is_field) = self.member_type(&object_type, member);
                 if !is_field && !member_type.is_error() {
-                    self.error(
+                    self.error_with(
+                        DiagnosticCode::InvalidMember,
                         format!("method '{}' is not an assignable field", member.name),
                         member.span,
                     );
@@ -948,7 +961,11 @@ impl<'a> Analyzer<'a> {
 
     fn check_return(&mut self, value: Option<&Expression>, span: SourceSpan) {
         let Some(return_type) = self.current_return_type.clone() else {
-            self.error("return statement is not inside a function", span);
+            self.error_with(
+                DiagnosticCode::InvalidReturn,
+                "return statement is not inside a function",
+                span,
+            );
             return;
         };
 
@@ -959,13 +976,18 @@ impl<'a> Analyzer<'a> {
                 .then_some(&return_type);
                 let actual = self.check_expression(expression, expected);
                 if matches!(return_type, Type::Void) {
-                    self.error("Void function cannot return a value", expression.span);
+                    self.error_with(
+                        DiagnosticCode::InvalidReturn,
+                        "Void function cannot return a value",
+                        expression.span,
+                    );
                 } else {
                     self.require_type(&return_type, &actual, expression.span, "return value");
                 }
             }
             None if !matches!(return_type, Type::Void) => {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::InvalidReturn,
                     format!("return statement requires a value of type {return_type}"),
                     span,
                 );
@@ -1081,7 +1103,8 @@ impl<'a> Analyzer<'a> {
                 Type::Error
             }
             None => {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::UnknownIdentifier,
                     format!("undefined identifier '{}'", identifier.name),
                     identifier.span,
                 );
@@ -1152,7 +1175,8 @@ impl<'a> Analyzer<'a> {
         fields: &[crate::ast::FieldInitializer],
     ) -> Type {
         let Some(info) = self.types.get(&type_name.name).cloned() else {
-            self.error(
+            self.error_with(
+                DiagnosticCode::UnknownType,
                 format!("unknown type '{}' in construction", type_name.name),
                 type_name.span,
             );
@@ -1241,7 +1265,8 @@ impl<'a> Analyzer<'a> {
                     }
                     None => {
                         self.expression_types.insert(callee.span, Type::Error);
-                        self.error(
+                        self.error_with(
+                            DiagnosticCode::UnknownIdentifier,
                             format!("undefined function '{}'", identifier.name),
                             identifier.span,
                         );
@@ -1298,7 +1323,8 @@ impl<'a> Analyzer<'a> {
         call_span: SourceSpan,
     ) {
         if arguments.len() != signature.parameters.len() {
-            self.error(
+            self.error_with(
+                DiagnosticCode::InvalidCall,
                 format!(
                     "'{name}' expects {} argument(s), found {}",
                     signature.parameters.len(),
@@ -1322,7 +1348,8 @@ impl<'a> Analyzer<'a> {
                     false,
                 ),
                 _ => {
-                    self.error(
+                    self.error_with(
+                        DiagnosticCode::InvalidMember,
                         format!("type '{object_type}' has no member '{}'", member.name),
                         member.span,
                     );
@@ -1334,7 +1361,11 @@ impl<'a> Analyzer<'a> {
             Type::Class(name) | Type::Struct(name) => name,
             Type::Error => return (Type::Error, false),
             other => {
-                self.error(format!("type {other} has no members"), member.span);
+                self.error_with(
+                    DiagnosticCode::InvalidMember,
+                    format!("type {other} has no members"),
+                    member.span,
+                );
                 return (Type::Error, false);
             }
         };
@@ -1349,7 +1380,8 @@ impl<'a> Analyzer<'a> {
             return (Type::Function(signature.clone()), false);
         }
 
-        self.error(
+        self.error_with(
+            DiagnosticCode::InvalidMember,
             format!("type '{type_name}' has no member '{}'", member.name),
             member.span,
         );
@@ -1452,8 +1484,9 @@ impl<'a> Analyzer<'a> {
 
     fn require_type(&mut self, expected: &Type, actual: &Type, span: SourceSpan, context: &str) {
         if !expected.accepts(actual) {
-            self.error(
-                format!("{context} expects {expected}, found {actual}"),
+            self.error_with(
+                DiagnosticCode::TypeMismatch,
+                format!("expected {expected}, found {actual} ({context})"),
                 span,
             );
         }
@@ -1464,7 +1497,8 @@ impl<'a> Analyzer<'a> {
             return;
         };
         if scope.variables.contains_key(name) {
-            self.error(
+            self.error_with(
+                DiagnosticCode::DuplicateDeclaration,
                 format!("duplicate declaration '{name}' in this scope"),
                 identifier.span,
             );
@@ -1491,8 +1525,12 @@ impl<'a> Analyzer<'a> {
     }
 
     fn error(&mut self, message: impl Into<String>, span: SourceSpan) {
+        self.error_with(DiagnosticCode::Semantic, message, span);
+    }
+
+    fn error_with(&mut self, code: DiagnosticCode, message: impl Into<String>, span: SourceSpan) {
         self.diagnostics
-            .push(Diagnostic::at(message, self.source.location(span)));
+            .push(Diagnostic::at_source(code, message, self.source, span));
     }
 }
 
@@ -1905,7 +1943,7 @@ fn main() {
 
         assert!(has_message(
             &result,
-            "return value expects Int, found String"
+            "expected Int, found String (return value)"
         ));
         assert!(has_message(
             &result,
@@ -1916,7 +1954,10 @@ fn main() {
             &result,
             "'takes' expects 1 argument(s), found 0"
         ));
-        assert!(has_message(&result, "expression expects Int, found String"));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (expression)"
+        ));
     }
 
     #[test]
@@ -1946,21 +1987,27 @@ fn update_parameter(value: Int) { value = 2 }"#,
             &result,
             "cannot assign through an immutable binding"
         ));
-        assert!(has_message(&result, "assignment expects Int, found String"));
+        assert!(has_message(&result, "expected Int, found String"));
         assert!(
             has_message(&result, "operator '+='")
                 || has_message(&result, "operator '+' cannot be applied to Int and Bool")
         );
-        assert!(has_message(&result, "if condition expects Bool, found Int"));
         assert!(has_message(
             &result,
-            "while condition expects Bool, found String"
+            "expected Bool, found Int (if condition)"
+        ));
+        assert!(has_message(
+            &result,
+            "expected Bool, found String (while condition)"
         ));
         assert!(has_message(
             &result,
             "operator '+' cannot be applied to Bool and Bool"
         ));
-        assert!(has_message(&result, "list index expects Int, found String"));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (list index)"
+        ));
         assert!(has_message(&result, "list elements must have one type"));
         assert!(has_message(
             &result,
@@ -2003,8 +2050,14 @@ fn main() {
             &result,
             "'Parcel' expects 1 argument(s), found 0"
         ));
-        assert!(has_message(&result, "expression expects String, found Int"));
-        assert!(has_message(&result, "expression expects Int, found String"));
+        assert!(has_message(
+            &result,
+            "expected String, found Int (expression)"
+        ));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (expression)"
+        ));
         assert!(has_message(&result, "type 'Point' has no field 'extra'"));
         assert!(has_message(&result, "missing initializer for field 'y'"));
         assert!(has_message(&result, "type 'Point' has no member 'missing'"));
@@ -2081,15 +2134,24 @@ fn main() {
             &result,
             "List requires exactly one type argument"
         ));
-        assert!(has_message(&result, "expression expects String, found Int"));
+        assert!(has_message(
+            &result,
+            "expected String, found Int (expression)"
+        ));
         assert!(has_message(&result, "list elements must have one type"));
         assert!(has_message(
             &result,
             "cannot infer the element type of an empty list"
         ));
-        assert!(has_message(&result, "expression expects Int, found String"));
-        assert!(has_message(&result, "assignment expects Int, found Bool"));
-        assert!(has_message(&result, "list index expects Int, found Float"));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (expression)"
+        ));
+        assert!(has_message(&result, "expected Int, found Bool"));
+        assert!(has_message(
+            &result,
+            "expected Int, found Float (list index)"
+        ));
         assert!(has_message(&result, "list.length is read-only"));
     }
 
@@ -2129,7 +2191,10 @@ fn main() {
             &result,
             "for loop range requires Int bounds, found Float"
         ));
-        assert!(has_message(&result, "expression expects Float, found Int"));
+        assert!(has_message(
+            &result,
+            "expected Float, found Int (expression)"
+        ));
     }
 
     #[test]

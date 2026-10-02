@@ -113,7 +113,7 @@ fn missing_llvm_compiler_has_an_actionable_diagnostic() {
         .expect("CLI process should start");
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("could not start LLVM IR compiler (clang)"));
+    assert!(stderr.contains("toolchain error[E0401]"));
     assert!(stderr.contains("install LLVM/Clang"));
 }
 
@@ -142,7 +142,7 @@ fn missing_mingw_linker_has_an_actionable_diagnostic() {
         .expect("CLI process should start");
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("could not start Windows linker"));
+    assert!(stderr.contains("toolchain error[E0403]"));
     assert!(stderr.contains("install x86-64 MinGW GCC"));
 }
 
@@ -151,46 +151,85 @@ fn unsupported_extensions_and_missing_sources_exit_nonzero() {
     let dir = TestDir::new();
     let unsupported = dir.source("hello.txt");
 
-    for source in [unsupported, dir.0.join("missing.prnc")] {
+    for (source, code) in [
+        (unsupported, "E0002"),
+        (dir.0.join("missing.prnc"), "E0003"),
+    ] {
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))
             .arg("build")
             .arg(source)
             .output()
             .expect("CLI process should start");
         assert!(!result.status.success());
-        assert!(
-            String::from_utf8_lossy(&result.stderr).contains("princi: error:"),
-            "CLI failure should include a useful diagnostic"
-        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(&format!("error[{code}]")), "{stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
     }
 }
 
 #[test]
 fn malformed_source_reports_its_file_line_and_column() {
     let dir = TestDir::new();
-    let source = dir.0.join("hello.prnc");
-    fs::write(
-        &source,
-        "fn main() {\n  let value = 1;\n  let other = 2;\n           \"unfinished\n}\n",
-    )
-    .expect("malformed source should be written");
-    let expected_path = fs::canonicalize(&source).expect("source should canonicalize");
+    for extension in ["prnc", "princi"] {
+        let source = dir.0.join(format!("hello.{extension}"));
+        fs::write(
+            &source,
+            "fn main() {\n  let value = 1;\n  let other = 2;\n           \"unfinished\n}\n",
+        )
+        .expect("malformed source should be written");
+        let expected_path = source.clone();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
-        .arg("build")
-        .arg(&source)
-        .output()
-        .expect("CLI process should start");
+        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("CLI process should start");
 
-    assert!(!result.status.success());
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains(&format!(
-            "{}:4:12: error: unterminated string literal",
-            expected_path.display()
-        )),
-        "expected located lexical diagnostic, got: {stderr}"
-    );
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "{}:4:12: error[E0100]: unterminated string literal",
+                expected_path.display()
+            )),
+            "expected a located lexical diagnostic, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("unfinished\n"),
+            "source excerpt missing: {stderr}"
+        );
+        assert!(stderr.contains("^"), "source caret missing: {stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        assert!(!stderr.contains("stack backtrace"), "{stderr}");
+    }
+}
+
+#[test]
+fn syntax_errors_have_source_excerpt_for_both_extensions() {
+    let dir = TestDir::new();
+    for extension in ["prnc", "princi"] {
+        let source = dir.0.join(format!("syntax.{extension}"));
+        fs::write(&source, "fn main() {\n    let = 1\n}\n")
+            .expect("invalid source should be written");
+        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("CLI process should start");
+
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "{}:2:9: error[E0101]: expected variable name",
+                source.display()
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.contains("    let = 1\n"), "{stderr}");
+        assert!(stderr.contains("            ^"), "{stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
+    }
 }
 
 #[test]
@@ -199,7 +238,7 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
     let source = dir.0.join("type_error.princi");
     fs::write(&source, "fn main() {\n    let count: Int = \"wrong\"\n}")
         .expect("source with a type error should be written");
-    let expected_path = fs::canonicalize(&source).expect("source should canonicalize");
+    let expected_path = source.clone();
 
     let result = Command::new(env!("CARGO_BIN_EXE_princi"))
         .arg("build")
@@ -211,7 +250,7 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains(&format!(
-            "{}:2:22: error: expression expects Int, found String",
+            "{}:2:22: error[E0201]: expected Int, found String (expression)",
             expected_path.display()
         )),
         "expected a located semantic diagnostic, got: {stderr}"
@@ -220,6 +259,7 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
         !stderr.contains("code generation stage"),
         "semantic failures must stop before later pipeline stages"
     );
+    assert!(stderr.contains("^"), "source caret missing: {stderr}");
 }
 
 #[test]
@@ -241,15 +281,72 @@ fn ffi_rejects_managed_values_before_native_linking() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("type 'String' is not FFI-safe in v0.1"),
+        stderr.contains("error[E0299]: type 'String' is not FFI-safe in v0.1"),
         "{stderr}"
-    );
-    assert!(
-        stderr.contains("error:"),
-        "FFI diagnostic should be user-facing"
     );
     assert!(
         !stderr.contains("clang"),
         "semantic FFI errors stop before the backend"
     );
+}
+
+#[test]
+fn common_user_errors_have_stable_codes_and_no_internal_trace() {
+    let dir = TestDir::new();
+    let cases = [
+        (
+            "unknown_identifier",
+            "fn main() { print(missing) }",
+            "E0202",
+        ),
+        (
+            "unknown_type",
+            "fn take(value: Missing) {}\nfn main() {}",
+            "E0203",
+        ),
+        (
+            "argument_count",
+            "fn take(value: Int) {}\nfn main() { take() }",
+            "E0204",
+        ),
+        (
+            "invalid_member",
+            "fn main() { let value = 1; value.missing }",
+            "E0205",
+        ),
+        (
+            "duplicate_declaration",
+            "fn main() { let value = 1; let value = 2 }",
+            "E0206",
+        ),
+        ("missing_main", "fn helper() {}", "E0207"),
+        ("invalid_return", "fn main() -> Int { return }", "E0208"),
+    ];
+
+    for (name, program, code) in cases {
+        let source = dir.0.join(format!("{name}.prnc"));
+        fs::write(&source, program).expect("test program should be written");
+        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("CLI process should start");
+
+        assert!(!result.status.success(), "{name} must fail compilation");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains(&format!("error[{code}]")),
+            "{name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("\n\n    "),
+            "{name}: source excerpt missing: {stderr}"
+        );
+        assert!(
+            stderr.contains('^'),
+            "{name}: source caret missing: {stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{name}: {stderr}");
+        assert!(!stderr.contains("stack backtrace"), "{name}: {stderr}");
+    }
 }

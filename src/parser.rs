@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::lexer::{Keyword, Operator, Punctuation, Token, TokenKind};
 use crate::source::{SourceFile, SourceSpan};
 
@@ -237,9 +237,11 @@ impl Parser<'_> {
                 }
                 let close = self.current().clone();
                 if close.kind != TokenKind::Operator(Operator::Greater) {
-                    return Err(Diagnostic::at(
+                    return Err(Diagnostic::at_source(
+                        DiagnosticCode::Syntax,
                         "expected '>' after type arguments",
-                        close.location,
+                        self.source,
+                        close.location.span,
                     ));
                 }
                 self.advance();
@@ -404,9 +406,11 @@ impl Parser<'_> {
         };
 
         if type_reference.is_none() && initializer.is_none() {
-            return Err(Diagnostic::at(
+            return Err(Diagnostic::at_source(
+                DiagnosticCode::Syntax,
                 "variable declaration needs a type or an initializer",
-                self.source.location(name.span),
+                self.source,
+                name.span,
             ));
         }
 
@@ -432,9 +436,11 @@ impl Parser<'_> {
         let target_or_expression = self.parse_expression()?;
         if let Some(operator) = self.assignment_operator() {
             if !is_assignment_target(&target_or_expression) {
-                return Err(Diagnostic::at(
+                return Err(Diagnostic::at_source(
+                    DiagnosticCode::Syntax,
                     "invalid assignment target",
-                    self.source.location(target_or_expression.span),
+                    self.source,
+                    target_or_expression.span,
                 ));
             }
 
@@ -509,9 +515,11 @@ impl Parser<'_> {
         self.expect_keyword(Keyword::In, "expected 'in' after loop variable")?;
         let range = self.parse_expression_bp(RANGE_PRECEDENCE, false)?;
         if !is_range_expression(&range) {
-            return Err(Diagnostic::at(
+            return Err(Diagnostic::at_source(
+                DiagnosticCode::Syntax,
                 "expected a range expression after 'in'",
-                self.source.location(range.span),
+                self.source,
+                range.span,
             ));
         }
         let body = self.parse_block()?;
@@ -1071,7 +1079,12 @@ impl Parser<'_> {
     }
 
     fn error_here(&self, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::at(message, self.current().location.clone())
+        Diagnostic::at_source(
+            DiagnosticCode::Syntax,
+            message,
+            self.source,
+            self.current().location.span,
+        )
     }
 }
 
@@ -1486,7 +1499,7 @@ struct Point {
         assert_eq!(result.diagnostics[1].location().unwrap().line, 3);
         assert!(result.diagnostics[0]
             .to_string()
-            .contains("broken.prnc:2:9: error: expected variable name"));
+            .contains("broken.prnc:2:9: error[E0101]: expected variable name"));
         let Declaration::Function(function) = &result.program.declarations[0] else {
             panic!("parser should preserve the enclosing function");
         };

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cli::ParsedBuildArgs;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -34,17 +34,22 @@ impl BuildOptions {
         validate_extension(&parsed.source)?;
 
         let source_path = fs::canonicalize(&parsed.source).map_err(|error| {
-            Diagnostic::new(format!(
-                "could not resolve source file '{}': {error}",
-                parsed.source.display()
-            ))
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                format!("source file '{}' was not found", parsed.source.display())
+            } else {
+                format!(
+                    "could not resolve source file '{}': {error}",
+                    parsed.source.display()
+                )
+            };
+            Diagnostic::coded(DiagnosticCode::SourceFile, message)
         })?;
 
         if !source_path.is_file() {
-            return Err(Diagnostic::new(format!(
-                "source path '{}' is not a file",
-                parsed.source.display()
-            )));
+            return Err(Diagnostic::coded(
+                DiagnosticCode::SourceFile,
+                format!("source path '{}' is not a file", parsed.source.display()),
+            ));
         }
 
         let output_path = match parsed.output {
@@ -84,7 +89,10 @@ fn normalize_output_path(path: &Path) -> Result<PathBuf, Diagnostic> {
     } else {
         std::env::current_dir()
             .map_err(|error| {
-                Diagnostic::new(format!("could not resolve current directory: {error}"))
+                Diagnostic::coded(
+                    DiagnosticCode::BuildOutput,
+                    format!("could not resolve current directory: {error}"),
+                )
             })?
             .join(path)
     };
@@ -111,6 +119,7 @@ fn normalize_output_path(path: &Path) -> Result<PathBuf, Diagnostic> {
 mod tests {
     use super::{BuildOptions, CompilerOptions, Target};
     use crate::cli::ParsedBuildArgs;
+    use crate::diagnostics::DiagnosticCode;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -184,7 +193,8 @@ mod tests {
             output: None,
         })
         .expect_err("missing source should fail");
-        assert!(error.message().contains("could not resolve source file"));
+        assert!(error.message().contains("source file '"));
+        assert_eq!(error.code(), DiagnosticCode::SourceFile);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use crate::ast::{Declaration, ImportDeclaration, Program};
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::SourceFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,9 +63,11 @@ pub fn resolve(source: &SourceFile, program: &Program) -> Result<ResolvedModules
         };
 
         if import.path.len() != 1 {
-            diagnostics.push(Diagnostic::at(
+            diagnostics.push(Diagnostic::at_source(
+                DiagnosticCode::UnknownModule,
                 "nested module imports are not supported in v0.1; import 'io' or 'math'",
-                source.location(import.span),
+                source,
+                import.span,
             ));
             continue;
         }
@@ -97,9 +99,11 @@ fn unknown_module_diagnostic(
         .path
         .first()
         .map_or(import.span, |identifier| identifier.span);
-    Diagnostic::at(
+    Diagnostic::at_source(
+        DiagnosticCode::UnknownModule,
         format!("unknown standard module '{name}'; v0.1 supports 'io' and 'math'"),
-        source.location(span),
+        source,
+        span,
     )
 }
 
@@ -179,7 +183,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0]
             .to_string()
-            .contains("unknown.prnc:1:8: error: unknown standard module 'graphics'"));
+            .contains("unknown.prnc:1:8: error[E0209]: unknown standard module 'graphics'"));
     }
 
     #[test]
@@ -192,7 +196,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0]
             .to_string()
-            .contains("nested.prnc:1:1: error: nested module imports are not supported"));
+            .contains("nested.prnc:1:1: error[E0209]: nested module imports are not supported"));
     }
 
     #[test]
@@ -202,6 +206,6 @@ mod tests {
         assert!(!parsed.diagnostics.is_empty());
         assert!(parsed.diagnostics[0]
             .to_string()
-            .starts_with("traversal.prnc:1:8: error:"));
+            .starts_with("traversal.prnc:1:8: error[E0101]:"));
     }
 }
