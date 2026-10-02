@@ -18,7 +18,7 @@ pub fn compile(source: &SourceFile, options: &BuildOptions) -> Result<(), Diagno
         return Err(DiagnosticBundle::from_diagnostics(analyzed.diagnostics));
     }
 
-    let c_source =
-        codegen::generate_c(&analyzed.typed_program, source).map_err(DiagnosticBundle::from)?;
-    codegen::compile_native(&c_source, options).map_err(DiagnosticBundle::from)
+    let llvm_ir = codegen::generate_llvm_ir(&analyzed.typed_program, source)
+        .map_err(DiagnosticBundle::from)?;
+    codegen::compile_native(&llvm_ir, options).map_err(DiagnosticBundle::from)
 }

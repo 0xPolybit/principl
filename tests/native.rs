@@ -14,7 +14,7 @@ impl TestDir {
     fn new() -> Self {
         let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "princi-native-integration-{}-{id}",
+            "princi native integration-{}-{id}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("temporary directory should be created");
@@ -57,6 +57,37 @@ impl TestDir {
 }
 
 #[cfg(windows)]
+fn native_toolchain_available() -> bool {
+    let clang = std::env::var_os("PRINCI_CLANG").unwrap_or_else(|| "clang".into());
+    let linker = std::env::var_os("PRINCI_CC").unwrap_or_else(|| "gcc".into());
+    Command::new(clang)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+        && Command::new(linker)
+            .arg("-dumpmachine")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .starts_with("x86_64-w64-mingw32")
+            })
+}
+
+#[cfg(windows)]
+fn skip_without_native_toolchain() -> bool {
+    if native_toolchain_available() {
+        false
+    } else {
+        eprintln!(
+            "skipping Windows executable integration check: install LLVM/Clang with IR and X86 support and x86-64 MinGW-w64 GCC"
+        );
+        true
+    }
+}
+
+#[cfg(windows)]
 impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -66,6 +97,9 @@ impl Drop for TestDir {
 #[cfg(windows)]
 #[test]
 fn factorial_recursion_mutation_branches_while_and_integer_ranges_execute() {
+    if skip_without_native_toolchain() {
+        return;
+    }
     let dir = TestDir::new();
     let stdout = dir.build_and_run(
         "procedural.prnc",
@@ -108,6 +142,9 @@ fn main() {
 #[cfg(windows)]
 #[test]
 fn floats_booleans_strings_immutable_bindings_and_functions_execute() {
+    if skip_without_native_toolchain() {
+        return;
+    }
     let dir = TestDir::new();
     let stdout = dir.build_and_run(
         "values.princi",
@@ -148,6 +185,9 @@ fn main() {
 #[cfg(windows)]
 #[test]
 fn integer_main_return_becomes_the_process_exit_status() {
+    if skip_without_native_toolchain() {
+        return;
+    }
     let dir = TestDir::new();
     let executable = dir.build("exit.prnc", "fn main() -> Int { return 17 }");
     let run = Command::new(executable)
@@ -155,4 +195,44 @@ fn integer_main_return_becomes_the_process_exit_status() {
         .expect("generated Windows executable should run");
 
     assert_eq!(run.status.code(), Some(17));
+}
+
+#[cfg(windows)]
+#[test]
+fn short_circuit_boolean_operators_skip_the_unneeded_call() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "short circuit.princi",
+        r#"fn side_effect() -> Bool {
+    print(99)
+    return true
+}
+
+fn main() {
+    let and_result = false && side_effect()
+    let or_result = true || side_effect()
+    print(and_result)
+    print(or_result)
+}"#,
+    );
+    assert_eq!(stdout, "false\ntrue\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn llvm_string_constants_preserve_escapes_and_utf8() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "string escapes.prnc",
+        r#"fn main() {
+    print("quoted: \"file\\name\"\n雪")
+}"#,
+    );
+    assert_eq!(stdout, "quoted: \"file\\name\"\n雪\n");
 }

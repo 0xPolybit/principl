@@ -33,7 +33,7 @@ commands in this version.
 
 ## Compiler architecture
 
-The frontend and native bootstrap path currently run as follows:
+The compiler pipeline is:
 
 ```text
 source
@@ -42,17 +42,18 @@ source
   → AST
   → semantic analysis
   → typed representation
-  → procedural C backend
-  → MinGW GCC (Windows x86-64)
+  → LLVM IR
+  → Windows x86-64 COFF object
+  → MinGW-w64 linker and Windows runtime
   → .exe
 ```
 
-The planned backend boundary is typed representation → LLVM IR → Windows
-object/native code. This checkout has no LLVM command-line toolchain, so the
-v0.1 bootstrap backend emits a small C translation unit and invokes MinGW GCC
-to produce the Windows executable. The backend accepts `TypedProgram` and is
-isolated from the parser and semantic analyzer so the native bridge can be
-replaced without changing source semantics.
+The backend lowers the typed representation to LLVM IR. Clang's LLVM IR reader
+parses and verifies the module while emitting a COFF object for the explicit
+x86_64-w64-windows-gnu target; only after that succeeds does MinGW-w64 GCC link
+the object against the Windows C runtime. LLVM IR and object files are kept in
+a temporary build directory and removed after the build. For development,
+setting PRINCI_KEEP_INTERMEDIATES=1 keeps the files and reports their directory.
 
 The compiler is implemented in Rust. The internal module boundaries are:
 
@@ -66,8 +67,8 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
-| `codegen` | Lower the typed procedural subset to native input and link Windows output. |
-| `runtime` | Provide the primitive print and string helpers required by v0.1. |
+| `codegen` | Lower the typed procedural subset to LLVM IR, verify it, emit a Windows object, and link the executable. |
+| `runtime` | Provide LLVM implementations of primitive printing and string helpers. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
 analysis, procedural native lowering, minimal runtime, and Windows executable
@@ -214,9 +215,12 @@ boundary and details.
 
 ## Installation and development
 
-Install the Rust stable toolchain with Cargo and MinGW-w64 GCC for the
-`x86_64-w64-mingw32` target. `gcc -dumpmachine` should report that target. The
-compiler also accepts `PRINCI_CC` to select a compatible GCC executable.
+Install the Rust stable toolchain with Cargo, LLVM/Clang 15 or newer with LLVM
+IR input support and the X86 backend, and MinGW-w64 GCC for the
+x86_64-w64-mingw32 target. clang --print-targets lists registered targets;
+gcc -dumpmachine should report x86_64-w64-mingw32. The compiler accepts
+PRINCI_CLANG and PRINCI_CC to select those executables explicitly. Missing or
+incompatible toolchain components produce build diagnostics.
 Build or install the CLI from the repository root:
 
 ```text
@@ -239,6 +243,6 @@ princi build hello.prnc -o program.exe
 ```
 
 The CLI validates and normalizes paths, then runs the lexer, parser, semantic
-analysis, and native backend. Frontend and backend errors retain source
-locations; a failed build exits non-zero and does not publish a partial
-executable.
+analysis, LLVM IR verification, Windows x86-64 object generation, and native
+linker. Frontend and backend errors retain source locations; a failed build
+exits non-zero and does not publish a partial executable.
