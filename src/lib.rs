@@ -3,6 +3,7 @@ pub mod cli;
 pub mod codegen;
 pub mod compiler;
 pub mod diagnostics;
+pub mod ffi;
 pub mod lexer;
 pub mod modules;
 pub mod parser;

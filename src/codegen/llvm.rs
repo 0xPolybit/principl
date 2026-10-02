@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
-    ExpressionKind, FunctionDeclaration, InitializerDeclaration, Literal, Statement, StatementKind,
-    TypeDeclaration, UnaryOperator,
+    ExpressionKind, ExternalFunctionDeclaration, FunctionDeclaration, InitializerDeclaration,
+    Literal, Statement, StatementKind, TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
 use crate::diagnostics::Diagnostic;
+use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::semantic::{GlobalSymbol, TypedProgram};
 use crate::source::{SourceFile, SourceSpan};
 use crate::types::{FunctionType, Type};
@@ -275,7 +276,7 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let (functions, classes, structs) = self.supported_declarations()?;
+        let (functions, classes, structs, external_functions) = self.supported_declarations()?;
         let main = functions
             .iter()
             .find(|function| function.name.name == "main")
@@ -329,6 +330,9 @@ impl<'a> IrGenerator<'a> {
         for class in &classes {
             ir.push_str(&self.class_typeinfo(class));
         }
+        for function in &external_functions {
+            ir.push_str(&self.external_declaration(function)?);
+        }
         for (index, value) in self.strings.values.iter().enumerate() {
             ir.push_str(&format!(
                 "@.princi.str.{index} = private unnamed_addr constant [{} x i8] c\"{}\", align 1\n",
@@ -358,12 +362,14 @@ impl<'a> IrGenerator<'a> {
             Vec<&'a FunctionDeclaration>,
             Vec<&'a TypeDeclaration>,
             Vec<&'a TypeDeclaration>,
+            Vec<&'a ExternalFunctionDeclaration>,
         ),
         Diagnostic,
     > {
         let mut functions = Vec::new();
         let mut classes = Vec::new();
         let mut structs = Vec::new();
+        let mut external_functions = Vec::new();
         for declaration in &self.typed.program.declarations {
             match declaration {
                 Declaration::Function(function) => functions.push(function),
@@ -389,9 +395,47 @@ impl<'a> IrGenerator<'a> {
                         return Err(self.error("unresolved module import", span));
                     }
                 }
+                Declaration::ExternBlock(block) => {
+                    if block.abi != "C" {
+                        return Err(self.error(
+                            "only extern \"C\" blocks can reach Windows code generation",
+                            block.abi_span,
+                        ));
+                    }
+                    external_functions.extend(&block.functions);
+                }
             }
         }
-        Ok((functions, classes, structs))
+        Ok((functions, classes, structs, external_functions))
+    }
+
+    fn external_declaration(
+        &self,
+        function: &ExternalFunctionDeclaration,
+    ) -> Result<String, Diagnostic> {
+        let signature = match self.typed.symbols.global(&function.name.name) {
+            Some(GlobalSymbol::ExternalFunction(signature)) => signature,
+            _ => {
+                return Err(self.error(
+                    format!(
+                        "missing FFI signature for external function '{}'",
+                        function.name.name
+                    ),
+                    function.name.span,
+                ));
+            }
+        };
+        let parameters = signature
+            .parameters
+            .iter()
+            .map(|ty| ty.llvm_type())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "declare ccc {} @{}({parameters})\n",
+            signature.return_type.llvm_type(),
+            function.name.name
+        ))
     }
 
     fn struct_layout(&self, structure: &TypeDeclaration) -> Result<String, Diagnostic> {
@@ -1761,6 +1805,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             Some(GlobalSymbol::Function(signature)) => {
                 self.emit_function_call(&identifier.name, &signature, &values, span)
             }
+            Some(GlobalSymbol::ExternalFunction(signature)) => {
+                self.emit_external_function_call(&identifier.name, &signature, &values, span)
+            }
             _ => Err(self.error(
                 format!(
                     "missing semantic signature for function '{}'",
@@ -1894,6 +1941,70 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .join(", ");
         let call = format!("call {return_ty} @{}({arguments})", function_name(name));
         self.emit_call_result(call, signature.return_type.as_ref().clone())
+    }
+
+    fn emit_external_function_call(
+        &mut self,
+        name: &str,
+        signature: &ExternalFunctionType,
+        values: &[IrValue],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        if values.len() != signature.parameters.len() {
+            return Err(self.error(
+                "external function argument count changed after semantic analysis",
+                span,
+            ));
+        }
+
+        let mut arguments = Vec::with_capacity(values.len());
+        for (value, abi_type) in values.iter().zip(&signature.parameters) {
+            if value.ty != abi_type.princi_type() {
+                return Err(self.error(
+                    format!(
+                        "external argument type changed after semantic analysis: expected {}, found {}",
+                        abi_type.princi_type(),
+                        value.ty
+                    ),
+                    span,
+                ));
+            }
+            let operand = match abi_type {
+                CAbiType::Int32 => {
+                    let checked = self.fresh_value();
+                    self.instruction(&format!(
+                        "{checked} = call i32 @princi_rt_ffi_int32_checked(i64 {})",
+                        value.operand
+                    ));
+                    checked
+                }
+                CAbiType::Int64 | CAbiType::Float64 => value.operand.clone(),
+                CAbiType::Void => {
+                    return Err(
+                        self.error("Void is not valid as an external function parameter", span)
+                    );
+                }
+            };
+            arguments.push(format!("{} {operand}", abi_type.llvm_type()));
+        }
+
+        let arguments = arguments.join(", ");
+        if signature.return_type == CAbiType::Int32 {
+            let narrow = self.fresh_value();
+            self.instruction(&format!("{narrow} = call ccc i32 @{name}({arguments})"));
+            let result = self.fresh_value();
+            self.instruction(&format!("{result} = sext i32 {narrow} to i64"));
+            return Ok(IrValue {
+                ty: Type::Int,
+                operand: result,
+            });
+        }
+
+        let call = format!(
+            "call ccc {} @{name}({arguments})",
+            signature.return_type.llvm_type()
+        );
+        self.emit_call_result(call, signature.return_type.princi_type())
     }
 
     fn emit_constructor_call(
@@ -2584,5 +2695,36 @@ fn main() {
         assert!(ir.contains("store i64 %arg0, ptr %field.0"));
         assert!(ir.contains("store i64 4, ptr"));
         assert!(ir.contains("store i64 %v"));
+    }
+
+    #[test]
+    fn emits_c_abi_declarations_and_checked_width_conversions() {
+        let ir = lower(
+            r#"extern "C" {
+    fn abs(value: Int32) -> Int32
+    fn native_count() -> Int64
+    fn native_ratio(value: Float64) -> Float64
+    fn native_reset()
+}
+fn main() {
+    print(abs(-42))
+    print(native_count())
+    print(native_ratio(2.5))
+    native_reset()
+}"#,
+        )
+        .expect("supported C ABI declarations should lower");
+
+        assert!(ir.contains("declare ccc i32 @abs(i32)"));
+        assert!(ir.contains("declare ccc i64 @native_count()"));
+        assert!(ir.contains("declare ccc double @native_ratio(double)"));
+        assert!(ir.contains("declare ccc void @native_reset()"));
+        assert!(ir.contains("princi_rt_ffi_int32_checked(i64"));
+        assert!(ir.contains("call ccc i32 @abs(i32 "));
+        assert!(ir.contains("sext i32 "));
+        assert!(ir.contains("call ccc i64 @native_count()"));
+        assert!(ir.contains("call ccc double @native_ratio(double"));
+        assert!(ir.contains("call ccc void @native_reset()"));
+        assert!(ir.contains("FFI Int32 argument out of range"));
     }
 }

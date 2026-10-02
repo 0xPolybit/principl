@@ -22,6 +22,7 @@ declare void @exit(i32) noreturn
 @.princi.rt.bool.true = private unnamed_addr constant [5 x i8] c"true\00", align 1
 @.princi.rt.bool.false = private unnamed_addr constant [6 x i8] c"false\00", align 1
 @.princi.rt.managed.allocation.error = private unnamed_addr constant [27 x i8] c"managed allocation failed\0A\00", align 1
+@.princi.rt.ffi.int32.error = private unnamed_addr constant [33 x i8] c"FFI Int32 argument out of range\0A\00", align 1
 
 %princi.rt.managed.block = type { ptr }
 @.princi.rt.managed.head = internal global ptr null, align 8
@@ -50,6 +51,23 @@ entry:
   call void @princi_rt_managed_shutdown()
   call void @exit(i32 1)
   unreachable
+}
+
+define internal i32 @princi_rt_ffi_int32_checked(i64 %value) {
+entry:
+  %above.minimum = icmp sge i64 %value, -2147483648
+  %below.maximum = icmp sle i64 %value, 2147483647
+  %in.range = and i1 %above.minimum, %below.maximum
+  br i1 %in.range, label %convert, label %invalid
+invalid:
+  %message = getelementptr inbounds [33 x i8], ptr @.princi.rt.ffi.int32.error, i64 0, i64 0
+  %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @princi_rt_managed_shutdown()
+  call void @exit(i32 1)
+  unreachable
+convert:
+  %narrow = trunc i64 %value to i32
+  ret i32 %narrow
 }
 
 define internal ptr @princi_rt_managed_alloc(i64 %size) {

@@ -81,7 +81,97 @@ impl Parser<'_> {
                 .parse_type_declaration(TypeDeclarationKind::Struct)
                 .map(Declaration::Struct),
             TokenKind::Keyword(Keyword::Import) => self.parse_import().map(Declaration::Import),
-            _ => Err(self.error_here("expected a function, class, struct, or import declaration")),
+            TokenKind::Keyword(Keyword::Extern) => {
+                self.parse_extern_block().map(Declaration::ExternBlock)
+            }
+            _ => Err(self
+                .error_here("expected a function, class, struct, import, or extern declaration")),
+        }
+    }
+
+    fn parse_extern_block(&mut self) -> Result<ExternBlockDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let abi_token = self.current().clone();
+        let abi = match abi_token.kind {
+            TokenKind::StringLiteral(abi) => {
+                self.advance();
+                abi
+            }
+            _ => return Err(self.error_here("expected ABI string after 'extern'")),
+        };
+        self.expect_punctuation(
+            Punctuation::LeftBrace,
+            "expected '{' after extern ABI string",
+        )?;
+
+        let mut functions = Vec::new();
+        while !self.check_punctuation(Punctuation::RightBrace) && !self.at_eof() {
+            let before = self.cursor;
+            if self.check_keyword(Keyword::Fn) {
+                match self.parse_external_function() {
+                    Ok(function) => functions.push(function),
+                    Err(diagnostic) => {
+                        self.diagnostics.push(diagnostic);
+                        self.recover_extern_member(before);
+                    }
+                }
+            } else {
+                self.diagnostics
+                    .push(self.error_here("extern blocks may contain only function declarations"));
+                self.recover_extern_member(before);
+            }
+        }
+
+        let close = self.expect_punctuation(
+            Punctuation::RightBrace,
+            "expected '}' after extern declarations",
+        )?;
+        Ok(ExternBlockDeclaration {
+            abi,
+            abi_span: abi_token.location.span,
+            functions,
+            span: SourceSpan::new(start, close.location.span.end),
+        })
+    }
+
+    fn parse_external_function(&mut self) -> Result<ExternalFunctionDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let name = self.expect_identifier("expected external function name")?;
+        let parameters = self.parse_parameters()?;
+        let return_type = if self.eat_punctuation(Punctuation::Arrow) {
+            Some(self.parse_type_reference("expected external return type after '->'")?)
+        } else {
+            None
+        };
+        self.finish_statement()?;
+        let end = return_type.as_ref().map_or_else(
+            || self.tokens[self.cursor.saturating_sub(1)].location.span.end,
+            |return_type| return_type.span.end,
+        );
+        Ok(ExternalFunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            span: SourceSpan::new(start, end),
+        })
+    }
+
+    fn recover_extern_member(&mut self, before: usize) {
+        let mut advanced = self.cursor > before;
+        if !advanced && !self.at_eof() && !self.check_punctuation(Punctuation::RightBrace) {
+            self.advance();
+            advanced = true;
+        }
+
+        while !self.at_eof() && !self.check_punctuation(Punctuation::RightBrace) {
+            if self.eat_punctuation(Punctuation::Semicolon) {
+                return;
+            }
+            if advanced && self.check_keyword(Keyword::Fn) {
+                return;
+            }
+            self.advance();
+            advanced = true;
         }
     }
 
@@ -859,7 +949,9 @@ impl Parser<'_> {
     fn is_declaration_start(&self) -> bool {
         matches!(
             self.current().kind,
-            TokenKind::Keyword(Keyword::Fn | Keyword::Class | Keyword::Struct | Keyword::Import)
+            TokenKind::Keyword(
+                Keyword::Fn | Keyword::Class | Keyword::Struct | Keyword::Import | Keyword::Extern
+            )
         )
     }
 
@@ -1143,6 +1235,53 @@ mod tests {
             panic!("expected variable declaration");
         };
         assert_eq!(variable.name.span, crate::source::SourceSpan::new(16, 21));
+    }
+
+    #[test]
+    fn parses_c_ffi_declarations_without_function_bodies() {
+        let result = parse_text(
+            "ffi.prnc",
+            "extern \"C\" {\n    fn abs(value: Int32) -> Int32\n    fn get_count() -> Int64;\n    fn reset()\n}\nfn main() {}",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let [Declaration::ExternBlock(block), Declaration::Function(main)] =
+            result.program.declarations.as_slice()
+        else {
+            panic!("expected the extern block followed by main");
+        };
+        assert_eq!(block.abi, "C");
+        assert_eq!(block.functions.len(), 3);
+        assert_eq!(block.functions[0].name.name, "abs");
+        assert_eq!(
+            block.functions[0].parameters[0].type_reference.name,
+            "Int32"
+        );
+        assert_eq!(
+            block.functions[0]
+                .return_type
+                .as_ref()
+                .expect("return type")
+                .name,
+            "Int32"
+        );
+        assert_eq!(block.functions[2].name.name, "reset");
+        assert!(block.functions[2].return_type.is_none());
+        assert_eq!(main.name.name, "main");
+    }
+
+    #[test]
+    fn recovers_from_malformed_c_ffi_members() {
+        let result = parse_text(
+            "ffi-recovery.prnc",
+            "extern \"C\" {\n    fn broken(value: )\n    fn good() -> Int32\n}\nfn main() {}",
+        );
+        assert!(!result.diagnostics.is_empty());
+        assert!(result.diagnostics[0]
+            .to_string()
+            .starts_with("ffi-recovery.prnc:2:"));
+        assert!(result.program.declarations.iter().any(
+            |declaration| matches!(declaration, Declaration::Function(function) if function.name.name == "main")
+        ));
     }
 
     #[test]

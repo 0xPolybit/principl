@@ -221,3 +221,35 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
         "semantic failures must stop before later pipeline stages"
     );
 }
+
+#[test]
+fn ffi_rejects_managed_values_before_native_linking() {
+    let dir = TestDir::new();
+    let source = dir.0.join("unsafe_ffi.prnc");
+    fs::write(
+        &source,
+        "extern \"C\" { fn pass_string(value: String) -> String }\nfn main() {}\n",
+    )
+    .expect("source with an FFI-unsafe signature should be written");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        .arg("build")
+        .arg(&source)
+        .output()
+        .expect("CLI process should start");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("type 'String' is not FFI-safe in v0.1"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error:"),
+        "FFI diagnostic should be user-facing"
+    );
+    assert!(
+        !stderr.contains("clang"),
+        "semantic FFI errors stop before the backend"
+    );
+}

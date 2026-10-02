@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
-    ExpressionKind, FieldDeclaration, FunctionDeclaration, Identifier, InitializerDeclaration,
-    Literal, Program, Statement, StatementKind, TypeDeclaration, TypeDeclarationKind,
-    UnaryOperator, VariableDeclaration,
+    ExpressionKind, ExternBlockDeclaration, FieldDeclaration, FunctionDeclaration, Identifier,
+    InitializerDeclaration, Literal, Program, Statement, StatementKind, TypeDeclaration,
+    TypeDeclarationKind, UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::Diagnostic;
+use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::modules::ResolvedModules;
 use crate::source::{SourceFile, SourceSpan};
 use crate::types::{FunctionType, Type};
@@ -65,6 +66,7 @@ struct VariableSymbol {
 #[derive(Debug, Clone)]
 pub enum GlobalSymbol {
     Function(FunctionType),
+    ExternalFunction(ExternalFunctionType),
     Type(Type),
 }
 
@@ -223,9 +225,112 @@ impl<'a> Analyzer<'a> {
                     );
                     self.accepted_functions.insert(function.span);
                 }
+                Declaration::ExternBlock(block) => self.register_external_block(block),
                 Declaration::Import(_) => {}
             }
         }
+    }
+
+    fn register_external_block(&mut self, block: &ExternBlockDeclaration) {
+        if block.abi != "C" {
+            self.error(
+                format!(
+                    "unsupported extern ABI '{}'; only extern \"C\" is supported in v0.1",
+                    block.abi
+                ),
+                block.abi_span,
+            );
+            return;
+        }
+
+        for function in &block.functions {
+            let name = &function.name.name;
+            if !is_ascii_c_identifier(name) {
+                self.error(
+                    "C external function names must be ASCII C identifiers",
+                    function.name.span,
+                );
+                continue;
+            }
+            if is_reserved_external_symbol(name) {
+                self.error(
+                    format!("external symbol '{name}' conflicts with a compiler/runtime symbol"),
+                    function.name.span,
+                );
+                continue;
+            }
+            if self.globals.contains_key(name) || is_reserved_type_name(name) {
+                self.error(
+                    format!("duplicate or reserved declaration '{name}'"),
+                    function.name.span,
+                );
+                continue;
+            }
+
+            let mut parameter_types = Vec::with_capacity(function.parameters.len());
+            let mut valid = true;
+            for parameter in &function.parameters {
+                match self.resolve_c_abi_type(&parameter.type_reference, false) {
+                    Some(ty) => parameter_types.push(ty),
+                    None => valid = false,
+                }
+            }
+            let return_type = match function.return_type.as_ref() {
+                Some(type_reference) => self.resolve_c_abi_type(type_reference, true),
+                None => Some(CAbiType::Void),
+            };
+            let Some(return_type) = return_type else {
+                continue;
+            };
+
+            if valid {
+                self.globals.insert(
+                    name.clone(),
+                    GlobalSymbol::ExternalFunction(ExternalFunctionType::new(
+                        parameter_types,
+                        return_type,
+                    )),
+                );
+            }
+        }
+    }
+
+    fn resolve_c_abi_type(
+        &mut self,
+        type_reference: &crate::ast::TypeReference,
+        allow_void: bool,
+    ) -> Option<CAbiType> {
+        let ty = match type_reference.name.as_str() {
+            "Int32" => CAbiType::Int32,
+            "Int64" => CAbiType::Int64,
+            "Float64" => CAbiType::Float64,
+            "Void" if allow_void => CAbiType::Void,
+            "Void" => {
+                self.error(
+                    "Void is only valid as an extern function return type",
+                    type_reference.span,
+                );
+                return None;
+            }
+            name => {
+                self.error(
+                    format!(
+                        "type '{name}' is not FFI-safe in v0.1; use Int32, Int64, Float64{}",
+                        if allow_void { ", or Void" } else { "" }
+                    ),
+                    type_reference.span,
+                );
+                return None;
+            }
+        };
+        if !type_reference.arguments.is_empty() {
+            self.error(
+                "generic types are not supported in extern \"C\" declarations",
+                type_reference.span,
+            );
+            return None;
+        }
+        Some(ty)
     }
 
     fn resolve_global_functions(&mut self, program: &Program) {
@@ -438,6 +543,13 @@ impl<'a> Analyzer<'a> {
             "Bool" => Type::Bool,
             "String" => Type::String,
             "Void" => Type::Void,
+            "Int32" | "Int64" | "Float64" => {
+                self.error(
+                    "C ABI types may only be used in extern \"C\" declarations",
+                    type_reference.span,
+                );
+                Type::Error
+            }
             "List" => {
                 if type_reference.arguments.len() != 1 {
                     self.error(
@@ -954,6 +1066,13 @@ impl<'a> Analyzer<'a> {
         }
         match self.globals.get(&identifier.name) {
             Some(GlobalSymbol::Function(signature)) => Type::Function(signature.clone()),
+            Some(GlobalSymbol::ExternalFunction(_)) => {
+                self.error(
+                    "external C functions must be called directly in v0.1",
+                    identifier.span,
+                );
+                Type::Error
+            }
             Some(GlobalSymbol::Type(_)) => {
                 self.error(
                     format!("type '{}' cannot be used as a value", identifier.name),
@@ -1098,6 +1217,18 @@ impl<'a> Analyzer<'a> {
                         return ty;
                     }
                     Some(GlobalSymbol::Function(signature)) => {
+                        self.expression_types
+                            .insert(callee.span, Type::Function(signature.clone()));
+                        self.check_call_arguments(
+                            &identifier.name,
+                            &signature,
+                            arguments,
+                            call_span,
+                        );
+                        return *signature.return_type;
+                    }
+                    Some(GlobalSymbol::ExternalFunction(external)) => {
+                        let signature = external.princi_signature();
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(
@@ -1366,7 +1497,33 @@ impl<'a> Analyzer<'a> {
 }
 
 fn is_reserved_type_name(name: &str) -> bool {
-    matches!(name, "Int" | "Float" | "Bool" | "String" | "Void" | "List")
+    matches!(
+        name,
+        "Int" | "Float" | "Bool" | "String" | "Void" | "List" | "Int32" | "Int64" | "Float64"
+    )
+}
+
+fn is_ascii_c_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    matches!(characters.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && characters.all(|character| matches!(character, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
+}
+
+fn is_reserved_external_symbol(name: &str) -> bool {
+    name == "main"
+        || name.starts_with("princi_")
+        || matches!(
+            name,
+            "printf"
+                | "putchar"
+                | "strcmp"
+                | "strlen"
+                | "malloc"
+                | "free"
+                | "memcpy"
+                | "memset"
+                | "exit"
+        )
 }
 
 fn is_list_literal(expression: &Expression) -> bool {
@@ -1973,5 +2130,94 @@ fn main() {
             "for loop range requires Int bounds, found Float"
         ));
         assert!(has_message(&result, "expression expects Float, found Int"));
+    }
+
+    #[test]
+    fn resolves_limited_c_abi_signatures_to_princi_call_types() {
+        let result = analyze_text(
+            r#"extern "C" {
+    fn abs(value: Int32) -> Int32
+    fn native_count() -> Int64
+    fn native_ratio(value: Float64) -> Float64
+    fn native_reset()
+}
+fn main() {
+    print(abs(-17))
+    print(native_count())
+    print(native_ratio(2.5))
+    native_reset()
+}"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        assert!(matches!(
+            result.typed_program.symbols.global("abs"),
+            Some(super::GlobalSymbol::ExternalFunction(signature))
+                if signature.parameters == [crate::ffi::CAbiType::Int32]
+                    && signature.return_type == crate::ffi::CAbiType::Int32
+                    && signature.princi_signature().parameters == [Type::Int]
+                    && signature.princi_signature().return_type.as_ref() == &Type::Int
+        ));
+        assert!(matches!(
+            result.typed_program.symbols.global("native_ratio"),
+            Some(super::GlobalSymbol::ExternalFunction(signature))
+                if signature.parameters == [crate::ffi::CAbiType::Float64]
+                    && signature.princi_signature().parameters == [Type::Float]
+        ));
+    }
+
+    #[test]
+    fn rejects_managed_and_nonprimitive_ffi_types_and_non_c_abis() {
+        let result = analyze_text(
+            r#"class User {}
+extern "system" { fn wrong_abi(value: Int32) -> Int32 }
+extern "C" {
+    fn string_input(value: String)
+    fn list_input(value: List<Int>)
+    fn object_input(value: User)
+    fn boolean_output() -> Bool
+    fn void_input(value: Void)
+}
+fn ordinary(value: Int32) {}
+fn main() {}"#,
+        );
+
+        assert!(has_message(
+            &result,
+            "only extern \"C\" is supported in v0.1"
+        ));
+        assert!(has_message(&result, "type 'String' is not FFI-safe"));
+        assert!(has_message(&result, "type 'List' is not FFI-safe"));
+        assert!(has_message(&result, "type 'User' is not FFI-safe"));
+        assert!(has_message(&result, "type 'Bool' is not FFI-safe"));
+        assert!(has_message(
+            &result,
+            "Void is only valid as an extern function return type"
+        ));
+        assert!(has_message(
+            &result,
+            "C ABI types may only be used in extern \"C\" declarations"
+        ));
+        assert!(result.diagnostics.iter().all(|diagnostic| {
+            diagnostic
+                .location()
+                .is_some_and(|location| location.span.end > location.span.start)
+        }));
+    }
+
+    #[test]
+    fn external_c_functions_cannot_escape_as_function_values() {
+        let result = analyze_text(
+            r#"extern "C" { fn abs(value: Int32) -> Int32 }
+fn main() {
+    let alias = abs
+    alias(-1)
+}"#,
+        );
+
+        assert!(has_message(
+            &result,
+            "external C functions must be called directly in v0.1"
+        ));
     }
 }

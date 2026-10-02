@@ -36,6 +36,7 @@ pub enum Keyword {
     Init,
     SelfValue,
     Import,
+    Extern,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,7 @@ impl<'a> Lexer<'a> {
             "init" => TokenKind::Keyword(Keyword::Init),
             "self" => TokenKind::Keyword(Keyword::SelfValue),
             "import" => TokenKind::Keyword(Keyword::Import),
+            "extern" => TokenKind::Keyword(Keyword::Extern),
             "true" => TokenKind::BooleanLiteral(true),
             "false" => TokenKind::BooleanLiteral(false),
             _ => TokenKind::Identifier(text.to_owned()),
@@ -411,7 +413,7 @@ mod tests {
     #[test]
     fn recognizes_keywords_and_keeps_other_words_as_identifiers() {
         let tokens = kinds(
-            "fn return let var if else while for in class struct init self import true false function",
+            "fn return let var if else while for in class struct init self import extern true false function",
         );
 
         assert_eq!(
@@ -431,6 +433,7 @@ mod tests {
                 TokenKind::Keyword(Keyword::Init),
                 TokenKind::Keyword(Keyword::SelfValue),
                 TokenKind::Keyword(Keyword::Import),
+                TokenKind::Keyword(Keyword::Extern),
                 TokenKind::BooleanLiteral(true),
                 TokenKind::BooleanLiteral(false),
                 TokenKind::Identifier("function".to_owned()),

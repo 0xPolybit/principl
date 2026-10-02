@@ -551,3 +551,47 @@ fn main() {
     );
     assert_eq!(stdout, "10\n9000\n9000\n1\n10\nmanaged memory!\n");
 }
+
+#[cfg(windows)]
+#[test]
+fn calls_windows_c_runtime_function_through_extern_c() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "c ffi abs.prnc",
+        r#"extern "C" {
+    fn abs(value: Int32) -> Int32
+}
+
+fn main() {
+    println(abs(-42))
+}"#,
+    );
+    assert_eq!(stdout, "42\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_int32_out_of_range_before_crossing_the_c_abi() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let executable = dir.build(
+        "c ffi int32 range.prnc",
+        r#"extern "C" {
+    fn abs(value: Int32) -> Int32
+}
+
+fn main() {
+    print(abs(2147483648))
+}"#,
+    );
+    let run = Command::new(executable)
+        .output()
+        .expect("generated Windows executable should run");
+    assert_eq!(run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&run.stdout).contains("FFI Int32 argument out of range"));
+}

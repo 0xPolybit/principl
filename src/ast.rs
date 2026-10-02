@@ -12,6 +12,7 @@ pub enum Declaration {
     Class(TypeDeclaration),
     Struct(TypeDeclaration),
     Import(ImportDeclaration),
+    ExternBlock(ExternBlockDeclaration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,22 @@ pub struct TypeReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDeclaration {
     pub path: Vec<Identifier>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternBlockDeclaration {
+    pub abi: String,
+    pub abi_span: SourceSpan,
+    pub functions: Vec<ExternalFunctionDeclaration>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFunctionDeclaration {
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<TypeReference>,
     pub span: SourceSpan,
 }
 

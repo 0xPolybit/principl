@@ -67,21 +67,22 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `parser` | Parse tokens into the syntax tree. |
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `modules` | Resolve imports against the fixed v0.1 standard-module registry. |
+| `ffi` | Keep C ABI types and signatures separate from Princi value types. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
 | `codegen` | Lower typed procedural, class, struct, and list subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
 | `runtime` | Route source built-ins and managed allocation through private Windows runtime APIs. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, built-in module
-resolution, type system, semantic analysis, procedural/class/struct/list
-lowering, minimal runtime, and Windows executable generation are implemented.
+resolution, restricted C FFI, type system, semantic analysis,
+procedural/class/struct/list lowering, minimal runtime, and Windows executable generation are implemented.
 The v0.1 module behavior is deliberately limited to the `io` and `math`
 standard-module names, described below.
 
 ## v0.1 syntax
 
-The parser accepts top-level imports, `fn` declarations, `class`
-declarations, and `struct` declarations. Functions and methods have typed
+The parser accepts top-level imports, `fn` declarations, `class` and `struct`
+declarations, and `extern "C"` blocks. Functions and methods have typed
 parameters, an optional `-> ReturnType`, and a block. Classes may contain typed
 fields, methods, and one `init` constructor. Structs contain typed fields only;
 struct methods and `init` declarations are rejected by v0.1 semantic analysis.
@@ -243,6 +244,37 @@ module dependency graph, so ambiguity and import cycles cannot arise. The
 `.prnc` and `.princi` suffixes share the same canonical module identities. See
 [the import example](examples/modules.prnc).
 
+## Limited C interoperability
+
+An `extern "C"` block declares unmangled external C symbols:
+
+```princi
+extern "C" {
+    fn abs(value: Int32) -> Int32
+}
+
+fn main() {
+    println(abs(-42))
+}
+```
+
+v0.1 permits only `Int32`, `Int64`, and `Float64` in external parameter and
+return signatures. `Void` is allowed only as a return type; omitting `->` also
+means `Void`. `Int32` and `Int64` appear as Princi `Int` at call sites, and
+`Float64` appears as Princi `Float`. `Int32` arguments are range-checked before
+the call and `Int32` results are sign-extended. `Int64` is a signed 64-bit
+integer and `Float64` is a C `double`. These ABI types are valid only inside
+`extern "C"` declarations.
+
+The backend emits LLVM's `ccc` convention for declarations and calls; on the
+Windows x86-64 target this selects that target's C ABI. Calls are direct and
+non-variadic, and the external symbol must be available to the normal Windows
+link step (for example, through the C runtime). v0.1 does not provide extra
+library/object linker flags. `Bool`, `String`, classes, structs, lists, and
+other managed values cannot cross the boundary. Raw pointers, `repr(C)`
+aggregates, callbacks, C++/non-C conventions, manual allocation, and pinning
+remain out of scope. The type and ABI boundary lives in [`src/ffi.rs`](src/ffi.rs).
+
 ## Classes
 
 Classes declare typed instance fields, one optional `init` constructor, and
@@ -370,7 +402,7 @@ continuing with letters, digits, or `_`; decimal integer and floating-point
 literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
 `\r`, `\t`, and `\0` escapes; and `true`/`false` boolean literals. It recognizes
 the keywords `fn`, `return`, `let`, `var`, `if`, `else`, `while`, `for`, `in`,
-`class`, `struct`, `init`, `self`, and `import`.
+`class`, `struct`, `init`, `self`, `import`, and `extern`.
 
 Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
 `>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
