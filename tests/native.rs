@@ -127,13 +127,13 @@ fn main() {
     }
     if result == 123 {
         let result = 7
-        print(result)
+        println(result)
     } else {
         let result = 0
-        print(result)
+        println(result)
     }
-    print(result)
-    print(sum_to(4))
+    println(result)
+    println(sum_to(4))
 }"#,
     );
     assert_eq!(stdout, "7\n123\n6\n");
@@ -161,19 +161,19 @@ fn main() {
     let ready: Bool = 1.5 < measurement && true
     let greeting = greet("Mira")
     if ready {
-        print(greeting)
+        println(greeting)
     } else {
-        print("not ready")
+        println("not ready")
     }
-    print(measurement)
-    print(ready)
-    print(!ready || false)
-    print(measurement > 1.0 && measurement != 0.0)
+    println(measurement)
+    println(ready)
+    println(!ready || false)
+    println(measurement > 1.0 && measurement != 0.0)
     var count: Int = 1
     count *= 4
-    print(count)
-    print(9223372036854775807 + 1)
-    print(-9223372036854775808)
+    println(count)
+    println(9223372036854775807 + 1)
+    println(-9223372036854775808)
 }"#,
     );
     assert_eq!(
@@ -207,15 +207,15 @@ fn short_circuit_boolean_operators_skip_the_unneeded_call() {
     let stdout = dir.build_and_run(
         "short circuit.princi",
         r#"fn side_effect() -> Bool {
-    print(99)
+    println(99)
     return true
 }
 
 fn main() {
     let and_result = false && side_effect()
     let or_result = true || side_effect()
-    print(and_result)
-    print(or_result)
+    println(and_result)
+    println(or_result)
 }"#,
     );
     assert_eq!(stdout, "false\ntrue\n");
@@ -231,8 +231,27 @@ fn llvm_string_constants_preserve_escapes_and_utf8() {
     let stdout = dir.build_and_run(
         "string escapes.prnc",
         r#"fn main() {
-    print("quoted: \"file\\name\"\n雪")
+    println("quoted: \"file\\name\"\n雪")
 }"#,
     );
     assert_eq!(stdout, "quoted: \"file\\name\"\n雪\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn print_and_println_have_distinct_newline_behavior() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "print behavior.prnc",
+        r#"fn main() {
+    print("value:")
+    print(42)
+    println("!")
+    println(7)
+}"#,
+    );
+    assert_eq!(stdout, "value:42!\n7\n");
 }

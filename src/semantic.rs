@@ -125,7 +125,16 @@ impl<'a> Analyzer<'a> {
         let print_signature = FunctionType::new(vec![Type::Any], Type::Void);
         Self {
             source,
-            globals: HashMap::from([("print".to_owned(), GlobalSymbol::Function(print_signature))]),
+            globals: HashMap::from([
+                (
+                    "print".to_owned(),
+                    GlobalSymbol::Function(print_signature.clone()),
+                ),
+                (
+                    "println".to_owned(),
+                    GlobalSymbol::Function(print_signature),
+                ),
+            ]),
             types: HashMap::new(),
             scopes: Vec::new(),
             accepted_type_declarations: HashSet::new(),
@@ -1337,6 +1346,19 @@ mod tests {
                 .variable_type(variable(&result, "main", 3)),
             Some(&Type::Float)
         );
+    }
+
+    #[test]
+    fn registers_generic_print_and_println_builtins_for_primitive_values() {
+        let result = analyze_text(
+            r#"fn main() {
+    print(1)
+    println(1.5)
+    print(true)
+    println("text")
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
     }
 
     #[test]

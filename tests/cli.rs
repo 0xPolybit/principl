@@ -63,7 +63,7 @@ fn both_extensions_build_native_executables() {
 
     for name in ["hello.prnc", "hello.princi"] {
         let source = dir.source(name);
-        fs::write(&source, "fn main() { print(1 + 2 * 3) }")
+        fs::write(&source, "fn main() { println(1 + 2 * 3) }")
             .expect("valid Princi program should be written");
         let output = source.with_extension("exe");
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))

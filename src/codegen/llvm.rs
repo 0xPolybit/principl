@@ -310,7 +310,7 @@ impl<'a> IrGenerator<'a> {
 
         let mut ir = format!(
             "; Princi v0.1 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
-            crate::runtime::LLVM_RUNTIME
+            crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
         for (index, value) in self.strings.values.iter().enumerate() {
             ir.push_str(&format!(
@@ -327,7 +327,10 @@ impl<'a> IrGenerator<'a> {
             ir.push_str(&definition);
             ir.push('\n');
         }
-        ir.push_str(&self.entry_wrapper(&main_return, main)?);
+        ir.push_str(&crate::runtime::windows_x86_64::entry_point(
+            &function_name("main"),
+            main_return == Type::Int,
+        ));
         Ok(ir)
     }
 
@@ -373,23 +376,6 @@ impl<'a> IrGenerator<'a> {
                 function.name.span,
             )),
         }
-    }
-
-    fn entry_wrapper(
-        &self,
-        main_return: &Type,
-        main: &FunctionDeclaration,
-    ) -> Result<String, Diagnostic> {
-        let function_return = llvm_type(main_return, main.name.span, self.source)?;
-        let function = function_name("main");
-        let body = if *main_return == Type::Int {
-            format!(
-                "  %princi.exit = call {function_return} @{function}()\n  %princi.exit32 = trunc i64 %princi.exit to i32\n  ret i32 %princi.exit32\n"
-            )
-        } else {
-            format!("  call void @{function}()\n  ret i32 0\n")
-        };
-        Ok(format!("define i32 @main() {{\nentry:\n{body}}}\n"))
     }
 
     fn error(&self, message: impl Into<String>, span: SourceSpan) -> Diagnostic {
@@ -631,7 +617,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                         (AssignmentOperator::AddAssign, Type::String) => {
                             let combined = self.fresh_value();
                             self.instruction(&format!(
-                                "{combined} = call ptr @princi_concat(ptr {previous}, ptr {})",
+                                "{combined} = call ptr @{}(ptr {previous}, ptr {})",
+                                crate::runtime::windows_x86_64::string_concat_function(),
                                 value.operand
                             ));
                             combined
@@ -946,19 +933,27 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .iter()
             .map(|argument| self.emit_expression(argument))
             .collect::<Result<Vec<_>, _>>()?;
-        if identifier.name == "print" {
+        if identifier.name == "print" || identifier.name == "println" {
             if values.len() != 1 {
-                return Err(self.error("print expects exactly one argument", span));
+                return Err(self.error(
+                    format!("{} expects exactly one argument", identifier.name),
+                    span,
+                ));
             }
-            let (runtime, expected) = match &values[0].ty {
-                Type::Int => ("princi_print_int", "i64"),
-                Type::Float => ("princi_print_float", "double"),
-                Type::Bool => ("princi_print_bool", "i1"),
-                Type::String => ("princi_print_string", "ptr"),
-                ty => {
-                    return Err(self.error(format!("print cannot lower values of type {ty}"), span))
-                }
-            };
+            let runtime = crate::runtime::windows_x86_64::print_function(
+                &values[0].ty,
+                identifier.name == "println",
+            )
+            .ok_or_else(|| {
+                self.error(
+                    format!(
+                        "{} cannot lower values of type {}",
+                        identifier.name, values[0].ty
+                    ),
+                    span,
+                )
+            })?;
+            let expected = llvm_type(&values[0].ty, span, self.source)?;
             self.instruction(&format!(
                 "call void @{runtime}({expected} {})",
                 values[0].operand
@@ -1034,8 +1029,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         if operator == BinaryOperator::Add && operand_type == Type::String {
             let result = self.fresh_value();
             self.instruction(&format!(
-                "{result} = call ptr @princi_concat(ptr {}, ptr {})",
-                left_value.operand, right_value.operand
+                "{result} = call ptr @{}(ptr {}, ptr {})",
+                crate::runtime::windows_x86_64::string_concat_function(),
+                left_value.operand,
+                right_value.operand
             ));
             return Ok(IrValue {
                 ty: Type::String,
@@ -1047,16 +1044,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         {
             let comparison = self.fresh_value();
             self.instruction(&format!(
-                "{comparison} = call i32 @strcmp(ptr {}, ptr {})",
-                left_value.operand, right_value.operand
+                "{comparison} = call i1 @{}(ptr {}, ptr {})",
+                crate::runtime::windows_x86_64::string_equal_function(),
+                left_value.operand,
+                right_value.operand
             ));
-            let result = self.fresh_value();
-            let predicate = if operator == BinaryOperator::Equal {
-                "eq"
+            let result = if operator == BinaryOperator::Equal {
+                comparison
             } else {
-                "ne"
+                let result = self.fresh_value();
+                self.instruction(&format!("{result} = xor i1 {comparison}, true"));
+                result
             };
-            self.instruction(&format!("{result} = icmp {predicate} i32 {comparison}, 0"));
             return Ok(IrValue {
                 ty: Type::Bool,
                 operand: result,
@@ -1316,7 +1315,7 @@ mod tests {
         assert!(ir.contains("call i64 @princi_fn_666163746f7269616c"));
         assert!(ir.contains("icmp sle i64"));
         assert!(ir.contains("define i32 @main()"));
-        assert!(ir.contains("call void @princi_print_int"));
+        assert!(ir.contains("call void @princi_rt_print_int"));
     }
 
     #[test]
@@ -1334,13 +1333,31 @@ mod tests {
         .expect("primitive program should lower");
 
         assert!(ir.contains("fadd") || ir.contains("fmul double"));
-        assert!(ir.contains("call ptr @princi_concat"));
-        assert!(ir.contains("call i32 @strcmp"));
+        assert!(ir.contains("call ptr @princi_rt_string_concat"));
+        assert!(ir.contains("call i1 @princi_rt_string_equal"));
         assert!(ir.contains("phi i1"));
-        assert!(ir.contains("@princi_print_string"));
-        assert!(ir.contains("@princi_print_float"));
-        assert!(ir.contains("@princi_print_bool"));
+        assert!(ir.contains("@princi_rt_print_string"));
+        assert!(ir.contains("@princi_rt_print_float"));
+        assert!(ir.contains("@princi_rt_print_bool"));
         assert!(ir.contains("@.princi.str."));
+    }
+
+    #[test]
+    fn resolves_generic_print_builtins_to_typed_runtime_abi_calls() {
+        let ir = lower(
+            r#"fn main() {
+    print(1)
+    println(1.5)
+    print(true)
+    println("text")
+}"#,
+        )
+        .expect("generic print built-ins should lower");
+
+        assert!(ir.contains("call void @princi_rt_print_int(i64 1)"));
+        assert!(ir.contains("call void @princi_rt_println_float(double 1.5)"));
+        assert!(ir.contains("call void @princi_rt_print_bool(i1 true)"));
+        assert!(ir.contains("call void @princi_rt_println_string(ptr"));
     }
 
     #[test]

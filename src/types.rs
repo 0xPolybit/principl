@@ -36,8 +36,8 @@ impl FunctionType {
 
 impl Type {
     /// Whether a value of `actual` can be used where this type is expected.
-    /// `Any` is currently limited to the built-in print parameter and the
-    /// element type of a bare `List` annotation.
+    /// Any is currently limited to built-in print parameters and the element
+    /// type of a bare List annotation.
     pub fn accepts(&self, actual: &Type) -> bool {
         match (self, actual) {
             (Type::Error, _) | (_, Type::Error) => true,

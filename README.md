@@ -68,7 +68,7 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
 | `codegen` | Lower the typed procedural subset to LLVM IR, verify it, emit a Windows object, and link the executable. |
-| `runtime` | Provide LLVM implementations of primitive printing and string helpers. |
+| `runtime` | Route source built-ins through a private ABI and provide Windows runtime helpers. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
 analysis, procedural native lowering, minimal runtime, and Windows executable
@@ -119,8 +119,9 @@ integers. Equality operators accept matching primitive types. `&&`, `||`, and
 An omitted function or method return type means `Void`. A `Void` function may
 use `return` without a value; non-`Void` returns must provide a matching value.
 Function and method calls require the declared argument count and matching
-argument types. `print(value)` is a built-in that accepts one non-`Void` value
-and returns `Void`.
+argument types. The generic built-ins `print(value)` and `println(value)`
+accept one non-`Void` primitive value and return `Void`; the compiler selects
+the runtime implementation from the checked argument type.
 
 `var` declares a mutable binding and `let` declares an immutable binding.
 `let` requires an initializer; `var` may declare only an explicit type and
@@ -156,10 +157,10 @@ declaration order.
 The backend generates native code for `Int`, `Float`, `Bool`, and `String`;
 local `let`/`var` bindings and assignment; arithmetic, comparison, and boolean
 expressions; `if`/`else`, `while`, and integer `for` loops; functions,
-parameters, returns, calls, recursion, and `print`. Integer range loops use an
-inclusive start and exclusive end (`0..count`). Numeric types do not implicitly
-convert. `main` must take no parameters and return `Void` or `Int`; `Void`
-functions return process status zero.
+parameters, returns, calls, recursion, `print`, and `println`. Integer range
+loops use an inclusive start and exclusive end (`0..count`). Numeric types do
+not implicitly convert. `main` must take no parameters and return `Void` or
+`Int`; `Void` functions return process status zero.
 
 ```princi
 fn factorial(n: Int) -> Int {
@@ -171,13 +172,28 @@ fn factorial(n: Int) -> Int {
 
 fn main() {
     let result = factorial(5)
-    print(result)
+    println(result)
 }
 ```
 
 This program prints `120`. The parser also accepts classes, structs, lists,
 indexing, member access, and imports, but those features are not part of the
 native v0.1 subset and do not yet produce executables.
+
+## Built-in runtime
+
+`print(value)` writes an `Int`, `Float`, `Bool`, or `String` without a
+trailing line break. `println(value)` writes the same primitive values followed
+by a line break. The type-specific `princi_rt_*` symbols are compiler-internal;
+they are not callable from Princi source.
+
+String literals use immutable, NUL-terminated UTF-8 storage in the generated
+module. String concatenation allocates a new buffer through the Windows C
+runtime; buffers live until process termination. The generated Windows entry
+wrapper calls Princi `main` and passes its `Int` result to the MinGW C runtime
+as the process exit code, or returns zero for a `Void` entry point. The runtime
+is embedded into generated LLVM IR and linked automatically whenever the
+`princi build` command runs.
 
 ## Supported lexical syntax
 
