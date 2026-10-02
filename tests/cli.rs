@@ -54,9 +54,11 @@ impl Drop for TestDir {
 #[cfg(windows)]
 fn both_extensions_build_native_executables() {
     if !native_toolchain_available() {
-        eprintln!(
-            "skipping Windows executable integration check: install LLVM/Clang with IR and X86 support and x86-64 MinGW-w64 GCC"
-        );
+        let reason = "install LLVM/Clang with IR and X86 support and x86-64 MinGW-w64 GCC";
+        if std::env::var_os("PRINCI_REQUIRE_NATIVE_TESTS").is_some() {
+            panic!("{reason}; PRINCI_REQUIRE_NATIVE_TESTS is set");
+        }
+        eprintln!("skipping Windows executable integration check: {reason}");
         return;
     }
     let dir = TestDir::new();
@@ -126,6 +128,9 @@ fn missing_mingw_linker_has_an_actionable_diagnostic() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
+        if std::env::var_os("PRINCI_REQUIRE_NATIVE_TESTS").is_some() {
+            panic!("LLVM/Clang is required; PRINCI_REQUIRE_NATIVE_TESTS is set");
+        }
         eprintln!("skipping linker diagnostic check because LLVM/Clang is unavailable");
         return;
     }

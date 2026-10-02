@@ -1,0 +1,5 @@
+extern "C" {
+    fn pass_string(value: String) -> String
+}
+
+fn main() {}

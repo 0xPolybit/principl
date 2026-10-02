@@ -1,0 +1,3 @@
+fn consume(value: Missing) {}
+
+fn main() {}

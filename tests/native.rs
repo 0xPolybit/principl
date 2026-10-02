@@ -80,9 +80,11 @@ fn skip_without_native_toolchain() -> bool {
     if native_toolchain_available() {
         false
     } else {
-        eprintln!(
-            "skipping Windows executable integration check: install LLVM/Clang with IR and X86 support and x86-64 MinGW-w64 GCC"
-        );
+        let reason = "install LLVM/Clang with IR and X86 support and x86-64 MinGW-w64 GCC";
+        if std::env::var_os("PRINCI_REQUIRE_NATIVE_TESTS").is_some() {
+            panic!("{reason}; PRINCI_REQUIRE_NATIVE_TESTS is set");
+        }
+        eprintln!("skipping Windows executable integration check: {reason}");
         true
     }
 }

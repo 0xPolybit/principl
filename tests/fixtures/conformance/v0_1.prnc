@@ -1,0 +1,90 @@
+import io
+import math
+
+extern "C" {
+    fn abs(value: Int32) -> Int32
+}
+
+struct Point {
+    x: Float
+    y: Float
+}
+
+class User {
+    name: String
+    age: Int
+
+    init(name: String, age: Int) {
+        self.name = name
+        self.age = age
+    }
+
+    fn birthday() {
+        self.age += 1
+    }
+
+    fn getAge() -> Int {
+        return self.age
+    }
+}
+
+fn factorial(n: Int) -> Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn distanceSquared(point: Point) -> Float {
+    return point.x * point.x + point.y * point.y
+}
+
+fn main() -> Int {
+    let greeting = "Hello, " + "Princi"
+    println(greeting)
+    println(factorial(5))
+
+    var point = Point(3.0, 4.0)
+    point.x += 1.0
+    println(distanceSquared(point))
+
+    var user = User("Ada", 20)
+    user.birthday()
+    println(user.getAge())
+
+    var total = 0
+    for index in 0..4 {
+        total += index
+    }
+    while total < 10 {
+        total += 1
+    }
+    println(total)
+
+    var values: List<Int> = [1, 2]
+    values[1] = 4
+    values.add(5)
+    println(values.length)
+    println(values[1])
+    println(values[2])
+
+    let inferred = [7, 8, 9]
+    println(inferred.length)
+
+    let ready = total == 10 && values[0] < values[1] || false
+    println(ready)
+    if ready {
+        println("ready")
+    } else {
+        println("not ready")
+    }
+    if false {
+        println("unreachable")
+    } else {
+        println("else")
+    }
+
+    println(2.5)
+    println(abs(-9))
+    return 17
+}

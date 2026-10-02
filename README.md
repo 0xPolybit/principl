@@ -450,6 +450,25 @@ Run the automated tests with:
 cargo test
 ```
 
+The suite includes lexer/parser/semantic/LLVM unit tests, CLI diagnostics, and
+fixture-driven conformance checks under `tests/fixtures`. On Windows, native
+integration tests compile generated `.exe` files, launch them, and check their
+stdout, stderr, and exit status. Those tests require LLVM/Clang with X86 support
+and x86-64 MinGW-w64 GCC. If either tool is unavailable, native integration
+tests emit a skip note (visible with `cargo test -- --nocapture`) while the
+compiler and diagnostic tests continue to run. To make a missing native
+toolchain fail the test run instead of allowing those skips, set
+`PRINCI_REQUIRE_NATIVE_TESTS` before running Cargo:
+
+```powershell
+$env:PRINCI_REQUIRE_NATIVE_TESTS = "1"
+cargo test
+```
+
+The conformance fixtures include matching `.prnc` and `.princi` programs and
+invalid programs that verify diagnostics and confirm failed builds do not
+produce executables.
+
 The build command accepts either source extension:
 
 ```text
