@@ -147,8 +147,9 @@ generated programs terminate with a runtime diagnostic for negative or
 out-of-range indexes. Lists are heap-backed reference values: copying a list
 or passing it to a function shares the same contents. `let` prevents replacing
 the binding, but allows changing the list contents with indexing or `.add`.
-There is no `remove`, iterator, comprehension, or collection API beyond these
-operations, and lists themselves are not printable with `print`.
+There is no `remove`, `Map`, `Set`, `Queue`, or `Deque`, and no comprehensions,
+iterators, or higher-order collection functions. Lists themselves are not
+printable with `print`.
 There is no deallocation operation; list storage remains allocated until the
 process exits.
 
