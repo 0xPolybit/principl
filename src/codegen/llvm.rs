@@ -381,9 +381,13 @@ impl<'a> IrGenerator<'a> {
                 }
                 Declaration::Import(item) => {
                     let span = item.path.first().map_or(item.span, |name| name.span);
-                    return Err(
-                        self.error("imports are not supported by the v0.1 native backend", span)
-                    );
+                    let resolved_module = match item.path.as_slice() {
+                        [name] => crate::modules::StandardModule::from_name(&name.name),
+                        _ => None,
+                    };
+                    if resolved_module.map_or(true, |module| !self.typed.modules.contains(module)) {
+                        return Err(self.error("unresolved module import", span));
+                    }
                 }
             }
         }

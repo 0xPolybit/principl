@@ -7,6 +7,7 @@ use crate::ast::{
     UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::Diagnostic;
+use crate::modules::ResolvedModules;
 use crate::source::{SourceFile, SourceSpan};
 use crate::types::{FunctionType, Type};
 
@@ -14,6 +15,7 @@ use crate::types::{FunctionType, Type};
 pub struct TypedProgram {
     pub program: Program,
     pub symbols: SymbolTable,
+    pub modules: ResolvedModules,
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
 }
@@ -43,7 +45,15 @@ pub struct SemanticResult {
 }
 
 pub fn analyze(source: &SourceFile, program: &Program) -> SemanticResult {
-    Analyzer::new(source).run(program)
+    analyze_with_modules(source, program, &ResolvedModules::default())
+}
+
+pub fn analyze_with_modules(
+    source: &SourceFile,
+    program: &Program,
+    modules: &ResolvedModules,
+) -> SemanticResult {
+    Analyzer::new(source, modules).run(program)
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +114,7 @@ struct Scope {
 
 struct Analyzer<'a> {
     source: &'a SourceFile,
+    modules: ResolvedModules,
     globals: HashMap<String, GlobalSymbol>,
     types: HashMap<String, TypeSymbols>,
     scopes: Vec<Scope>,
@@ -121,10 +132,11 @@ struct Analyzer<'a> {
 }
 
 impl<'a> Analyzer<'a> {
-    fn new(source: &'a SourceFile) -> Self {
+    fn new(source: &'a SourceFile, modules: &ResolvedModules) -> Self {
         let print_signature = FunctionType::new(vec![Type::Any], Type::Void);
         Self {
             source,
+            modules: modules.clone(),
             globals: HashMap::from([
                 (
                     "print".to_owned(),
@@ -165,6 +177,7 @@ impl<'a> Analyzer<'a> {
                     globals: self.globals,
                     types: self.types,
                 },
+                modules: self.modules.clone(),
                 expression_types: self.expression_types,
                 variable_types: self.variable_types,
             },

@@ -2,6 +2,7 @@ use crate::codegen;
 use crate::compiler::BuildOptions;
 use crate::diagnostics::DiagnosticBundle;
 use crate::lexer;
+use crate::modules;
 use crate::parser;
 use crate::semantic;
 use crate::source::SourceFile;
@@ -13,7 +14,9 @@ pub fn compile(source: &SourceFile, options: &BuildOptions) -> Result<(), Diagno
         return Err(DiagnosticBundle::from_diagnostics(parsed.diagnostics));
     }
 
-    let analyzed = semantic::analyze(source, &parsed.program);
+    let resolved_modules =
+        modules::resolve(source, &parsed.program).map_err(DiagnosticBundle::from_diagnostics)?;
+    let analyzed = semantic::analyze_with_modules(source, &parsed.program, &resolved_modules);
     if !analyzed.diagnostics.is_empty() {
         return Err(DiagnosticBundle::from_diagnostics(analyzed.diagnostics));
     }

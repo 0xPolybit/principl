@@ -40,6 +40,7 @@ source
   → lexer
   → parser
   → AST
+  → built-in module resolution
   → semantic analysis
   → typed representation
   → LLVM IR
@@ -65,19 +66,21 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `lexer` | Convert source text into tokens. |
 | `parser` | Parse tokens into the syntax tree. |
 | `ast` | Define the source-oriented abstract syntax tree. |
+| `modules` | Resolve imports against the fixed v0.1 standard-module registry. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
 | `codegen` | Lower typed procedural, class, struct, and list subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
 | `runtime` | Route source built-ins and managed allocation through private Windows runtime APIs. |
 
-The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
-analysis, procedural/class/struct/list lowering, minimal runtime, and Windows
-executable generation are implemented. Imports parse and type-check but do not
-load modules or add names to the current symbol table.
+The CLI, source loader, diagnostics, lexer, AST, parser, built-in module
+resolution, type system, semantic analysis, procedural/class/struct/list
+lowering, minimal runtime, and Windows executable generation are implemented.
+The v0.1 module behavior is deliberately limited to the `io` and `math`
+standard-module names, described below.
 
 ## v0.1 syntax
 
-The parser accepts top-level `import` paths, `fn` declarations, `class`
+The parser accepts top-level imports, `fn` declarations, `class`
 declarations, and `struct` declarations. Functions and methods have typed
 parameters, an optional `-> ReturnType`, and a block. Classes may contain typed
 fields, methods, and one `init` constructor. Structs contain typed fields only;
@@ -212,8 +215,33 @@ fn main() {
 }
 ```
 
-This prints `4` and `7`. Imports are parsed but do not load modules or add
-names to the current symbol table.
+This prints `4` and `7`.
+
+## Modules and imports
+
+v0.1 resolves these top-level imports against a fixed compiler-provided module
+registry:
+
+```princi
+import io
+import math
+```
+
+Only the exact, case-sensitive names `io` and `math` are accepted. `io` names
+the built-in I/O module; its `print` and `println` functions remain available
+through the existing global prelude, so importing `io` is optional. `math` is
+recognized as a standard module but currently exports no functions. Imports
+do not create a namespace, so qualified calls such as `io.println(...)` are
+not supported.
+
+Repeated imports are idempotent. Unknown names and dotted/nested module paths
+produce source-positioned diagnostics. The resolver does not search the
+filesystem: user-defined modules, relative paths, project roots, and package
+resolution are deferred. Since only known single-segment identifiers resolve,
+there is no path traversal; the fixed registry has no candidate search or
+module dependency graph, so ambiguity and import cycles cannot arise. The
+`.prnc` and `.princi` suffixes share the same canonical module identities. See
+[the import example](examples/modules.prnc).
 
 ## Classes
 

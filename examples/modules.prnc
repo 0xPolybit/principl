@@ -1,0 +1,6 @@
+import io
+import math
+
+fn main() {
+    println("The built-in modules resolved successfully.")
+}
