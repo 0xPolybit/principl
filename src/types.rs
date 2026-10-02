@@ -1,8 +1,8 @@
 use std::fmt;
 
 /// A resolved Princi type. `Any`, `Error`, function, and range types are
-/// compiler-internal; source declarations can name the primitive and declared
-/// class/struct types, plus the unparameterized `List` annotation.
+/// compiler-internal; source declarations can name primitive and declared
+/// class/struct types, plus the built-in generic `List<T>` collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
@@ -36,8 +36,7 @@ impl FunctionType {
 
 impl Type {
     /// Whether a value of `actual` can be used where this type is expected.
-    /// Any is currently limited to built-in print parameters and the element
-    /// type of a bare List annotation.
+    /// Any is currently limited to compiler-internal built-in print typing.
     pub fn accepts(&self, actual: &Type) -> bool {
         match (self, actual) {
             (Type::Error, _) | (_, Type::Error) => true,

@@ -413,3 +413,92 @@ fn main() {
     );
     assert_eq!(stdout, "3\n3\n6\n9\n8\n2\n3\n");
 }
+
+#[cfg(windows)]
+#[test]
+fn typed_lists_infer_construct_index_mutate_append_and_pass_to_functions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "list operations.princi",
+        r#"fn summarize(values: List<Int>) -> Int {
+    values[0] += 2
+    values.add(10)
+    return values[0] + values.length
+}
+
+fn make_values() -> List<Int> {
+    return [4, 5]
+}
+
+fn main() {
+    var numbers: List<Int> = [1, 2, 3]
+    numbers[1] = 7
+    let inferred = make_values()
+    let alias = inferred
+    alias.add(6)
+    println(numbers.length)
+    println(numbers[1])
+    println(summarize(numbers))
+    println(inferred[0])
+    println(inferred.length)
+    println(numbers.length)
+}"#,
+    );
+    assert_eq!(stdout, "3\n7\n7\n4\n3\n4\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn nested_lists_and_string_elements_execute() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "nested lists.prnc",
+        r#"fn main() {
+    var rows: List<List<Int>> = [[1, 2], [3]]
+    rows[0].add(4)
+    println(rows.length)
+    println(rows[0].length)
+    println(rows[0][2])
+
+    var names: List<String> = ["Ada", "Lin"]
+    names[1] = names[0] + " Lovelace"
+    names.add("Grace")
+    println(names[1])
+    println(names.length)
+}"#,
+    );
+    assert_eq!(stdout, "2\n3\n4\nAda Lovelace\n3\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn list_indexing_reports_negative_and_past_end_bounds_errors() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    for (name, index) in [
+        ("negative list index.prnc", "-1"),
+        ("past end list index.prnc", "1"),
+    ] {
+        let executable = dir.build(
+            name,
+            &format!("fn main() {{\n    let values = [42]\n    println(values[{index}])\n}}"),
+        );
+        let run = Command::new(executable)
+            .output()
+            .expect("generated Windows executable should run");
+        assert_eq!(run.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&run.stdout).contains("list index out of bounds"),
+            "unexpected bounds diagnostic: {}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
+}

@@ -316,6 +316,8 @@ impl<'a> IrGenerator<'a> {
             "; Princi v0.1 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
             crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
+        ir.push_str(crate::runtime::windows_x86_64::LIST_RUNTIME);
+        ir.push('\n');
         ir.push_str("%princi.typeinfo = type { ptr }\n");
         for structure in &structs {
             ir.push_str(&self.struct_layout(structure)?);
@@ -577,6 +579,7 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::Bool => Ok("i1".to_owned()),
         Type::String => Ok("ptr".to_owned()),
         Type::Class(_) => Ok("ptr".to_owned()),
+        Type::List(_) => Ok("ptr".to_owned()),
         Type::Struct(name) => Ok(struct_type_name(name)),
         Type::Void => Ok("void".to_owned()),
         other => Err(Diagnostic::at(
@@ -870,64 +873,70 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.bind(&variable.name.name, LocalBinding { address, ty });
             }
             StatementKind::Assignment(assignment) => {
-                let (address, ty) = match ungroup_kind(&assignment.target.kind) {
-                    ExpressionKind::Identifier(identifier) => {
-                        let binding = self.lookup(&identifier.name).ok_or_else(|| {
-                            self.error(
-                                format!(
-                                    "code generation could not resolve assignment target '{}'",
-                                    identifier.name
-                                ),
-                                identifier.span,
-                            )
-                        })?;
-                        (binding.address, binding.ty)
-                    }
-                    ExpressionKind::Member { object, member } => {
-                        self.emit_member_address(object, member)?
-                    }
-                    _ => {
-                        return Err(self.error(
-                            "the LLVM backend supports assignment to local variables and class or struct fields",
-                            assignment.target.span,
-                        ));
-                    }
-                };
-                let value = self.emit_expression(&assignment.value)?;
-                let ty_name = llvm_type(&ty, assignment.target.span, self.source)?;
-                let stored = if assignment.operator == AssignmentOperator::Assign {
-                    value.operand
+                if let ExpressionKind::Index { object, index } =
+                    ungroup_kind(&assignment.target.kind)
+                {
+                    self.emit_list_index_assignment(assignment, object, index)?;
                 } else {
-                    let previous = self.fresh_value();
-                    self.instruction(&format!("{previous} = load {ty_name}, ptr {address}"));
-                    match (assignment.operator, &ty) {
-                        (AssignmentOperator::AddAssign, Type::String) => {
-                            let combined = self.fresh_value();
-                            self.instruction(&format!(
-                                "{combined} = call ptr @{}(ptr {previous}, ptr {})",
-                                crate::runtime::windows_x86_64::string_concat_function(),
-                                value.operand
-                            ));
-                            combined
+                    let (address, ty) = match ungroup_kind(&assignment.target.kind) {
+                        ExpressionKind::Identifier(identifier) => {
+                            let binding = self.lookup(&identifier.name).ok_or_else(|| {
+                                self.error(
+                                    format!(
+                                        "code generation could not resolve assignment target '{}'",
+                                        identifier.name
+                                    ),
+                                    identifier.span,
+                                )
+                            })?;
+                            (binding.address, binding.ty)
                         }
-                        (operator, ty) => {
-                            let result = self.fresh_value();
-                            let instruction =
-                                assignment_instruction(operator, ty).ok_or_else(|| {
-                                    self.error(
-                                        format!("invalid assignment operator for type {ty}"),
-                                        assignment.target.span,
-                                    )
-                                })?;
-                            self.instruction(&format!(
-                                "{result} = {instruction} {ty_name} {previous}, {}",
-                                value.operand
-                            ));
-                            result
+                        ExpressionKind::Member { object, member } => {
+                            self.emit_member_address(object, member)?
                         }
-                    }
-                };
-                self.instruction(&format!("store {ty_name} {stored}, ptr {address}"));
+                        _ => {
+                            return Err(self.error(
+                                "the LLVM backend supports assignment to local variables, fields, and list elements",
+                                assignment.target.span,
+                            ));
+                        }
+                    };
+                    let value = self.emit_expression(&assignment.value)?;
+                    let ty_name = llvm_type(&ty, assignment.target.span, self.source)?;
+                    let stored = if assignment.operator == AssignmentOperator::Assign {
+                        value.operand
+                    } else {
+                        let previous = self.fresh_value();
+                        self.instruction(&format!("{previous} = load {ty_name}, ptr {address}"));
+                        match (assignment.operator, &ty) {
+                            (AssignmentOperator::AddAssign, Type::String) => {
+                                let combined = self.fresh_value();
+                                self.instruction(&format!(
+                                    "{combined} = call ptr @{}(ptr {previous}, ptr {})",
+                                    crate::runtime::windows_x86_64::string_concat_function(),
+                                    value.operand
+                                ));
+                                combined
+                            }
+                            (operator, ty) => {
+                                let result = self.fresh_value();
+                                let instruction =
+                                    assignment_instruction(operator, ty).ok_or_else(|| {
+                                        self.error(
+                                            format!("invalid assignment operator for type {ty}"),
+                                            assignment.target.span,
+                                        )
+                                    })?;
+                                self.instruction(&format!(
+                                    "{result} = {instruction} {ty_name} {previous}, {}",
+                                    value.operand
+                                ));
+                                result
+                            }
+                        }
+                    };
+                    self.instruction(&format!("store {ty_name} {stored}, ptr {address}"));
+                }
             }
             StatementKind::If(if_statement) => {
                 let condition = self.emit_expression(&if_statement.condition)?;
@@ -1150,13 +1159,189 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.emit_named_construction(type_name, fields, expression.span)
             }
             ExpressionKind::Group(inner) => self.emit_expression(inner),
-            ExpressionKind::List(_)
-            | ExpressionKind::Index { .. }
-            | ExpressionKind::Range { .. } => Err(self.error(
+            ExpressionKind::List(elements) => self.emit_list_literal(elements, expression),
+            ExpressionKind::Index { object, index } => {
+                self.emit_list_index(object, index, expression.span)
+            }
+            ExpressionKind::Range { .. } => Err(self.error(
                 "this expression is outside the supported v0.1 LLVM backend",
                 expression.span,
             )),
         }
+    }
+
+    fn emit_list_element_size(
+        &mut self,
+        element_type: &Type,
+        span: SourceSpan,
+    ) -> Result<String, Diagnostic> {
+        let llvm_element_type = llvm_type(element_type, span, self.source)?;
+        let end = self.fresh_value();
+        self.instruction(&format!(
+            "{end} = getelementptr {llvm_element_type}, ptr null, i64 1"
+        ));
+        let size = self.fresh_value();
+        self.instruction(&format!("{size} = ptrtoint ptr {end} to i64"));
+        Ok(size)
+    }
+
+    fn emit_list_literal(
+        &mut self,
+        elements: &[Expression],
+        expression: &Expression,
+    ) -> Result<IrValue, Diagnostic> {
+        let list_type = self
+            .typed
+            .expression_type(expression)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic list type", expression.span))?;
+        let Type::List(element_type) = list_type else {
+            return Err(self.error(
+                format!("list literal has non-list type {list_type}"),
+                expression.span,
+            ));
+        };
+        let element_type = *element_type;
+        let llvm_element_type = llvm_type(&element_type, expression.span, self.source)?;
+        let element_size = self.emit_list_element_size(&element_type, expression.span)?;
+        let list = self.fresh_value();
+        self.instruction(&format!(
+            "{list} = call ptr @{}(i64 {element_size})",
+            crate::runtime::windows_x86_64::list_new_function()
+        ));
+        for element in elements {
+            let value = self.emit_expression(element)?;
+            if !element_type.accepts(&value.ty) {
+                return Err(self.error(
+                    "list element type changed after semantic analysis",
+                    element.span,
+                ));
+            }
+            let slot = self.allocate(&llvm_element_type);
+            self.instruction(&format!(
+                "store {llvm_element_type} {}, ptr {slot}",
+                value.operand
+            ));
+            self.instruction(&format!(
+                "call void @{}(ptr {list}, i64 {element_size}, ptr {slot})",
+                crate::runtime::windows_x86_64::list_add_function()
+            ));
+        }
+        Ok(IrValue {
+            ty: Type::List(Box::new(element_type)),
+            operand: list,
+        })
+    }
+
+    fn emit_list_index(
+        &mut self,
+        object: &Expression,
+        index: &Expression,
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let list_value = self.emit_expression(object)?;
+        let Type::List(element_type) = list_value.ty else {
+            return Err(self.error(
+                format!("cannot lower indexing on {}", list_value.ty),
+                object.span,
+            ));
+        };
+        let index_value = self.emit_expression(index)?;
+        let llvm_element_type = llvm_type(&element_type, span, self.source)?;
+        let element_size = self.emit_list_element_size(&element_type, span)?;
+        let slot = self.allocate(&llvm_element_type);
+        self.instruction(&format!(
+            "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {slot})",
+            crate::runtime::windows_x86_64::list_get_function(),
+            list_value.operand,
+            index_value.operand
+        ));
+        let result = self.fresh_value();
+        self.instruction(&format!("{result} = load {llvm_element_type}, ptr {slot}"));
+        Ok(IrValue {
+            ty: *element_type,
+            operand: result,
+        })
+    }
+
+    fn emit_list_index_assignment(
+        &mut self,
+        assignment: &crate::ast::Assignment,
+        object: &Expression,
+        index: &Expression,
+    ) -> Result<(), Diagnostic> {
+        let list_value = self.emit_expression(object)?;
+        let Type::List(element_type) = list_value.ty else {
+            return Err(self.error(
+                format!("cannot lower assignment through {}", list_value.ty),
+                object.span,
+            ));
+        };
+        let index_value = self.emit_expression(index)?;
+        let llvm_element_type = llvm_type(&element_type, assignment.target.span, self.source)?;
+        let element_size = self.emit_list_element_size(&element_type, assignment.target.span)?;
+
+        // Read first to check bounds before evaluating the right-hand side.
+        // Keep a value copy in case the right-hand side grows this list.
+        let previous_slot = self.allocate(&llvm_element_type);
+        self.instruction(&format!(
+            "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {previous_slot})",
+            crate::runtime::windows_x86_64::list_get_function(),
+            list_value.operand,
+            index_value.operand
+        ));
+        let previous = self.fresh_value();
+        self.instruction(&format!(
+            "{previous} = load {llvm_element_type}, ptr {previous_slot}"
+        ));
+
+        let value = self.emit_expression(&assignment.value)?;
+        if !element_type.accepts(&value.ty) {
+            return Err(self.error(
+                "list assignment type changed after semantic analysis",
+                assignment.value.span,
+            ));
+        }
+        let stored = if assignment.operator == AssignmentOperator::Assign {
+            value.operand
+        } else {
+            match (assignment.operator, element_type.as_ref()) {
+                (AssignmentOperator::AddAssign, Type::String) => {
+                    let combined = self.fresh_value();
+                    self.instruction(&format!(
+                        "{combined} = call ptr @{}(ptr {previous}, ptr {})",
+                        crate::runtime::windows_x86_64::string_concat_function(),
+                        value.operand
+                    ));
+                    combined
+                }
+                (operator, ty) => {
+                    let result = self.fresh_value();
+                    let instruction = assignment_instruction(operator, ty).ok_or_else(|| {
+                        self.error(
+                            format!("invalid assignment operator for type {ty}"),
+                            assignment.target.span,
+                        )
+                    })?;
+                    self.instruction(&format!(
+                        "{result} = {instruction} {llvm_element_type} {previous}, {}",
+                        value.operand
+                    ));
+                    result
+                }
+            }
+        };
+        let value_slot = self.allocate(&llvm_element_type);
+        self.instruction(&format!(
+            "store {llvm_element_type} {stored}, ptr {value_slot}"
+        ));
+        self.instruction(&format!(
+            "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {value_slot})",
+            crate::runtime::windows_x86_64::list_set_function(),
+            list_value.operand,
+            index_value.operand
+        ));
+        Ok(())
     }
 
     fn emit_member_address(
@@ -1251,6 +1436,25 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .expression_type(object)
             .cloned()
             .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
+        if matches!(object_type, Type::List(_)) {
+            if member.name != "length" {
+                return Err(self.error(
+                    format!("cannot use List member '{}' as a value", member.name),
+                    member.span,
+                ));
+            }
+            let receiver = self.emit_expression(object)?;
+            let result = self.fresh_value();
+            self.instruction(&format!(
+                "{result} = call i64 @{}(ptr {})",
+                crate::runtime::windows_x86_64::list_length_function(),
+                receiver.operand
+            ));
+            return Ok(IrValue {
+                ty: Type::Int,
+                operand: result,
+            });
+        }
         if matches!(object_type, Type::Struct(_)) {
             let receiver = self.emit_expression(object)?;
             let Type::Struct(name) = &receiver.ty else {
@@ -1573,6 +1777,43 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
         let receiver = self.emit_expression(object)?;
+        if let Type::List(element_type) = &receiver.ty {
+            if member.name != "add" {
+                return Err(self.error(
+                    format!("cannot dispatch List method '{}'", member.name),
+                    member.span,
+                ));
+            }
+            let signature = match self.typed.expression_type(callee) {
+                Some(Type::Function(signature)) => signature.clone(),
+                _ => {
+                    return Err(self.error("missing semantic signature for List.add", member.span));
+                }
+            };
+            if arguments.len() != 1 || signature.parameters.len() != 1 {
+                return Err(self.error("List.add expects exactly one argument", span));
+            }
+            let value = self.emit_expression(&arguments[0])?;
+            if !element_type.accepts(&value.ty) || !signature.parameters[0].accepts(&value.ty) {
+                return Err(self.error(
+                    "List.add argument type changed after semantic analysis",
+                    arguments[0].span,
+                ));
+            }
+            let llvm_element_type = llvm_type(element_type, span, self.source)?;
+            let element_size = self.emit_list_element_size(element_type, span)?;
+            let slot = self.allocate(&llvm_element_type);
+            self.instruction(&format!(
+                "store {llvm_element_type} {}, ptr {slot}",
+                value.operand
+            ));
+            let call = format!(
+                "call void @{}(ptr {}, i64 {element_size}, ptr {slot})",
+                crate::runtime::windows_x86_64::list_add_function(),
+                receiver.operand
+            );
+            return self.emit_call_result(call, Type::Void);
+        }
         let Type::Class(class_name) = &receiver.ty else {
             return Err(self.error(
                 format!(
@@ -2154,6 +2395,34 @@ mod tests {
             last_allocation < first_loop_block,
             "all stack slots should be allocated in the function entry block"
         );
+    }
+
+    #[test]
+    fn lowers_typed_lists_through_bounds_checked_runtime_operations() {
+        let ir = lower(
+            r#"fn sum(values: List<Int>) -> Int {
+    values[0] += 2
+    values.add(5)
+    return values[0] + values.length
+}
+fn main() {
+    var values: List<Int> = [1, 2]
+    values[1] = 3
+    let inferred = [4, 5]
+    print(sum(values))
+    print(inferred[0])
+}"#,
+        )
+        .expect("typed list operations should lower");
+
+        assert!(ir.contains("%princi.rt.list = type { ptr, i64, i64, i64 }"));
+        assert!(ir.contains("call ptr @princi_rt_list_new(i64"));
+        assert!(ir.contains("call void @princi_rt_list_get(ptr"));
+        assert!(ir.contains("call void @princi_rt_list_set(ptr"));
+        assert!(ir.contains("call void @princi_rt_list_add(ptr"));
+        assert!(ir.contains("call i64 @princi_rt_list_length(ptr"));
+        assert!(ir.contains("list index out of bounds"));
+        assert!(ir.contains("list element type mismatch"));
     }
 
     #[test]

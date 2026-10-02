@@ -13,6 +13,8 @@ declare i64 @strlen(ptr)
 declare ptr @malloc(i64)
 declare ptr @memcpy(ptr, ptr, i64)
 declare ptr @calloc(i64, i64)
+declare ptr @realloc(ptr, i64)
+declare void @exit(i32) noreturn
 
 @.princi.rt.fmt.int = private unnamed_addr constant [5 x i8] c"%lld\00", align 1
 @.princi.rt.fmt.float = private unnamed_addr constant [6 x i8] c"%.15g\00", align 1
@@ -106,6 +108,172 @@ entry:
 }
 "#;
 
+/// Private byte-copy ABI for homogeneous, heap-backed \`List<T>\` values.
+/// The compiler supplies the target layout's element size for every operation.
+pub(crate) const LIST_RUNTIME: &str = r#"%princi.rt.list = type { ptr, i64, i64, i64 }
+@.princi.rt.list.bounds = private unnamed_addr constant [26 x i8] c"list index out of bounds\0A\00", align 1
+@.princi.rt.list.type = private unnamed_addr constant [28 x i8] c"list element type mismatch\0A\00", align 1
+@.princi.rt.list.allocation = private unnamed_addr constant [24 x i8] c"list allocation failed\0A\00", align 1
+define internal void @princi_rt_list_panic_bounds() {
+entry:
+  %message = getelementptr inbounds [26 x i8], ptr @.princi.rt.list.bounds, i64 0, i64 0
+  %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @exit(i32 1)
+  unreachable
+}
+define internal void @princi_rt_list_panic_type() {
+entry:
+  %message = getelementptr inbounds [28 x i8], ptr @.princi.rt.list.type, i64 0, i64 0
+  %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @exit(i32 1)
+  unreachable
+}
+define internal void @princi_rt_list_panic_allocation() {
+entry:
+  %message = getelementptr inbounds [24 x i8], ptr @.princi.rt.list.allocation, i64 0, i64 0
+  %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @exit(i32 1)
+  unreachable
+}
+define internal ptr @princi_rt_list_new(i64 %element.size) {
+entry:
+  %valid.size = icmp sge i64 %element.size, 0
+  br i1 %valid.size, label %allocate, label %invalid
+invalid:
+  call void @princi_rt_list_panic_type()
+  unreachable
+allocate:
+  %header.end = getelementptr %princi.rt.list, ptr null, i32 1
+  %header.size = ptrtoint ptr %header.end to i64
+  %list = call ptr @calloc(i64 1, i64 %header.size)
+  %failed = icmp eq ptr %list, null
+  br i1 %failed, label %allocation.failed, label %initialize
+allocation.failed:
+  call void @princi_rt_list_panic_allocation()
+  unreachable
+initialize:
+  %element.size.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 3
+  store i64 %element.size, ptr %element.size.slot
+  ret ptr %list
+}
+define internal void @princi_rt_list_check_type(ptr %list, i64 %expected.size) {
+entry:
+  %is.null = icmp eq ptr %list, null
+  br i1 %is.null, label %invalid, label %compare
+invalid:
+  call void @princi_rt_list_panic_type()
+  unreachable
+compare:
+  %element.size.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 3
+  %element.size = load i64, ptr %element.size.slot
+  %matches = icmp eq i64 %element.size, %expected.size
+  br i1 %matches, label %done, label %mismatch
+mismatch:
+  call void @princi_rt_list_panic_type()
+  unreachable
+done:
+  ret void
+}
+define internal i64 @princi_rt_list_length(ptr %list) {
+entry:
+  %is.null = icmp eq ptr %list, null
+  br i1 %is.null, label %invalid, label %read.length
+invalid:
+  call void @princi_rt_list_panic_type()
+  unreachable
+read.length:
+  %length.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 1
+  %length = load i64, ptr %length.slot
+  ret i64 %length
+}
+define internal ptr @princi_rt_list_slot(ptr %list, i64 %index, i64 %expected.size) {
+entry:
+  call void @princi_rt_list_check_type(ptr %list, i64 %expected.size)
+  %length.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 1
+  %length = load i64, ptr %length.slot
+  %negative = icmp slt i64 %index, 0
+  %past.end = icmp sge i64 %index, %length
+  %out.of.bounds = or i1 %negative, %past.end
+  br i1 %out.of.bounds, label %bounds.error, label %address
+bounds.error:
+  call void @princi_rt_list_panic_bounds()
+  unreachable
+address:
+  %data.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 0
+  %data = load ptr, ptr %data.slot
+  %zero.size = icmp eq i64 %expected.size, 0
+  %storage.size = select i1 %zero.size, i64 1, i64 %expected.size
+  %offset = mul i64 %index, %storage.size
+  %element = getelementptr inbounds i8, ptr %data, i64 %offset
+  ret ptr %element
+}
+define internal void @princi_rt_list_get(ptr %list, i64 %index, i64 %element.size, ptr %destination) {
+entry:
+  %element = call ptr @princi_rt_list_slot(ptr %list, i64 %index, i64 %element.size)
+  %copied = call ptr @memcpy(ptr %destination, ptr %element, i64 %element.size)
+  ret void
+}
+define internal void @princi_rt_list_set(ptr %list, i64 %index, i64 %element.size, ptr %source) {
+entry:
+  %element = call ptr @princi_rt_list_slot(ptr %list, i64 %index, i64 %element.size)
+  %copied = call ptr @memcpy(ptr %element, ptr %source, i64 %element.size)
+  ret void
+}
+define internal void @princi_rt_list_add(ptr %list, i64 %element.size, ptr %source) {
+entry:
+  call void @princi_rt_list_check_type(ptr %list, i64 %element.size)
+  %length.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 1
+  %capacity.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 2
+  %data.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 0
+  %length = load i64, ptr %length.slot
+  %capacity = load i64, ptr %capacity.slot
+  %old.data = load ptr, ptr %data.slot
+  %zero.size = icmp eq i64 %element.size, 0
+  %storage.size = select i1 %zero.size, i64 1, i64 %element.size
+  %full = icmp eq i64 %length, %capacity
+  br i1 %full, label %grow.start, label %append.existing
+append.existing:
+  br label %append
+grow.start:
+  %empty = icmp eq i64 %capacity, 0
+  br i1 %empty, label %grow.initial, label %grow.check
+grow.initial:
+  br label %grow.capacity
+grow.check:
+  %can.double = icmp ule i64 %capacity, 4611686018427387903
+  br i1 %can.double, label %grow.double, label %growth.error
+grow.double:
+  %doubled = mul i64 %capacity, 2
+  br label %grow.capacity
+grow.capacity:
+  %new.capacity = phi i64 [ 4, %grow.initial ], [ %doubled, %grow.double ]
+  %max.capacity = sdiv i64 9223372036854775807, %storage.size
+  %capacity.fits = icmp sle i64 %new.capacity, %max.capacity
+  br i1 %capacity.fits, label %allocate.data, label %growth.error
+allocate.data:
+  %new.bytes = mul i64 %new.capacity, %storage.size
+  %new.data = call ptr @realloc(ptr %old.data, i64 %new.bytes)
+  %allocation.failed = icmp eq ptr %new.data, null
+  br i1 %allocation.failed, label %allocation.error, label %grow.done
+allocation.error:
+  call void @princi_rt_list_panic_allocation()
+  unreachable
+growth.error:
+  call void @princi_rt_list_panic_allocation()
+  unreachable
+grow.done:
+  store ptr %new.data, ptr %data.slot
+  store i64 %new.capacity, ptr %capacity.slot
+  br label %append
+append:
+  %data = phi ptr [ %old.data, %append.existing ], [ %new.data, %grow.done ]
+  %offset = mul i64 %length, %storage.size
+  %destination = getelementptr inbounds i8, ptr %data, i64 %offset
+  %copied = call ptr @memcpy(ptr %destination, ptr %source, i64 %element.size)
+  %new.length = add i64 %length, 1
+  store i64 %new.length, ptr %length.slot
+  ret void
+}"#;
 pub(crate) fn print_function(ty: &Type, newline: bool) -> Option<&'static str> {
     match (ty, newline) {
         (Type::Int, false) => Some("princi_rt_print_int"),
@@ -130,6 +298,26 @@ pub(crate) fn string_equal_function() -> &'static str {
 
 pub(crate) fn object_allocator_function() -> &'static str {
     "princi_rt_alloc_object"
+}
+
+pub(crate) fn list_new_function() -> &'static str {
+    "princi_rt_list_new"
+}
+
+pub(crate) fn list_length_function() -> &'static str {
+    "princi_rt_list_length"
+}
+
+pub(crate) fn list_get_function() -> &'static str {
+    "princi_rt_list_get"
+}
+
+pub(crate) fn list_set_function() -> &'static str {
+    "princi_rt_list_set"
+}
+
+pub(crate) fn list_add_function() -> &'static str {
+    "princi_rt_list_add"
 }
 
 /// Adapt Princi main's return value to the MinGW CRT int main() contract.

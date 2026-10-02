@@ -137,9 +137,30 @@ impl Parser<'_> {
 
     fn parse_type_reference(&mut self, message: &str) -> Result<TypeReference, Diagnostic> {
         let name = self.expect_identifier(message)?;
+        let mut arguments = Vec::new();
+        let mut end = name.span.end;
+        if self.eat_operator(Operator::Less) {
+            loop {
+                arguments.push(self.parse_type_reference("expected type argument")?);
+                if self.eat_punctuation(Punctuation::Comma) {
+                    continue;
+                }
+                let close = self.current().clone();
+                if close.kind != TokenKind::Operator(Operator::Greater) {
+                    return Err(Diagnostic::at(
+                        "expected '>' after type arguments",
+                        close.location,
+                    ));
+                }
+                self.advance();
+                end = close.location.span.end;
+                break;
+            }
+        }
         Ok(TypeReference {
             name: name.name,
-            span: name.span,
+            arguments,
+            span: SourceSpan::new(name.span.start, end),
         })
     }
 
@@ -1010,6 +1031,23 @@ mod tests {
         statement
     }
 
+    fn type_reference_snapshot(type_reference: &crate::ast::TypeReference) -> String {
+        if type_reference.arguments.is_empty() {
+            type_reference.name.clone()
+        } else {
+            format!(
+                "{}<{}>",
+                type_reference.name,
+                type_reference
+                    .arguments
+                    .iter()
+                    .map(type_reference_snapshot)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
     fn expression_snapshot(expression: &Expression) -> String {
         match &expression.kind {
             ExpressionKind::Identifier(identifier) => identifier.name.clone(),
@@ -1053,13 +1091,19 @@ mod tests {
         let parameters = function
             .parameters
             .iter()
-            .map(|parameter| format!("{}: {}", parameter.name.name, parameter.type_reference.name))
+            .map(|parameter| {
+                format!(
+                    "{}: {}",
+                    parameter.name.name,
+                    type_reference_snapshot(&parameter.type_reference)
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let return_type = function
             .return_type
             .as_ref()
-            .map(|type_reference| format!(" -> {}", type_reference.name))
+            .map(|type_reference| format!(" -> {}", type_reference_snapshot(type_reference)))
             .unwrap_or_default();
         let StatementKind::Return(Some(value)) = &only_statement(function).kind else {
             panic!("snapshot function should contain a value return");
@@ -1106,7 +1150,7 @@ mod tests {
         let result = parse_text(
             "main.prnc",
             r#"fn main() {
-    var values: List = [1, 2, 3]
+    var values: List<Int> = [1, 2, 3]
     let first = values[0]
     values[1] += -2
     if ready {
@@ -1260,6 +1304,35 @@ struct Point {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_nested_list_type_arguments_and_preserves_the_full_span() {
+        let result = parse_text(
+            "lists.prnc",
+            "fn first(values: List<List<Int>>) -> List<Int> { return values[0] }",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Function(function) = &result.program.declarations[0] else {
+            panic!("expected function declaration");
+        };
+        assert_eq!(
+            type_reference_snapshot(&function.parameters[0].type_reference),
+            "List<List<Int>>"
+        );
+        assert_eq!(
+            type_reference_snapshot(function.return_type.as_ref().unwrap()),
+            "List<Int>"
+        );
+        assert_eq!(
+            &"fn first(values: List<List<Int>>) -> List<Int> { return values[0] }"[function
+                .parameters[0]
+                .type_reference
+                .span
+                .start
+                ..function.parameters[0].type_reference.span.end],
+            "List<List<Int>>"
+        );
     }
 
     #[test]

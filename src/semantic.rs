@@ -425,10 +425,29 @@ impl<'a> Analyzer<'a> {
             "Bool" => Type::Bool,
             "String" => Type::String,
             "Void" => Type::Void,
-            // Generic parameters are not source syntax in v0.1. A bare List is
-            // an explicitly dynamic list type; literals still infer precise
-            // List<T> types locally.
-            "List" => Type::List(Box::new(Type::Any)),
+            "List" => {
+                if type_reference.arguments.len() != 1 {
+                    self.error(
+                        "List requires exactly one type argument, such as List<Int>",
+                        type_reference.span,
+                    );
+                    Type::Error
+                } else {
+                    let element = self.resolve_type_reference(&type_reference.arguments[0], false);
+                    if element.is_error() || element == Type::Void {
+                        Type::Error
+                    } else {
+                        Type::List(Box::new(element))
+                    }
+                }
+            }
+            _ if !type_reference.arguments.is_empty() => {
+                self.error(
+                    "generic type arguments are only supported for List<T> in v0.1",
+                    type_reference.span,
+                );
+                Type::Error
+            }
             name => self
                 .types
                 .get(name)
@@ -733,6 +752,19 @@ impl<'a> Analyzer<'a> {
             }
             ExpressionKind::Member { object, member } => {
                 let object_type = self.check_expression(object, None);
+                if matches!(object_type, Type::List(_)) && member.name == "length" {
+                    self.error("list.length is read-only", member.span);
+                    return (Type::Error, false);
+                }
+                if matches!(object_type, Type::Struct(_))
+                    && self.is_struct_list_element_path(object)
+                {
+                    self.error(
+                        "mutating fields of struct list elements is not supported in v0.1; assign the updated struct back to the list",
+                        target.span,
+                    );
+                    return (Type::Error, false);
+                }
                 let (member_type, is_field) = self.member_type(&object_type, member);
                 if !is_field && !member_type.is_error() {
                     self.error(
@@ -748,7 +780,9 @@ impl<'a> Analyzer<'a> {
                 let index_type = self.check_expression(index, None);
                 self.require_type(&Type::Int, &index_type, index.span, "list index");
                 match object_type {
-                    Type::List(element) => (*element, self.is_mutable_base(object)),
+                    // Lists are heap-backed reference values: their elements
+                    // remain mutable through a `let` binding.
+                    Type::List(element) => (*element, true),
                     Type::Error => (Type::Error, false),
                     other => {
                         self.error(
@@ -775,8 +809,12 @@ impl<'a> Analyzer<'a> {
                 .lookup_variable(&identifier.name)
                 .is_some_and(|symbol| symbol.mutable),
             ExpressionKind::SelfValue => self.current_type.is_some(),
-            ExpressionKind::Member { object, .. } | ExpressionKind::Index { object, .. } => {
-                self.is_mutable_base(object)
+            ExpressionKind::Member { object, .. } => self.is_mutable_base(object),
+            ExpressionKind::Index { object, .. } => {
+                matches!(
+                    self.expression_types.get(&expression.span),
+                    Some(Type::List(_))
+                ) || self.is_mutable_base(object)
             }
             ExpressionKind::Group(inner) => self.is_mutable_base(inner),
             _ => false,
@@ -1132,6 +1170,22 @@ impl<'a> Analyzer<'a> {
     }
 
     fn member_type(&mut self, object_type: &Type, member: &Identifier) -> (Type, bool) {
+        if let Type::List(element) = object_type {
+            return match member.name.as_str() {
+                "length" => (Type::Int, true),
+                "add" => (
+                    Type::Function(FunctionType::new(vec![(**element).clone()], Type::Void)),
+                    false,
+                ),
+                _ => {
+                    self.error(
+                        format!("type '{object_type}' has no member '{}'", member.name),
+                        member.span,
+                    );
+                    (Type::Error, false)
+                }
+            };
+        }
         let type_name = match object_type {
             Type::Class(name) | Type::Struct(name) => name,
             Type::Error => return (Type::Error, false),
@@ -1156,6 +1210,21 @@ impl<'a> Analyzer<'a> {
             member.span,
         );
         (Type::Error, false)
+    }
+
+    fn is_struct_list_element_path(&self, expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Index { object, .. } => {
+                matches!(
+                    self.expression_types.get(&expression.span),
+                    Some(Type::Struct(_))
+                ) || self.is_struct_list_element_path(object)
+            }
+            ExpressionKind::Member { object, .. } | ExpressionKind::Group(object) => {
+                self.is_struct_list_element_path(object)
+            }
+            _ => false,
+        }
     }
 
     fn unary_result(&mut self, operator: UnaryOperator, operand: &Type, span: SourceSpan) -> Type {
@@ -1776,23 +1845,108 @@ fn main() {
     }
 
     #[test]
-    fn bare_list_annotation_accepts_empty_lists_without_enabling_generic_syntax() {
+    fn generic_list_annotations_support_empty_values_and_local_inference() {
         let result = analyze_text(
-            "fn empty_list() -> List { return [] }\nfn main() { var items: List = ([]); var values: List = [1, 2]; var assigned: List; assigned = [] }",
+            "fn empty_list() -> List<Int> { return [] }\nfn first(values: List<Int>) -> Int { return values[0] }\nfn main() { var items: List<Int> = ([]); var values: List<Int> = [1, 2]; var assigned: List<Int>; assigned = []; let inferred = [3, 4] }",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        for index in [0, 1, 4] {
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", index)),
+                Some(&Type::List(Box::new(Type::Int)))
+            );
+        }
+    }
+
+    #[test]
+    fn checks_list_element_types_operations_and_reference_mutability() {
+        let result = analyze_text(
+            r#"fn first(values: List<Int>) -> Int { return values[0] }
+fn identity(values: List<Int>) -> List<Int> { return values }
+fn main() {
+    let values: List<Int> = [1, 2]
+    values.add(3)
+    values[0] = 4
+    values[1] += 5
+    let size = values.length
+    let first_value = first(values)
+    let copied_handle = identity(values)
+    let inferred = [1, 2, 3]
+}"#,
         );
         assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
         assert_eq!(
             result
                 .typed_program
                 .variable_type(variable(&result, "main", 0)),
-            Some(&Type::List(Box::new(Type::Any)))
+            Some(&Type::List(Box::new(Type::Int)))
         );
         assert_eq!(
             result
                 .typed_program
-                .variable_type(variable(&result, "main", 1)),
-            Some(&Type::List(Box::new(Type::Any)))
+                .variable_type(variable(&result, "main", 4)),
+            Some(&Type::Int)
         );
+    }
+
+    #[test]
+    fn rejects_bare_generic_and_mismatched_list_types() {
+        let result = analyze_text(
+            r#"fn main() {
+    let bare: List = []
+    let wrong_arity: List<Int, Float> = []
+    let wrong_element: List<String> = [1]
+    let mixed = [1, "hello", true]
+    let uninferred = []
+    var values: List<Int> = []
+    values.add("wrong")
+    values[0] = false
+    values[1.0] = 2
+    values.length = 2
+}"#,
+        );
+        assert!(has_message(
+            &result,
+            "List requires exactly one type argument"
+        ));
+        assert!(has_message(&result, "expression expects String, found Int"));
+        assert!(has_message(&result, "list elements must have one type"));
+        assert!(has_message(
+            &result,
+            "cannot infer the element type of an empty list"
+        ));
+        assert!(has_message(&result, "expression expects Int, found String"));
+        assert!(has_message(&result, "assignment expects Int, found Bool"));
+        assert!(has_message(&result, "list index expects Int, found Float"));
+        assert!(has_message(&result, "list.length is read-only"));
+    }
+
+    #[test]
+    fn supports_only_list_as_a_source_generic_and_rejects_void_elements() {
+        let result = analyze_text(
+            "struct Box {}\nfn takes(values: Box<Int>) {}\nfn empty() -> List<Void> { return [] }\nfn main() {}",
+        );
+        assert!(has_message(
+            &result,
+            "generic type arguments are only supported for List<T> in v0.1"
+        ));
+        assert!(has_message(
+            &result,
+            "Void is only valid as a function return type"
+        ));
+    }
+
+    #[test]
+    fn list_index_field_mutation_of_struct_elements_requires_writeback() {
+        let result = analyze_text(
+            "struct Point { x: Int }\nfn main() { var points: List<Point> = [Point(1)]; points[0].x = 2 }",
+        );
+        assert!(has_message(
+            &result,
+            "assign the updated struct back to the list"
+        ));
     }
 
     #[test]

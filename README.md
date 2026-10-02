@@ -2,7 +2,7 @@
 
 Princi is a programming language and compiler project. Its Rust v0.1 compiler
 loads, parses, and type-checks source, then generates Windows x86-64 executables
-for the core procedural language and basic classes.
+for the procedural language, classes, structs, and typed lists.
 
 ## v0.1 compiler contract
 
@@ -67,14 +67,13 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
-| `codegen` | Lower typed procedural, class, and struct subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
+| `codegen` | Lower typed procedural, class, struct, and list subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
 | `runtime` | Route source built-ins through a private ABI and provide Windows runtime helpers. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
-analysis, procedural/class/struct lowering, minimal runtime, and Windows
-executable generation are implemented. Lists, indexing, and imports remain
-outside the native v0.1 subset; the backend reports a positioned error if one
-reaches code generation.
+analysis, procedural/class/struct/list lowering, minimal runtime, and Windows
+executable generation are implemented. Imports parse and type-check but do not
+load modules or add names to the current symbol table.
 
 ## v0.1 syntax
 
@@ -134,19 +133,35 @@ type, so `var x = 10` has type `Int` and `var name = "Octrie"` has type
 `var count: Int = 10` or `let pi: Float = 3.14159`. Assignments must match the
 binding's type, and immutable bindings cannot be assigned through.
 
-List literals infer a single element type: `[1, 2]` has internal type
-`List<Int>`. Mixed element types are rejected. An empty list needs an expected
-element type; the v0.1 source annotation `List` represents `List<Any>` and can
-be used for empty or dynamically typed lists. Generic source syntax such as
-`List<Int>` is not part of v0.1. Indexing requires an `Int` and returns the
-list's element type. A range expression requires matching numeric bounds;
-native `for` loops require `Int` bounds and use an exclusive end.
+`List<T>` is the first supported built-in generic type. List literals infer a
+single element type, so `[1, 2]` has type `List<Int>`; heterogeneous literals
+are rejected because v0.1 defines no common element type or numeric promotion.
+An empty list needs an expected type, for example `var values: List<Int> = []`.
+Bare `List` and generic arguments on other types are rejected. A range
+expression requires matching numeric bounds; native `for` loops require `Int`
+bounds and use an exclusive end.
+
+Lists support `.length`, integer indexing for reads and writes, and
+`.add(value)`. The compiler checks element types at each operation and
+generated programs terminate with a runtime diagnostic for negative or
+out-of-range indexes. Lists are heap-backed reference values: copying a list
+or passing it to a function shares the same contents. `let` prevents replacing
+the binding, but allows changing the list contents with indexing or `.add`.
+There is no `remove`, iterator, comprehension, or collection API beyond these
+operations, and lists themselves are not printable with `print`.
+There is no deallocation operation; list storage remains allocated until the
+process exits.
 
 Scopes are lexical. The top-level function body shares a scope with its
 parameters; nested blocks and loop bodies introduce child scopes. A name may
 shadow an outer local in a child scope, but duplicate declarations in the same
 scope are errors. Class and struct member names share one namespace per type.
 Member access checks the receiver's declared class or struct type.
+
+The compiler/runtime use an opaque list handle with typed byte-copy accessors;
+Princi source code cannot access this representation. Elements may be any
+supported non-`Void` type, including nested lists, class references, and
+struct values. Struct elements are copied into and out of the list by value.
 
 Named construction (`Point { x: 1, y: 2 }`) requires every declared field
 exactly once with a compatible value type and initializes those fields directly.
@@ -160,9 +175,12 @@ The backend generates native code for `Int`, `Float`, `Bool`, and `String`;
 local `let`/`var` bindings and assignment; arithmetic, comparison, and boolean
 expressions; `if`/`else`, `while`, and integer `for` loops; functions,
 parameters, returns, calls, recursion, classes, structs, instance fields,
-constructors, instance methods, and `print`/`println`. Structs use value
-semantics and support fields, construction, access, mutable field updates,
-function parameters, and return values; they do not support methods or `init`.
+constructors, instance methods, `List<T>`, and `print`/`println`. Lists support
+homogeneous construction, local type inference, `.length`, indexed read and
+write, and `.add`; the runtime checks both lower and upper index bounds. Structs
+use value semantics and support fields, construction, access, mutable field
+updates, function parameters, and return values; they do not support methods or
+`init`.
 Integer range loops use an inclusive start and exclusive end (`0..count`).
 Numeric types do not implicitly convert.
 `main` must take no parameters and return `Void` or `Int`; `Void` functions
@@ -182,9 +200,20 @@ fn main() {
 }
 ```
 
-This program prints `120`. Lists, indexing, and imports are parsed and
-type-checked but are not part of the native v0.1 subset and do not yet produce
-executables.
+This program prints `120`. Lists compile to the native v0.1 target:
+
+```princi
+fn main() {
+    var numbers: List<Int> = [1, 2, 3]
+    numbers[1] = 7
+    numbers.add(9)
+    println(numbers.length)
+    println(numbers[1])
+}
+```
+
+This prints `4` and `7`. Imports are parsed but do not load modules or add
+names to the current symbol table.
 
 ## Classes
 

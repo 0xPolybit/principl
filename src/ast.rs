@@ -23,6 +23,7 @@ pub struct Identifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeReference {
     pub name: String,
+    pub arguments: Vec<TypeReference>,
     pub span: SourceSpan,
 }
 
