@@ -6,8 +6,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, Block, Declaration, Expression, ExpressionKind,
-    FunctionDeclaration, Literal, Statement, StatementKind, UnaryOperator,
+    AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
+    ExpressionKind, FunctionDeclaration, InitializerDeclaration, Literal, Statement, StatementKind,
+    TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
 use crate::diagnostics::Diagnostic;
@@ -21,7 +22,7 @@ const WINDOWS_X86_64_DATA_LAYOUT: &str =
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
-/// Lower the semantically checked procedural subset to verified-ready LLVM IR.
+/// Lower the semantically checked procedural and class subsets to LLVM IR.
 pub fn generate_llvm_ir(typed: &TypedProgram, source: &SourceFile) -> Result<String, Diagnostic> {
     IrGenerator::new(typed, source).generate()
 }
@@ -274,7 +275,7 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let functions = self.supported_functions()?;
+        let (functions, classes) = self.supported_declarations()?;
         let main = functions
             .iter()
             .find(|function| function.name.name == "main")
@@ -307,11 +308,22 @@ impl<'a> IrGenerator<'a> {
                 FunctionEmitter::new(self.typed, self.source, &mut self.strings).emit(function)?,
             );
         }
+        for class in &classes {
+            definitions.extend(self.emit_class_routines(class)?);
+        }
 
         let mut ir = format!(
             "; Princi v0.1 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
             crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
+        ir.push_str("%princi.typeinfo = type { ptr }\n");
+        for class in &classes {
+            ir.push_str(&self.class_layout(class)?);
+        }
+        ir.push('\n');
+        for class in &classes {
+            ir.push_str(&self.class_typeinfo(class));
+        }
         for (index, value) in self.strings.values.iter().enumerate() {
             ir.push_str(&format!(
                 "@.princi.str.{index} = private unnamed_addr constant [{} x i8] c\"{}\", align 1\n",
@@ -334,27 +346,158 @@ impl<'a> IrGenerator<'a> {
         Ok(ir)
     }
 
-    fn supported_functions(&self) -> Result<Vec<&'a FunctionDeclaration>, Diagnostic> {
+    fn supported_declarations(
+        &self,
+    ) -> Result<(Vec<&'a FunctionDeclaration>, Vec<&'a TypeDeclaration>), Diagnostic> {
         let mut functions = Vec::new();
+        let mut classes = Vec::new();
         for declaration in &self.typed.program.declarations {
             match declaration {
                 Declaration::Function(function) => functions.push(function),
-                Declaration::Class(item) | Declaration::Struct(item) => {
+                Declaration::Class(item) => classes.push(item),
+                Declaration::Struct(item) => {
                     return Err(self.error(
-                        "native LLVM code generation for classes and structs is not part of the procedural v0.1 backend",
+                        "structs are parsed and type-checked but are not natively supported in v0.1",
                         item.name.span,
                     ));
                 }
                 Declaration::Import(item) => {
                     let span = item.path.first().map_or(item.span, |name| name.span);
-                    return Err(self.error(
-                        "imports are not supported by the procedural v0.1 native backend",
-                        span,
-                    ));
+                    return Err(
+                        self.error("imports are not supported by the v0.1 native backend", span)
+                    );
                 }
             }
         }
-        Ok(functions)
+        Ok((functions, classes))
+    }
+
+    fn class_layout(&self, class: &TypeDeclaration) -> Result<String, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(&class.name.name)
+            .ok_or_else(|| self.error("missing semantic class layout", class.name.span))?;
+        let mut fields = vec!["ptr".to_owned()];
+        for field_name in &info.field_order {
+            let field_type = info.fields.get(field_name).ok_or_else(|| {
+                self.error(
+                    format!("missing type information for field '{field_name}'"),
+                    class.name.span,
+                )
+            })?;
+            let field = class.members.iter().find_map(|member| match member {
+                ClassMember::Field(field) if field.name.name == *field_name => Some(field),
+                _ => None,
+            });
+            let span = field.map_or(class.name.span, |field| field.type_reference.span);
+            fields.push(llvm_type(field_type, span, self.source)?.to_owned());
+        }
+        Ok(format!(
+            "{} = type {{ {} }}\n",
+            class_type_name(&class.name.name),
+            fields.join(", ")
+        ))
+    }
+
+    fn class_typeinfo(&self, class: &TypeDeclaration) -> String {
+        let encoded = encode_identifier(&class.name.name);
+        format!(
+            "@.princi.typeinfo.name.{encoded} = private unnamed_addr constant [{} x i8] c\"{}\", align 1\n@.princi.typeinfo.{encoded} = private constant %princi.typeinfo {{ ptr @.princi.typeinfo.name.{encoded} }}\n",
+            class.name.name.len() + 1,
+            llvm_bytes(class.name.name.as_bytes())
+        )
+    }
+
+    fn emit_class_routines(&mut self, class: &TypeDeclaration) -> Result<Vec<String>, Diagnostic> {
+        let Some(info) = self.typed.symbols.type_symbols(&class.name.name).cloned() else {
+            return Err(self.error("missing semantic class symbols", class.name.span));
+        };
+        let mut output = Vec::new();
+        for member in &class.members {
+            match member {
+                ClassMember::Method(method) => {
+                    let Some(signature) = info.methods.get(&method.name.name) else {
+                        continue;
+                    };
+                    output.push(
+                        FunctionEmitter::new(self.typed, self.source, &mut self.strings)
+                            .emit_method(class, method, signature)?,
+                    );
+                }
+                ClassMember::Initializer(initializer) => {
+                    if let Some(signature) = info.initializer.as_ref() {
+                        output.push(
+                            FunctionEmitter::new(self.typed, self.source, &mut self.strings)
+                                .emit_initializer(class, initializer, signature)?,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        output.push(self.emit_constructor(class)?);
+        Ok(output)
+    }
+
+    fn emit_constructor(&self, class: &TypeDeclaration) -> Result<String, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(&class.name.name)
+            .ok_or_else(|| self.error("missing semantic class symbols", class.name.span))?;
+        let explicit_initializer = info.initializer.is_some();
+        let field_types = info
+            .field_order
+            .iter()
+            .map(|name| {
+                info.fields.get(name).cloned().ok_or_else(|| {
+                    self.error(
+                        format!("missing type information for field '{name}'"),
+                        class.name.span,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let signature = info
+            .initializer
+            .clone()
+            .unwrap_or_else(|| FunctionType::new(field_types.clone(), Type::Void));
+        let mut parameters = Vec::new();
+        let mut call_arguments = Vec::new();
+        for (index, ty) in signature.parameters.iter().enumerate() {
+            let ty_name = llvm_type(ty, class.name.span, self.source)?;
+            parameters.push(format!("{ty_name} %arg{index}"));
+            call_arguments.push(format!("{ty_name} %arg{index}"));
+        }
+
+        let encoded = encode_identifier(&class.name.name);
+        let layout = class_type_name(&class.name.name);
+        let mut body = format!(
+            "define ptr @{}({}) {{\nentry:\n  %size.end = getelementptr {layout}, ptr null, i32 1\n  %size = ptrtoint ptr %size.end to i64\n  %object = call ptr @{}(i64 %size)\n  %metadata.slot = getelementptr inbounds {layout}, ptr %object, i32 0, i32 0\n  store ptr @.princi.typeinfo.{encoded}, ptr %metadata.slot\n",
+            constructor_name(&class.name.name),
+            parameters.join(", "),
+            crate::runtime::windows_x86_64::object_allocator_function()
+        );
+        if explicit_initializer {
+            let mut arguments = vec!["ptr %object".to_owned()];
+            arguments.extend(call_arguments);
+            body.push_str(&format!(
+                "  call void @{}({})\n",
+                initializer_name(&class.name.name),
+                arguments.join(", ")
+            ));
+        } else {
+            for (index, ty) in field_types.iter().enumerate() {
+                let ty_name = llvm_type(ty, class.name.span, self.source)?;
+                let field_index = index + 1;
+                body.push_str(&format!(
+                    "  %field.{index} = getelementptr inbounds {layout}, ptr %object, i32 0, i32 {field_index}\n  store {ty_name} %arg{index}, ptr %field.{index}\n"
+                ));
+            }
+        }
+        body.push_str("  ret ptr %object\n}\n");
+        Ok(body)
     }
 
     fn function_return_type(&self, function: &FunctionDeclaration) -> Result<Type, Diagnostic> {
@@ -389,6 +532,7 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<&'stati
         Type::Float => Ok("double"),
         Type::Bool => Ok("i1"),
         Type::String => Ok("ptr"),
+        Type::Class(_) => Ok("ptr"),
         Type::Void => Ok("void"),
         other => Err(Diagnostic::at(
             format!("LLVM code generation does not support type {other}"),
@@ -399,6 +543,26 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<&'stati
 
 fn function_name(name: &str) -> String {
     format!("princi_fn_{}", encode_identifier(name))
+}
+
+fn class_type_name(name: &str) -> String {
+    format!("%princi.class.{}", encode_identifier(name))
+}
+
+fn method_name(class_name: &str, name: &str) -> String {
+    format!(
+        "princi_method_{}_{}",
+        encode_identifier(class_name),
+        encode_identifier(name)
+    )
+}
+
+fn initializer_name(class_name: &str) -> String {
+    format!("princi_init_{}", encode_identifier(class_name))
+}
+
+fn constructor_name(class_name: &str) -> String {
+    format!("princi_new_{}", encode_identifier(class_name))
 }
 
 fn encode_identifier(name: &str) -> String {
@@ -482,32 +646,100 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
     }
 
-    fn emit(mut self, function: &FunctionDeclaration) -> Result<String, Diagnostic> {
+    fn emit(self, function: &FunctionDeclaration) -> Result<String, Diagnostic> {
         let signature = self.function_signature(function)?;
-        if signature.return_type.as_ref() != &Type::Void && !block_returns(&function.body) {
+        self.emit_routine(
+            &function_name(&function.name.name),
+            &function.name.name,
+            function.name.span,
+            &function.parameters,
+            &function.body,
+            &signature,
+            None,
+        )
+    }
+
+    fn emit_method(
+        self,
+        class: &TypeDeclaration,
+        method: &FunctionDeclaration,
+        signature: &FunctionType,
+    ) -> Result<String, Diagnostic> {
+        self.emit_routine(
+            &method_name(&class.name.name, &method.name.name),
+            &format!("{}.{}", class.name.name, method.name.name),
+            method.name.span,
+            &method.parameters,
+            &method.body,
+            signature,
+            Some(&class.name.name),
+        )
+    }
+
+    fn emit_initializer(
+        self,
+        class: &TypeDeclaration,
+        initializer: &InitializerDeclaration,
+        signature: &FunctionType,
+    ) -> Result<String, Diagnostic> {
+        self.emit_routine(
+            &initializer_name(&class.name.name),
+            &format!("{}.init", class.name.name),
+            initializer.span,
+            &initializer.parameters,
+            &initializer.body,
+            signature,
+            Some(&class.name.name),
+        )
+    }
+
+    fn emit_routine(
+        mut self,
+        symbol: &str,
+        display_name: &str,
+        name_span: SourceSpan,
+        routine_parameters: &[crate::ast::Parameter],
+        body: &Block,
+        signature: &FunctionType,
+        owner: Option<&str>,
+    ) -> Result<String, Diagnostic> {
+        if signature.return_type.as_ref() != &Type::Void && !block_returns(body) {
             return Err(self.error(
                 format!(
-                    "function '{}' may finish without returning {}",
-                    function.name.name, signature.return_type
+                    "function '{display_name}' may finish without returning {}",
+                    signature.return_type
                 ),
-                function.body.span,
+                body.span,
             ));
         }
 
-        let return_ty = llvm_type(&signature.return_type, function.name.span, self.source)?;
-        let mut parameters = Vec::new();
-        for (index, (parameter, ty)) in function
-            .parameters
+        let return_ty = llvm_type(&signature.return_type, name_span, self.source)?;
+        let mut llvm_parameters = Vec::new();
+        if owner.is_some() {
+            llvm_parameters.push("ptr %self".to_owned());
+        }
+        for (index, (parameter, ty)) in routine_parameters
             .iter()
             .zip(&signature.parameters)
             .enumerate()
         {
             let ty_name = llvm_type(ty, parameter.type_reference.span, self.source)?;
-            parameters.push(format!("{ty_name} %arg{index}"));
+            llvm_parameters.push(format!("{ty_name} %arg{index}"));
         }
 
         self.push_scope();
-        for (index, parameter) in function.parameters.iter().enumerate() {
+        if let Some(owner) = owner {
+            let address = self.allocate("ptr");
+            self.instruction(&format!("store ptr %self, ptr {address}"));
+            self.bind(
+                "self",
+                LocalBinding {
+                    address,
+                    ty: Type::Class(owner.to_owned()),
+                },
+            );
+        }
+        for (index, parameter) in routine_parameters.iter().enumerate() {
             let ty = self
                 .typed
                 .parameter_type(parameter)
@@ -518,14 +750,14 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             self.instruction(&format!("store {ty_name} %arg{index}, ptr {address}"));
             self.bind(&parameter.name.name, LocalBinding { address, ty });
         }
-        self.emit_block_contents(&function.body)?;
+        self.emit_block_contents(body)?;
         if !self.terminated {
             if signature.return_type.as_ref() == &Type::Void {
                 self.terminate("ret void");
             } else {
                 // This is only reachable when flow-sensitive semantic checking
                 // is incomplete; it still keeps the module structurally valid.
-                let ty_name = llvm_type(&signature.return_type, function.body.span, self.source)?;
+                let ty_name = llvm_type(&signature.return_type, body.span, self.source)?;
                 let fallback = if ty_name == "double" {
                     "0.0"
                 } else if ty_name == "ptr" {
@@ -539,8 +771,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         self.pop_scope();
         let mut output = format!(
             "define {return_ty} @{}({}) {{\nentry:\n",
-            function_name(&function.name.name),
-            parameters.join(", ")
+            symbol,
+            llvm_parameters.join(", ")
         );
         for allocation in self.allocas {
             output.push_str("  ");
@@ -587,33 +819,37 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.bind(&variable.name.name, LocalBinding { address, ty });
             }
             StatementKind::Assignment(assignment) => {
-                let target = ungroup_kind(&assignment.target.kind);
-                let ExpressionKind::Identifier(identifier) = target else {
-                    return Err(self.error(
-                        "the procedural v0.1 LLVM backend supports assignment to local variables only",
-                        assignment.target.span,
-                    ));
+                let (address, ty) = match ungroup_kind(&assignment.target.kind) {
+                    ExpressionKind::Identifier(identifier) => {
+                        let binding = self.lookup(&identifier.name).ok_or_else(|| {
+                            self.error(
+                                format!(
+                                    "code generation could not resolve assignment target '{}'",
+                                    identifier.name
+                                ),
+                                identifier.span,
+                            )
+                        })?;
+                        (binding.address, binding.ty)
+                    }
+                    ExpressionKind::Member { object, member } => {
+                        self.emit_member_address(object, member)?
+                    }
+                    _ => {
+                        return Err(self.error(
+                            "the LLVM backend supports assignment to local variables and class fields",
+                            assignment.target.span,
+                        ));
+                    }
                 };
-                let binding = self.lookup(&identifier.name).ok_or_else(|| {
-                    self.error(
-                        format!(
-                            "code generation could not resolve assignment target '{}'",
-                            identifier.name
-                        ),
-                        identifier.span,
-                    )
-                })?;
                 let value = self.emit_expression(&assignment.value)?;
-                let ty_name = llvm_type(&binding.ty, assignment.target.span, self.source)?;
+                let ty_name = llvm_type(&ty, assignment.target.span, self.source)?;
                 let stored = if assignment.operator == AssignmentOperator::Assign {
                     value.operand
                 } else {
                     let previous = self.fresh_value();
-                    self.instruction(&format!(
-                        "{previous} = load {ty_name}, ptr {}",
-                        binding.address
-                    ));
-                    match (assignment.operator, &binding.ty) {
+                    self.instruction(&format!("{previous} = load {ty_name}, ptr {address}"));
+                    match (assignment.operator, &ty) {
                         (AssignmentOperator::AddAssign, Type::String) => {
                             let combined = self.fresh_value();
                             self.instruction(&format!(
@@ -640,10 +876,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                         }
                     }
                 };
-                self.instruction(&format!(
-                    "store {ty_name} {stored}, ptr {}",
-                    binding.address
-                ));
+                self.instruction(&format!("store {ty_name} {stored}, ptr {address}"));
             }
             StatementKind::If(if_statement) => {
                 let condition = self.emit_expression(&if_statement.condition)?;
@@ -802,9 +1035,30 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     operand: result,
                 })
             }
+            ExpressionKind::SelfValue => {
+                let binding = self.lookup("self").ok_or_else(|| {
+                    self.error("self is unavailable in this routine", expression.span)
+                })?;
+                let result = self.fresh_value();
+                self.instruction(&format!("{result} = load ptr, ptr {}", binding.address));
+                Ok(IrValue {
+                    ty: binding.ty,
+                    operand: result,
+                })
+            }
             ExpressionKind::Literal(literal) => self.emit_literal(literal, expression.span),
             ExpressionKind::Call { callee, arguments } => {
                 self.emit_call(callee, arguments, expression.span)
+            }
+            ExpressionKind::Member { object, member } => {
+                let (address, ty) = self.emit_member_address(object, member)?;
+                let ty_name = llvm_type(&ty, member.span, self.source)?;
+                let result = self.fresh_value();
+                self.instruction(&format!("{result} = load {ty_name}, ptr {address}"));
+                Ok(IrValue {
+                    ty,
+                    operand: result,
+                })
             }
             ExpressionKind::Unary { operator, operand } => {
                 if *operator == UnaryOperator::Negative && self.is_minimum_int_literal(operand) {
@@ -850,17 +1104,143 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 operator,
                 right,
             } => self.emit_binary(left, *operator, right, expression.span),
+            ExpressionKind::Construction { type_name, fields } => {
+                self.emit_named_construction(type_name, fields, expression.span)
+            }
             ExpressionKind::Group(inner) => self.emit_expression(inner),
-            ExpressionKind::SelfValue
-            | ExpressionKind::List(_)
-            | ExpressionKind::Construction { .. }
-            | ExpressionKind::Member { .. }
+            ExpressionKind::List(_)
             | ExpressionKind::Index { .. }
             | ExpressionKind::Range { .. } => Err(self.error(
-                "this expression is outside the procedural v0.1 LLVM backend",
+                "this expression is outside the supported v0.1 LLVM backend",
                 expression.span,
             )),
         }
+    }
+
+    fn emit_member_address(
+        &mut self,
+        object: &Expression,
+        member: &crate::ast::Identifier,
+    ) -> Result<(String, Type), Diagnostic> {
+        let receiver = self.emit_expression(object)?;
+        let Type::Class(class_name) = &receiver.ty else {
+            return Err(self.error(
+                format!("cannot lower member '{}' on {}", member.name, receiver.ty),
+                member.span,
+            ));
+        };
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(class_name)
+            .ok_or_else(|| self.error("missing semantic class layout", member.span))?;
+        let Some(field_offset) = info
+            .field_order
+            .iter()
+            .position(|name| name == &member.name)
+        else {
+            return Err(self.error(
+                format!("'{}' is not a field of class '{}'", member.name, class_name),
+                member.span,
+            ));
+        };
+        let ty = info
+            .fields
+            .get(&member.name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic field type", member.span))?;
+        let address = self.fresh_value();
+        self.instruction(&format!(
+            "{address} = getelementptr inbounds {}, ptr {}, i32 0, i32 {}",
+            class_type_name(class_name),
+            receiver.operand,
+            field_offset + 1
+        ));
+        Ok((address, ty))
+    }
+
+    fn emit_named_construction(
+        &mut self,
+        type_name: &crate::ast::Identifier,
+        fields: &[crate::ast::FieldInitializer],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let class_name = match self.typed.symbols.global(&type_name.name) {
+            Some(GlobalSymbol::Type(Type::Class(name))) => name.clone(),
+            _ => {
+                return Err(self.error(
+                    format!(
+                        "named construction for '{}' is not supported by the native backend",
+                        type_name.name
+                    ),
+                    span,
+                ));
+            }
+        };
+        let object = self.emit_allocate_object(&class_name)?;
+        let layout = class_type_name(&class_name);
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(&class_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic class layout", type_name.span))?;
+        for field in fields {
+            let Some(field_offset) = info
+                .field_order
+                .iter()
+                .position(|name| name == &field.name.name)
+            else {
+                return Err(self.error("missing semantic field layout", field.name.span));
+            };
+            let field_type = info
+                .fields
+                .get(&field.name.name)
+                .cloned()
+                .ok_or_else(|| self.error("missing semantic field type", field.name.span))?;
+            let value = self.emit_expression(&field.value)?;
+            if !field_type.accepts(&value.ty) {
+                return Err(self.error(
+                    "field initializer type changed after semantic analysis",
+                    field.value.span,
+                ));
+            }
+            let ty_name = llvm_type(&field_type, field.span, self.source)?;
+            let address = self.fresh_value();
+            self.instruction(&format!(
+                "{address} = getelementptr inbounds {layout}, ptr {object}, i32 0, i32 {}",
+                field_offset + 1
+            ));
+            self.instruction(&format!("store {ty_name} {}, ptr {address}", value.operand));
+        }
+        Ok(IrValue {
+            ty: Type::Class(class_name),
+            operand: object,
+        })
+    }
+
+    fn emit_allocate_object(&mut self, class_name: &str) -> Result<String, Diagnostic> {
+        let layout = class_type_name(class_name);
+        let encoded = encode_identifier(class_name);
+        let size_end = self.fresh_value();
+        let size = self.fresh_value();
+        let object = self.fresh_value();
+        let metadata = self.fresh_value();
+        self.instruction(&format!(
+            "{size_end} = getelementptr {layout}, ptr null, i32 1"
+        ));
+        self.instruction(&format!("{size} = ptrtoint ptr {size_end} to i64"));
+        self.instruction(&format!(
+            "{object} = call ptr @{}(i64 {size})",
+            crate::runtime::windows_x86_64::object_allocator_function()
+        ));
+        self.instruction(&format!(
+            "{metadata} = getelementptr inbounds {layout}, ptr {object}, i32 0, i32 0"
+        ));
+        self.instruction(&format!(
+            "store ptr @.princi.typeinfo.{encoded}, ptr {metadata}"
+        ));
+        Ok(object)
     }
 
     fn emit_literal(&mut self, literal: &Literal, span: SourceSpan) -> Result<IrValue, Diagnostic> {
@@ -916,15 +1296,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         arguments: &[Expression],
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
+        if let ExpressionKind::Member { object, member } = ungroup_kind(&callee.kind) {
+            return self.emit_method_call(callee, object, member, arguments, span);
+        }
         let ExpressionKind::Identifier(identifier) = ungroup_kind(&callee.kind) else {
             return Err(self.error(
-                "only direct function calls are supported by the procedural v0.1 LLVM backend",
+                "only direct function and instance method calls are supported by the v0.1 LLVM backend",
                 callee.span,
             ));
         };
         if self.lookup(&identifier.name).is_some() {
             return Err(self.error(
-                "indirect calls through local values are outside the procedural v0.1 LLVM backend",
+                "indirect calls through local values are outside the v0.1 LLVM backend",
                 callee.span,
             ));
         }
@@ -964,18 +1347,100 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             });
         }
 
-        let signature = match self.typed.symbols.global(&identifier.name) {
-            Some(GlobalSymbol::Function(signature)) => signature.clone(),
+        let global = self.typed.symbols.global(&identifier.name).cloned();
+        let signature = match global {
+            Some(GlobalSymbol::Type(Type::Class(class_name))) => {
+                let signature = self.constructor_signature(&class_name, span)?;
+                self.emit_constructor_call(&class_name, &signature, &values, span)
+            }
+            Some(GlobalSymbol::Type(Type::Struct(_))) => Err(self.error(
+                "struct construction is not supported by the v0.1 native backend",
+                identifier.span,
+            )),
+            Some(GlobalSymbol::Function(signature)) => {
+                self.emit_function_call(&identifier.name, &signature, &values, span)
+            }
+            _ => Err(self.error(
+                format!(
+                    "missing semantic signature for function '{}'",
+                    identifier.name
+                ),
+                identifier.span,
+            )),
+        };
+        signature
+    }
+
+    fn emit_method_call(
+        &mut self,
+        callee: &Expression,
+        object: &Expression,
+        member: &crate::ast::Identifier,
+        arguments: &[Expression],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let receiver = self.emit_expression(object)?;
+        let Type::Class(class_name) = &receiver.ty else {
+            return Err(self.error(
+                format!(
+                    "cannot dispatch method '{}' on {}",
+                    member.name, receiver.ty
+                ),
+                member.span,
+            ));
+        };
+        let signature = match self.typed.expression_type(callee) {
+            Some(Type::Function(signature)) => signature.clone(),
             _ => {
                 return Err(self.error(
                     format!(
-                        "missing semantic signature for function '{}'",
-                        identifier.name
+                        "missing semantic signature for method '{}.{}'",
+                        class_name, member.name
                     ),
-                    identifier.span,
-                ))
+                    member.span,
+                ));
             }
         };
+        let values = arguments
+            .iter()
+            .map(|argument| self.emit_expression(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        if values.len() != signature.parameters.len() {
+            return Err(self.error(
+                "method argument count changed after semantic analysis",
+                span,
+            ));
+        }
+        let return_ty = llvm_type(&signature.return_type, span, self.source)?;
+        let mut call_arguments = vec![format!("ptr {}", receiver.operand)];
+        for (value, ty) in values.iter().zip(&signature.parameters) {
+            call_arguments.push(format!(
+                "{} {}",
+                llvm_type(ty, span, self.source)?,
+                value.operand
+            ));
+        }
+        let call = format!(
+            "call {return_ty} @{}({})",
+            method_name(class_name, &member.name),
+            call_arguments.join(", ")
+        );
+        self.emit_call_result(call, signature.return_type.as_ref().clone())
+    }
+
+    fn emit_function_call(
+        &mut self,
+        name: &str,
+        signature: &FunctionType,
+        values: &[IrValue],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        if values.len() != signature.parameters.len() {
+            return Err(self.error(
+                "function argument count changed after semantic analysis",
+                span,
+            ));
+        }
         let return_ty = llvm_type(&signature.return_type, span, self.source)?;
         let arguments = values
             .iter()
@@ -989,11 +1454,73 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             })
             .collect::<Result<Vec<_>, Diagnostic>>()?
             .join(", ");
-        let call = format!(
-            "call {return_ty} @{}({arguments})",
-            function_name(&identifier.name)
-        );
-        if *signature.return_type == Type::Void {
+        let call = format!("call {return_ty} @{}({arguments})", function_name(name));
+        self.emit_call_result(call, signature.return_type.as_ref().clone())
+    }
+
+    fn emit_constructor_call(
+        &mut self,
+        class_name: &str,
+        signature: &FunctionType,
+        values: &[IrValue],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        if values.len() != signature.parameters.len() {
+            return Err(self.error(
+                "constructor argument count changed after semantic analysis",
+                span,
+            ));
+        }
+        let arguments = values
+            .iter()
+            .zip(&signature.parameters)
+            .map(|(value, ty)| {
+                Ok(format!(
+                    "{} {}",
+                    llvm_type(ty, span, self.source)?,
+                    value.operand
+                ))
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?
+            .join(", ");
+        let result = self.fresh_value();
+        self.instruction(&format!(
+            "{result} = call ptr @{}({arguments})",
+            constructor_name(class_name)
+        ));
+        Ok(IrValue {
+            ty: Type::Class(class_name.to_owned()),
+            operand: result,
+        })
+    }
+
+    fn constructor_signature(
+        &self,
+        class_name: &str,
+        span: SourceSpan,
+    ) -> Result<FunctionType, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(class_name)
+            .ok_or_else(|| self.error("missing semantic class symbols", span))?;
+        if let Some(signature) = &info.initializer {
+            return Ok(signature.clone());
+        }
+        let parameters = info
+            .field_order
+            .iter()
+            .map(|name| {
+                info.fields.get(name).cloned().ok_or_else(|| {
+                    self.error(format!("missing semantic field type for '{name}'"), span)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FunctionType::new(parameters, Type::Void))
+    }
+
+    fn emit_call_result(&mut self, call: String, return_type: Type) -> Result<IrValue, Diagnostic> {
+        if return_type == Type::Void {
             self.instruction(&call);
             Ok(IrValue {
                 ty: Type::Void,
@@ -1003,7 +1530,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             let result = self.fresh_value();
             self.instruction(&format!("{result} = {call}"));
             Ok(IrValue {
-                ty: *signature.return_type,
+                ty: return_type,
                 operand: result,
             })
         }
@@ -1383,10 +1910,73 @@ mod tests {
     }
 
     #[test]
-    fn reports_nonprocedural_declarations_at_their_source_location() {
+    fn reports_struct_declarations_at_their_source_location() {
         let error = lower("struct Point {}\nfn main() {}")
-            .expect_err("struct lowering is outside the procedural subset");
+            .expect_err("struct lowering is outside the supported native subset");
         assert!(error.contains("backend.prnc:1:8: error:"));
-        assert!(error.contains("classes and structs"));
+        assert!(error.contains("structs"));
+    }
+
+    #[test]
+    fn lowers_class_layout_constructors_fields_self_and_static_method_calls() {
+        let ir = lower(
+            r#"class User {
+    name: String
+    age: Int
+
+    init(name: String, age: Int) {
+        self.name = name
+        self.age = age
+    }
+
+    fn birthday() {
+        self.age += 1
+    }
+
+    fn getAge() -> Int {
+        return self.age
+    }
+}
+
+fn main() {
+    var user = User("Alice", 24)
+    user.birthday()
+    print(user.getAge())
+}"#,
+        )
+        .expect("class program should lower");
+
+        assert!(ir.contains("%princi.class.55736572 = type { ptr, ptr, i64 }"));
+        assert!(ir.contains("@princi_init_55736572(ptr %self, ptr %arg0, i64 %arg1)"));
+        assert!(ir.contains("@princi_method_55736572_6269727468646179(ptr %self)"));
+        assert!(ir.contains("@princi_method_55736572_676574416765(ptr %self)"));
+        assert!(ir.contains("call void @princi_init_55736572(ptr %object, ptr %arg0, i64 %arg1)"));
+        assert!(ir.contains("call void @princi_method_55736572_6269727468646179(ptr"));
+        assert!(ir.contains("call i64 @princi_method_55736572_676574416765(ptr"));
+        assert!(ir.contains("@.princi.typeinfo.55736572 = private constant %princi.typeinfo"));
+    }
+
+    #[test]
+    fn lowers_default_and_named_class_construction_and_field_mutation() {
+        let ir = lower(
+            r#"class Counter {
+    value: Int
+}
+
+fn main() {
+    var positional = Counter(2)
+    var named = Counter { value: 4 }
+    positional.value += 1
+    named.value = positional.value
+    print(named.value)
+}"#,
+        )
+        .expect("default and named class construction should lower");
+
+        assert!(ir.contains("define ptr @princi_new_436f756e746572(i64 %arg0)"));
+        assert!(ir.contains("call ptr @princi_rt_alloc_object(i64"));
+        assert!(ir.contains("store i64 %arg0, ptr %field.0"));
+        assert!(ir.contains("store i64 4, ptr"));
+        assert!(ir.contains("store i64 %v"));
     }
 }

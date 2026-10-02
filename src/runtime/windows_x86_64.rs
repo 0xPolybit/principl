@@ -12,6 +12,7 @@ declare i32 @strcmp(ptr, ptr)
 declare i64 @strlen(ptr)
 declare ptr @malloc(i64)
 declare ptr @memcpy(ptr, ptr, i64)
+declare ptr @calloc(i64, i64)
 
 @.princi.rt.fmt.int = private unnamed_addr constant [5 x i8] c"%lld\00", align 1
 @.princi.rt.fmt.float = private unnamed_addr constant [6 x i8] c"%.15g\00", align 1
@@ -97,6 +98,12 @@ entry:
   %equal = icmp eq i32 %comparison, 0
   ret i1 %equal
 }
+
+define internal ptr @princi_rt_alloc_object(i64 %size) {
+entry:
+  %object = call ptr @calloc(i64 1, i64 %size)
+  ret ptr %object
+}
 "#;
 
 pub(crate) fn print_function(ty: &Type, newline: bool) -> Option<&'static str> {
@@ -119,6 +126,10 @@ pub(crate) fn string_concat_function() -> &'static str {
 
 pub(crate) fn string_equal_function() -> &'static str {
     "princi_rt_string_equal"
+}
+
+pub(crate) fn object_allocator_function() -> &'static str {
+    "princi_rt_alloc_object"
 }
 
 /// Adapt Princi main's return value to the MinGW CRT int main() contract.

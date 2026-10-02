@@ -255,3 +255,86 @@ fn print_and_println_have_distinct_newline_behavior() {
     );
     assert_eq!(stdout, "value:42!\n7\n");
 }
+
+#[cfg(windows)]
+#[test]
+fn classes_initialize_mutate_fields_and_dispatch_methods() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "classes.prnc",
+        r#"class User {
+    name: String
+    age: Int
+
+    init(name: String, age: Int) {
+        self.name = name
+        self.age = age
+    }
+
+    fn birthday() {
+        self.age += 1
+    }
+
+    fn getAge() -> Int {
+        return self.age
+    }
+
+    fn greeting() -> String {
+        return "Hello, " + self.name
+    }
+}
+
+fn main() {
+    var user = User("Alice", 24)
+    user.birthday()
+    println(user.greeting())
+    println(user.getAge())
+}"#,
+    );
+    assert_eq!(stdout, "Hello, Alice\n25\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn classes_support_default_and_named_field_construction() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "class construction.princi",
+        r#"class Counter {
+    value: Int
+
+    fn increment() {
+        self.value += 1
+    }
+
+    fn get() -> Int {
+        return self.value
+    }
+}
+
+class Meter {
+    value: Int
+
+    fn get() -> Int {
+        return self.value * 10
+    }
+}
+
+fn main() {
+    var positional = Counter(2)
+    var named = Counter { value: 4 }
+    var meter = Meter(3)
+    positional.increment()
+    println(positional.get())
+    println(named.get())
+    println(meter.get())
+}"#,
+    );
+    assert_eq!(stdout, "3\n4\n30\n");
+}

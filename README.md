@@ -2,7 +2,7 @@
 
 Princi is a programming language and compiler project. Its Rust v0.1 compiler
 loads, parses, and type-checks source, then generates Windows x86-64 executables
-for the core procedural subset.
+for the core procedural language and basic classes.
 
 ## v0.1 compiler contract
 
@@ -67,14 +67,14 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
-| `codegen` | Lower the typed procedural subset to LLVM IR, verify it, emit a Windows object, and link the executable. |
+| `codegen` | Lower the typed procedural and class subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
 | `runtime` | Route source built-ins through a private ABI and provide Windows runtime helpers. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
-analysis, procedural native lowering, minimal runtime, and Windows executable
-generation are implemented. Classes, structs, lists, indexing, and member
-access are parsed and type-checked but are not part of the native v0.1 subset;
-the backend reports a positioned error if one reaches code generation.
+analysis, procedural and basic class lowering, minimal runtime, and Windows
+executable generation are implemented. Structs, lists, indexing, and imports
+are parsed and type-checked but are not part of the native v0.1 subset; the
+backend reports a positioned error if one reaches code generation.
 
 ## v0.1 syntax
 
@@ -102,8 +102,9 @@ The parser retains end-exclusive UTF-8 byte spans throughout the AST and
 reports source-positioned syntax diagnostics. It recovers at statement,
 member, and declaration boundaries so a build can report multiple parse errors.
 These syntax features define the v0.1 parser boundary. Native generation is
-implemented for the procedural subset described below; additional parsed
-constructs receive an explicit backend diagnostic until their lowering exists.
+implemented for the procedural and class subsets described below; additional
+parsed constructs receive an explicit backend diagnostic until their lowering
+exists.
 
 ## v0.1 static typing
 
@@ -152,15 +153,16 @@ A positional call such as `Point(1, 2)` invokes the declared `init` constructor;
 without `init`, the compiler provides a positional constructor in field
 declaration order.
 
-## Native procedural subset
+## Native v0.1 subset
 
 The backend generates native code for `Int`, `Float`, `Bool`, and `String`;
 local `let`/`var` bindings and assignment; arithmetic, comparison, and boolean
 expressions; `if`/`else`, `while`, and integer `for` loops; functions,
-parameters, returns, calls, recursion, `print`, and `println`. Integer range
-loops use an inclusive start and exclusive end (`0..count`). Numeric types do
-not implicitly convert. `main` must take no parameters and return `Void` or
-`Int`; `Void` functions return process status zero.
+parameters, returns, calls, recursion, classes, instance fields, constructors,
+instance methods, `print`, and `println`. Integer range loops use an inclusive
+start and exclusive end (`0..count`). Numeric types do not implicitly convert.
+`main` must take no parameters and return `Void` or `Int`; `Void` functions
+return process status zero.
 
 ```princi
 fn factorial(n: Int) -> Int {
@@ -176,9 +178,49 @@ fn main() {
 }
 ```
 
-This program prints `120`. The parser also accepts classes, structs, lists,
-indexing, member access, and imports, but those features are not part of the
-native v0.1 subset and do not yet produce executables.
+This program prints `120`. The parser also accepts structs, lists, indexing,
+and imports, but those features are not part of the native v0.1 subset and do
+not yet produce executables.
+
+## Classes
+
+Classes declare typed instance fields, one optional `init` constructor, and
+instance methods. Use `self` to read or mutate fields from a method or
+constructor. Construction with `User(args)` calls the declared initializer;
+without an initializer, positional arguments initialize fields in declaration
+order. Named construction such as `User { name: "Alice", age: 24 }` initializes
+every field directly.
+
+```princi
+class User {
+    name: String
+    age: Int
+
+    init(name: String, age: Int) {
+        self.name = name
+        self.age = age
+    }
+
+    fn birthday() {
+        self.age += 1
+    }
+
+    fn getAge() -> Int {
+        return self.age
+    }
+}
+
+fn main() {
+    var user = User("Alice", 24)
+    user.birthday()
+    println(user.getAge())
+}
+```
+
+Methods use static dispatch and are selected from the receiver's declared
+class. There is no inheritance, virtual dispatch, or method overloading in
+v0.1. Visibility modifiers are not implemented; fields and methods are public
+within the source unit.
 
 ## Built-in runtime
 
@@ -194,6 +236,11 @@ wrapper calls Princi `main` and passes its `Int` result to the MinGW C runtime
 as the process exit code, or returns zero for a `Void` entry point. The runtime
 is embedded into generated LLVM IR and linked automatically whenever the
 `princi build` command runs.
+
+Class instances use zero-initialized heap storage. Their internal layout starts
+with a type-metadata pointer, followed by fields in declaration order. Fields
+and methods are public within the source unit; methods use static dispatch and
+do not require vtables.
 
 ## Supported lexical syntax
 
