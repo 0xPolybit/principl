@@ -155,6 +155,7 @@ impl<'a> Analyzer<'a> {
         self.register_global_names(program);
         self.resolve_global_functions(program);
         self.register_type_members(program);
+        self.validate_struct_value_layouts(program);
         self.check_declaration_bodies(program);
 
         SemanticResult {
@@ -250,10 +251,85 @@ impl<'a> Analyzer<'a> {
             for member in &type_declaration.members {
                 match member {
                     ClassMember::Field(field) => self.register_field(type_declaration, field),
+                    ClassMember::Method(method)
+                        if type_declaration.kind == TypeDeclarationKind::Struct =>
+                    {
+                        self.error("methods on structs are not supported in v0.1", method.name.span)
+                    }
                     ClassMember::Method(method) => self.register_method(type_declaration, method),
+                    ClassMember::Initializer(initializer)
+                        if type_declaration.kind == TypeDeclarationKind::Struct =>
+                    {
+                        self.error(
+                            "structs do not support init constructors in v0.1; construct them from fields",
+                            initializer.span,
+                        )
+                    }
                     ClassMember::Initializer(initializer) => {
                         self.register_initializer(type_declaration, initializer)
                     }
+                }
+            }
+        }
+    }
+
+    fn validate_struct_value_layouts(&mut self, program: &Program) {
+        let mut graph = HashMap::<String, Vec<(String, SourceSpan)>>::new();
+        let mut source_order = Vec::new();
+        for declaration in &program.declarations {
+            let Declaration::Struct(structure) = declaration else {
+                continue;
+            };
+            if !self.accepted_type_declarations.contains(&structure.span) {
+                continue;
+            }
+            let mut fields = Vec::new();
+            for member in &structure.members {
+                let ClassMember::Field(field) = member else {
+                    continue;
+                };
+                if let Some(Type::Struct(target)) = self
+                    .types
+                    .get(&structure.name.name)
+                    .and_then(|info| info.fields.get(&field.name.name))
+                {
+                    fields.push((target.clone(), field.type_reference.span));
+                }
+            }
+            graph.insert(structure.name.name.clone(), fields);
+            source_order.push(structure.name.name.clone());
+        }
+
+        fn find_cycle(
+            name: &str,
+            graph: &HashMap<String, Vec<(String, SourceSpan)>>,
+            states: &mut HashMap<String, u8>,
+        ) -> Option<SourceSpan> {
+            states.insert(name.to_owned(), 1);
+            for (target, span) in graph.get(name).into_iter().flatten() {
+                match states.get(target).copied().unwrap_or(0) {
+                    1 => return Some(*span),
+                    2 => continue,
+                    _ => {
+                        if let Some(cycle) = find_cycle(target, graph, states) {
+                            return Some(cycle);
+                        }
+                    }
+                }
+            }
+            states.insert(name.to_owned(), 2);
+            None
+        }
+
+        let mut states = HashMap::new();
+        for name in source_order {
+            if states.get(&name).copied().unwrap_or(0) == 0 {
+                if let Some(span) = find_cycle(&name, &graph, &mut states) {
+                    self.error(
+                        "recursive struct fields do not have a finite value layout",
+                        span,
+                    );
+                    break;
                 }
             }
         }
@@ -1447,6 +1523,78 @@ fn main() {
             .expect("Point symbols should be retained for later stages");
         assert_eq!(point_symbols.fields.get("x"), Some(&Type::Int));
         assert_eq!(point_symbols.fields.get("y"), Some(&Type::Int));
+    }
+
+    #[test]
+    fn checks_struct_values_in_parameters_returns_and_mutable_bindings() {
+        let result = analyze_text(
+            r#"struct Point { x: Float; y: Float }
+fn translate(point: Point) -> Point {
+    var moved = point
+    moved.x = moved.x + 1.0
+    return moved
+}
+fn main() {
+    var point = Point(3.0, 4.0)
+    let copy = point
+    var moved = translate(copy)
+    moved.y = 5.0
+    print(point.x)
+}"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 0)),
+            Some(&Type::Struct("Point".to_owned()))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 1)),
+            Some(&Type::Struct("Point".to_owned()))
+        );
+        assert!(matches!(
+            result.typed_program.symbols.global("translate"),
+            Some(super::GlobalSymbol::Function(signature))
+                if signature.parameters == [Type::Struct("Point".to_owned())]
+                    && signature.return_type.as_ref() == &Type::Struct("Point".to_owned())
+        ));
+    }
+
+    #[test]
+    fn rejects_struct_mutation_through_immutable_bindings_methods_and_recursive_layouts() {
+        let result = analyze_text(
+            r#"struct Node { next: Node }
+struct Point {
+    x: Int
+    fn move() { self.x = 1 }
+    init(x: Int) { self.x = x }
+}
+fn main() {
+    let point = Point { x: 0 }
+    point.x = 1
+}"#,
+        );
+
+        assert!(has_message(
+            &result,
+            "recursive struct fields do not have a finite value layout"
+        ));
+        assert!(has_message(
+            &result,
+            "methods on structs are not supported in v0.1"
+        ));
+        assert!(has_message(
+            &result,
+            "structs do not support init constructors in v0.1"
+        ));
+        assert!(has_message(
+            &result,
+            "cannot assign through an immutable binding"
+        ));
     }
 
     #[test]

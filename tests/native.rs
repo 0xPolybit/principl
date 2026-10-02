@@ -338,3 +338,78 @@ fn main() {
     );
     assert_eq!(stdout, "3\n4\n30\n");
 }
+
+#[cfg(windows)]
+#[test]
+fn structs_copy_by_value_while_class_values_keep_reference_identity() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "struct value semantics.princi",
+        r#"struct Segment {
+    start: Point
+    end: Point
+}
+
+struct Point {
+    x: Float
+    y: Float
+}
+
+struct CounterSlot {
+    counter: Counter
+}
+
+fn moveRight(point: Point) -> Point {
+    var moved = point
+    moved.x += 1.0
+    return moved
+}
+
+class Counter {
+    value: Int
+
+    init(value: Int) {
+        self.value = value
+    }
+
+    fn increment() {
+        self.value += 1
+    }
+
+    fn current() -> Int {
+        return self.value
+    }
+}
+
+fn main() {
+    var original = Point(3.0, 4.0)
+    let snapshot = original
+    var moved = moveRight(snapshot)
+    moved.x += 2.0
+    println(original.x)
+    println(snapshot.x)
+    println(moved.x)
+
+    var segment = Segment(Point(1.0, 2.0), Point(3.0, 4.0))
+    segment.start.x = 9.0
+    println(segment.start.x)
+
+    let named = Point { x: 7.0, y: 8.0 }
+    println(named.y)
+
+    var counter = Counter(1)
+    let alias = counter
+    alias.increment()
+    println(counter.current())
+
+    let slot = CounterSlot(counter)
+    let slotCopy = slot
+    slotCopy.counter.increment()
+    println(counter.current())
+}"#,
+    );
+    assert_eq!(stdout, "3\n3\n6\n9\n8\n2\n3\n");
+}

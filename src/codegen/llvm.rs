@@ -22,7 +22,7 @@ const WINDOWS_X86_64_DATA_LAYOUT: &str =
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
-/// Lower the semantically checked procedural and class subsets to LLVM IR.
+/// Lower the semantically checked procedural, class, and struct subsets to LLVM IR.
 pub fn generate_llvm_ir(typed: &TypedProgram, source: &SourceFile) -> Result<String, Diagnostic> {
     IrGenerator::new(typed, source).generate()
 }
@@ -275,7 +275,7 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let (functions, classes) = self.supported_declarations()?;
+        let (functions, classes, structs) = self.supported_declarations()?;
         let main = functions
             .iter()
             .find(|function| function.name.name == "main")
@@ -317,6 +317,9 @@ impl<'a> IrGenerator<'a> {
             crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
         ir.push_str("%princi.typeinfo = type { ptr }\n");
+        for structure in &structs {
+            ir.push_str(&self.struct_layout(structure)?);
+        }
         for class in &classes {
             ir.push_str(&self.class_layout(class)?);
         }
@@ -348,18 +351,31 @@ impl<'a> IrGenerator<'a> {
 
     fn supported_declarations(
         &self,
-    ) -> Result<(Vec<&'a FunctionDeclaration>, Vec<&'a TypeDeclaration>), Diagnostic> {
+    ) -> Result<
+        (
+            Vec<&'a FunctionDeclaration>,
+            Vec<&'a TypeDeclaration>,
+            Vec<&'a TypeDeclaration>,
+        ),
+        Diagnostic,
+    > {
         let mut functions = Vec::new();
         let mut classes = Vec::new();
+        let mut structs = Vec::new();
         for declaration in &self.typed.program.declarations {
             match declaration {
                 Declaration::Function(function) => functions.push(function),
                 Declaration::Class(item) => classes.push(item),
                 Declaration::Struct(item) => {
-                    return Err(self.error(
-                        "structs are parsed and type-checked but are not natively supported in v0.1",
-                        item.name.span,
-                    ));
+                    if item.members.iter().any(|member| {
+                        matches!(member, ClassMember::Method(_) | ClassMember::Initializer(_))
+                    }) {
+                        return Err(self.error(
+                            "struct methods and init constructors are not supported in v0.1",
+                            item.name.span,
+                        ));
+                    }
+                    structs.push(item);
                 }
                 Declaration::Import(item) => {
                     let span = item.path.first().map_or(item.span, |name| name.span);
@@ -369,7 +385,35 @@ impl<'a> IrGenerator<'a> {
                 }
             }
         }
-        Ok((functions, classes))
+        Ok((functions, classes, structs))
+    }
+
+    fn struct_layout(&self, structure: &TypeDeclaration) -> Result<String, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(&structure.name.name)
+            .ok_or_else(|| self.error("missing semantic struct layout", structure.name.span))?;
+        let mut fields = Vec::with_capacity(info.field_order.len());
+        for field_name in &info.field_order {
+            let field_type = info.fields.get(field_name).ok_or_else(|| {
+                self.error(
+                    format!("missing type information for field '{field_name}'"),
+                    structure.name.span,
+                )
+            })?;
+            let field = structure.members.iter().find_map(|member| match member {
+                ClassMember::Field(field) if field.name.name == *field_name => Some(field),
+                _ => None,
+            });
+            let span = field.map_or(structure.name.span, |field| field.type_reference.span);
+            fields.push(llvm_type(field_type, span, self.source)?);
+        }
+        Ok(format!(
+            "{} = type {{ {} }}\n",
+            struct_type_name(&structure.name.name),
+            fields.join(", ")
+        ))
     }
 
     fn class_layout(&self, class: &TypeDeclaration) -> Result<String, Diagnostic> {
@@ -391,7 +435,7 @@ impl<'a> IrGenerator<'a> {
                 _ => None,
             });
             let span = field.map_or(class.name.span, |field| field.type_reference.span);
-            fields.push(llvm_type(field_type, span, self.source)?.to_owned());
+            fields.push(llvm_type(field_type, span, self.source)?);
         }
         Ok(format!(
             "{} = type {{ {} }}\n",
@@ -526,14 +570,15 @@ impl<'a> IrGenerator<'a> {
     }
 }
 
-fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<&'static str, Diagnostic> {
+fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String, Diagnostic> {
     match ty {
-        Type::Int => Ok("i64"),
-        Type::Float => Ok("double"),
-        Type::Bool => Ok("i1"),
-        Type::String => Ok("ptr"),
-        Type::Class(_) => Ok("ptr"),
-        Type::Void => Ok("void"),
+        Type::Int => Ok("i64".to_owned()),
+        Type::Float => Ok("double".to_owned()),
+        Type::Bool => Ok("i1".to_owned()),
+        Type::String => Ok("ptr".to_owned()),
+        Type::Class(_) => Ok("ptr".to_owned()),
+        Type::Struct(name) => Ok(struct_type_name(name)),
+        Type::Void => Ok("void".to_owned()),
         other => Err(Diagnostic::at(
             format!("LLVM code generation does not support type {other}"),
             source.location(span),
@@ -547,6 +592,10 @@ fn function_name(name: &str) -> String {
 
 fn class_type_name(name: &str) -> String {
     format!("%princi.class.{}", encode_identifier(name))
+}
+
+fn struct_type_name(name: &str) -> String {
+    format!("%princi.struct.{}", encode_identifier(name))
 }
 
 fn method_name(class_name: &str, name: &str) -> String {
@@ -762,6 +811,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     "0.0"
                 } else if ty_name == "ptr" {
                     "null"
+                } else if matches!(signature.return_type.as_ref(), Type::Struct(_)) {
+                    "zeroinitializer"
                 } else {
                     "0"
                 };
@@ -809,7 +860,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     .as_ref()
                     .map(|value| self.emit_expression(value))
                     .transpose()?;
-                let address = self.allocate(ty_name);
+                let address = self.allocate(&ty_name);
                 if let Some(initializer) = initializer {
                     self.instruction(&format!(
                         "store {ty_name} {}, ptr {address}",
@@ -837,7 +888,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     }
                     _ => {
                         return Err(self.error(
-                            "the LLVM backend supports assignment to local variables and class fields",
+                            "the LLVM backend supports assignment to local variables and class or struct fields",
                             assignment.target.span,
                         ));
                     }
@@ -1050,16 +1101,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ExpressionKind::Call { callee, arguments } => {
                 self.emit_call(callee, arguments, expression.span)
             }
-            ExpressionKind::Member { object, member } => {
-                let (address, ty) = self.emit_member_address(object, member)?;
-                let ty_name = llvm_type(&ty, member.span, self.source)?;
-                let result = self.fresh_value();
-                self.instruction(&format!("{result} = load {ty_name}, ptr {address}"));
-                Ok(IrValue {
-                    ty,
-                    operand: result,
-                })
-            }
+            ExpressionKind::Member { object, member } => self.emit_member_value(object, member),
             ExpressionKind::Unary { operator, operand } => {
                 if *operator == UnaryOperator::Negative && self.is_minimum_int_literal(operand) {
                     return Ok(IrValue {
@@ -1122,25 +1164,33 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         object: &Expression,
         member: &crate::ast::Identifier,
     ) -> Result<(String, Type), Diagnostic> {
-        let receiver = self.emit_expression(object)?;
-        let Type::Class(class_name) = &receiver.ty else {
-            return Err(self.error(
-                format!("cannot lower member '{}' on {}", member.name, receiver.ty),
-                member.span,
-            ));
+        let object_type = self
+            .typed
+            .expression_type(object)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
+        let (name, class_layout) = match &object_type {
+            Type::Class(name) => (name, true),
+            Type::Struct(name) => (name, false),
+            _ => {
+                return Err(self.error(
+                    format!("cannot lower member '{}' on {object_type}", member.name),
+                    member.span,
+                ));
+            }
         };
         let info = self
             .typed
             .symbols
-            .type_symbols(class_name)
-            .ok_or_else(|| self.error("missing semantic class layout", member.span))?;
+            .type_symbols(name)
+            .ok_or_else(|| self.error("missing semantic type layout", member.span))?;
         let Some(field_offset) = info
             .field_order
             .iter()
-            .position(|name| name == &member.name)
+            .position(|field_name| field_name == &member.name)
         else {
             return Err(self.error(
-                format!("'{}' is not a field of class '{}'", member.name, class_name),
+                format!("'{}' is not a field of type '{}'", member.name, name),
                 member.span,
             ));
         };
@@ -1149,14 +1199,105 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .get(&member.name)
             .cloned()
             .ok_or_else(|| self.error("missing semantic field type", member.span))?;
+        let receiver = if class_layout {
+            self.emit_expression(object)?.operand
+        } else {
+            self.emit_place_address(object)?.0
+        };
         let address = self.fresh_value();
+        let (layout, index) = if class_layout {
+            (class_type_name(name), field_offset + 1)
+        } else {
+            (struct_type_name(name), field_offset)
+        };
         self.instruction(&format!(
-            "{address} = getelementptr inbounds {}, ptr {}, i32 0, i32 {}",
-            class_type_name(class_name),
-            receiver.operand,
-            field_offset + 1
+            "{address} = getelementptr inbounds {layout}, ptr {receiver}, i32 0, i32 {index}"
         ));
         Ok((address, ty))
+    }
+
+    fn emit_place_address(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(String, Type), Diagnostic> {
+        match ungroup_kind(&expression.kind) {
+            ExpressionKind::Identifier(identifier) => {
+                let binding = self.lookup(&identifier.name).ok_or_else(|| {
+                    self.error(
+                        format!(
+                            "code generation could not resolve local '{}'",
+                            identifier.name
+                        ),
+                        identifier.span,
+                    )
+                })?;
+                Ok((binding.address, binding.ty))
+            }
+            ExpressionKind::Member { object, member } => self.emit_member_address(object, member),
+            _ => Err(self.error(
+                "field mutation requires a local value or an addressable field",
+                expression.span,
+            )),
+        }
+    }
+
+    fn emit_member_value(
+        &mut self,
+        object: &Expression,
+        member: &crate::ast::Identifier,
+    ) -> Result<IrValue, Diagnostic> {
+        let object_type = self
+            .typed
+            .expression_type(object)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
+        if matches!(object_type, Type::Struct(_)) {
+            let receiver = self.emit_expression(object)?;
+            let Type::Struct(name) = &receiver.ty else {
+                return Err(self.error(
+                    "semantic receiver type changed during struct field lowering",
+                    object.span,
+                ));
+            };
+            let info = self
+                .typed
+                .symbols
+                .type_symbols(name)
+                .ok_or_else(|| self.error("missing semantic struct layout", member.span))?;
+            let field_index = info
+                .field_order
+                .iter()
+                .position(|field_name| field_name == &member.name)
+                .ok_or_else(|| {
+                    self.error(
+                        format!("'{}' is not a field of struct '{}'", member.name, name),
+                        member.span,
+                    )
+                })?;
+            let ty = info
+                .fields
+                .get(&member.name)
+                .cloned()
+                .ok_or_else(|| self.error("missing semantic field type", member.span))?;
+            let aggregate_type = llvm_type(&receiver.ty, member.span, self.source)?;
+            let result = self.fresh_value();
+            self.instruction(&format!(
+                "{result} = extractvalue {aggregate_type} {}, {field_index}",
+                receiver.operand
+            ));
+            return Ok(IrValue {
+                ty,
+                operand: result,
+            });
+        }
+        let (address, ty) = self.emit_member_address(object, member)?;
+        let ty_name = llvm_type(&ty, member.span, self.source)?;
+        let result = self.fresh_value();
+        self.instruction(&format!("{result} = load {ty_name}, ptr {address}"));
+        Ok(IrValue {
+            ty,
+            operand: result,
+        })
     }
 
     fn emit_named_construction(
@@ -1165,17 +1306,20 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         fields: &[crate::ast::FieldInitializer],
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
-        let class_name = match self.typed.symbols.global(&type_name.name) {
-            Some(GlobalSymbol::Type(Type::Class(name))) => name.clone(),
+        let global_type = match self.typed.symbols.global(&type_name.name) {
+            Some(GlobalSymbol::Type(ty @ (Type::Class(_) | Type::Struct(_)))) => ty.clone(),
             _ => {
                 return Err(self.error(
-                    format!(
-                        "named construction for '{}' is not supported by the native backend",
-                        type_name.name
-                    ),
+                    format!("unknown constructible type '{}'", type_name.name),
                     span,
-                ));
+                ))
             }
+        };
+        if let Type::Struct(struct_name) = &global_type {
+            return self.emit_named_struct_construction(struct_name, fields, span);
+        }
+        let Type::Class(class_name) = global_type else {
+            return Err(self.error("unsupported type in named construction", span));
         };
         let object = self.emit_allocate_object(&class_name)?;
         let layout = class_type_name(&class_name);
@@ -1216,6 +1360,55 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         Ok(IrValue {
             ty: Type::Class(class_name),
             operand: object,
+        })
+    }
+
+    fn emit_named_struct_construction(
+        &mut self,
+        struct_name: &str,
+        fields: &[crate::ast::FieldInitializer],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(struct_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic struct layout", span))?;
+        let aggregate_type = struct_type_name(struct_name);
+        let mut aggregate = "undef".to_owned();
+        for field in fields {
+            let field_index = info
+                .field_order
+                .iter()
+                .position(|name| name == &field.name.name)
+                .ok_or_else(|| self.error("missing semantic field layout", field.name.span))?;
+            let field_type = info
+                .fields
+                .get(&field.name.name)
+                .cloned()
+                .ok_or_else(|| self.error("missing semantic field type", field.name.span))?;
+            let value = self.emit_expression(&field.value)?;
+            if !field_type.accepts(&value.ty) {
+                return Err(self.error(
+                    "field initializer type changed after semantic analysis",
+                    field.value.span,
+                ));
+            }
+            let llvm_field_type = llvm_type(&field_type, field.span, self.source)?;
+            let next = self.fresh_value();
+            self.instruction(&format!(
+                "{next} = insertvalue {aggregate_type} {aggregate}, {llvm_field_type} {}, {field_index}",
+                value.operand
+            ));
+            aggregate = next;
+        }
+        if fields.is_empty() {
+            aggregate = "zeroinitializer".to_owned();
+        }
+        Ok(IrValue {
+            ty: Type::Struct(struct_name.to_owned()),
+            operand: aggregate,
         })
     }
 
@@ -1353,10 +1546,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 let signature = self.constructor_signature(&class_name, span)?;
                 self.emit_constructor_call(&class_name, &signature, &values, span)
             }
-            Some(GlobalSymbol::Type(Type::Struct(_))) => Err(self.error(
-                "struct construction is not supported by the v0.1 native backend",
-                identifier.span,
-            )),
+            Some(GlobalSymbol::Type(Type::Struct(struct_name))) => {
+                let signature = self.constructor_signature(&struct_name, span)?;
+                self.emit_struct_constructor_call(&struct_name, &signature, &values, span)
+            }
             Some(GlobalSymbol::Function(signature)) => {
                 self.emit_function_call(&identifier.name, &signature, &values, span)
             }
@@ -1494,16 +1687,70 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         })
     }
 
+    fn emit_struct_constructor_call(
+        &mut self,
+        struct_name: &str,
+        signature: &FunctionType,
+        values: &[IrValue],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        if values.len() != signature.parameters.len() {
+            return Err(self.error(
+                "struct constructor argument count changed after semantic analysis",
+                span,
+            ));
+        }
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(struct_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic struct layout", span))?;
+        let aggregate_type = struct_type_name(struct_name);
+        let mut aggregate = "undef".to_owned();
+        for (index, (value, expected_type)) in values.iter().zip(&signature.parameters).enumerate()
+        {
+            if !expected_type.accepts(&value.ty) {
+                return Err(self.error(
+                    "struct constructor argument type changed after semantic analysis",
+                    span,
+                ));
+            }
+            let field_name = info
+                .field_order
+                .get(index)
+                .ok_or_else(|| self.error("missing semantic struct field order", span))?;
+            let field_type = info
+                .fields
+                .get(field_name)
+                .ok_or_else(|| self.error("missing semantic struct field type", span))?;
+            let llvm_field_type = llvm_type(field_type, span, self.source)?;
+            let next = self.fresh_value();
+            self.instruction(&format!(
+                "{next} = insertvalue {aggregate_type} {aggregate}, {llvm_field_type} {}, {index}",
+                value.operand
+            ));
+            aggregate = next;
+        }
+        if values.is_empty() {
+            aggregate = "zeroinitializer".to_owned();
+        }
+        Ok(IrValue {
+            ty: Type::Struct(struct_name.to_owned()),
+            operand: aggregate,
+        })
+    }
+
     fn constructor_signature(
         &self,
-        class_name: &str,
+        type_name: &str,
         span: SourceSpan,
     ) -> Result<FunctionType, Diagnostic> {
         let info = self
             .typed
             .symbols
-            .type_symbols(class_name)
-            .ok_or_else(|| self.error("missing semantic class symbols", span))?;
+            .type_symbols(type_name)
+            .ok_or_else(|| self.error("missing semantic type symbols", span))?;
         if let Some(signature) = &info.initializer {
             return Ok(signature.clone());
         }
@@ -1910,11 +2157,48 @@ mod tests {
     }
 
     #[test]
-    fn reports_struct_declarations_at_their_source_location() {
-        let error = lower("struct Point {}\nfn main() {}")
-            .expect_err("struct lowering is outside the supported native subset");
-        assert!(error.contains("backend.prnc:1:8: error:"));
-        assert!(error.contains("structs"));
+    fn lowers_struct_aggregates_by_value_for_construction_access_calls_and_returns() {
+        let ir = lower(
+            r#"struct Point { x: Float; y: Float }
+fn translate(point: Point) -> Point {
+    var moved = point
+    moved.x = moved.x + 1.0
+    return moved
+}
+fn distance_squared(point: Point) -> Float {
+    return point.x * point.x + point.y * point.y
+}
+fn main() {
+    var point = Point(3.0, 4.0)
+    let named = Point { y: 4.0, x: 3.0 }
+    var copy = translate(point)
+    copy.y = 5.0
+    print(distance_squared(named))
+}"#,
+        )
+        .expect("struct value operations should lower");
+
+        assert!(ir.contains("%princi.struct.506f696e74 = type { double, double }"));
+        assert!(ir.contains(
+            "define %princi.struct.506f696e74 @princi_fn_7472616e736c617465(%princi.struct.506f696e74 %arg0)"
+        ));
+        assert!(ir.contains("insertvalue %princi.struct.506f696e74"));
+        assert!(ir.contains("extractvalue %princi.struct.506f696e74"));
+        assert!(ir.contains("ret %princi.struct.506f696e74"));
+        assert!(ir.contains("call %princi.struct.506f696e74 @princi_fn_7472616e736c617465"));
+        assert!(!ir.contains("call ptr @princi_rt_alloc_object"));
+    }
+
+    #[test]
+    fn struct_methods_and_initializers_stop_at_semantic_diagnostics() {
+        let error = lower(
+            "struct Point {\n    x: Int\n    init(x: Int) { self.x = x }\n    fn move() {}\n}\nfn main() {}",
+        )
+        .expect_err("struct init and methods are unsupported in v0.1");
+        assert!(
+            error.contains("methods on structs are not supported in v0.1"),
+            "{error}"
+        );
     }
 
     #[test]

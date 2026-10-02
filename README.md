@@ -67,21 +67,22 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
-| `codegen` | Lower the typed procedural and class subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
+| `codegen` | Lower typed procedural, class, and struct subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
 | `runtime` | Route source built-ins through a private ABI and provide Windows runtime helpers. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
-analysis, procedural and basic class lowering, minimal runtime, and Windows
-executable generation are implemented. Structs, lists, indexing, and imports
-are parsed and type-checked but are not part of the native v0.1 subset; the
-backend reports a positioned error if one reaches code generation.
+analysis, procedural/class/struct lowering, minimal runtime, and Windows
+executable generation are implemented. Lists, indexing, and imports remain
+outside the native v0.1 subset; the backend reports a positioned error if one
+reaches code generation.
 
 ## v0.1 syntax
 
 The parser accepts top-level `import` paths, `fn` declarations, `class`
 declarations, and `struct` declarations. Functions and methods have typed
-parameters, an optional `-> ReturnType`, and a block. Classes and structs may
-contain typed fields, methods, and `init` constructors.
+parameters, an optional `-> ReturnType`, and a block. Classes may contain typed
+fields, methods, and one `init` constructor. Structs contain typed fields only;
+struct methods and `init` declarations are rejected by v0.1 semantic analysis.
 
 Function bodies support `let` and `var` declarations (inferred or explicitly
 typed), assignments, nested blocks, `if`/`else`, `while`, `for name in
@@ -102,9 +103,9 @@ The parser retains end-exclusive UTF-8 byte spans throughout the AST and
 reports source-positioned syntax diagnostics. It recovers at statement,
 member, and declaration boundaries so a build can report multiple parse errors.
 These syntax features define the v0.1 parser boundary. Native generation is
-implemented for the procedural and class subsets described below; additional
-parsed constructs receive an explicit backend diagnostic until their lowering
-exists.
+implemented for the procedural, class, and field-only struct subsets described
+below; additional parsed constructs receive an explicit backend diagnostic
+until their lowering exists.
 
 ## v0.1 static typing
 
@@ -158,9 +159,12 @@ declaration order.
 The backend generates native code for `Int`, `Float`, `Bool`, and `String`;
 local `let`/`var` bindings and assignment; arithmetic, comparison, and boolean
 expressions; `if`/`else`, `while`, and integer `for` loops; functions,
-parameters, returns, calls, recursion, classes, instance fields, constructors,
-instance methods, `print`, and `println`. Integer range loops use an inclusive
-start and exclusive end (`0..count`). Numeric types do not implicitly convert.
+parameters, returns, calls, recursion, classes, structs, instance fields,
+constructors, instance methods, and `print`/`println`. Structs use value
+semantics and support fields, construction, access, mutable field updates,
+function parameters, and return values; they do not support methods or `init`.
+Integer range loops use an inclusive start and exclusive end (`0..count`).
+Numeric types do not implicitly convert.
 `main` must take no parameters and return `Void` or `Int`; `Void` functions
 return process status zero.
 
@@ -178,9 +182,9 @@ fn main() {
 }
 ```
 
-This program prints `120`. The parser also accepts structs, lists, indexing,
-and imports, but those features are not part of the native v0.1 subset and do
-not yet produce executables.
+This program prints `120`. Lists, indexing, and imports are parsed and
+type-checked but are not part of the native v0.1 subset and do not yet produce
+executables.
 
 ## Classes
 
@@ -221,6 +225,42 @@ Methods use static dispatch and are selected from the receiver's declared
 class. There is no inheritance, virtual dispatch, or method overloading in
 v0.1. Visibility modifiers are not implemented; fields and methods are public
 within the source unit.
+
+## Structs
+
+Structs are field-only value types in v0.1. Fields appear in declaration order
+in the LLVM aggregate layout. `Point(3.0, 4.0)` initializes fields in that
+order, while named construction such as `Point { x: 3.0, y: 4.0 }` initializes
+each field explicitly. Struct values are copied when assigned, passed to a
+function, or returned. A `var` binding permits field mutation; `let`, parameters,
+and loop bindings do not.
+
+```princi
+struct Point {
+    x: Float
+    y: Float
+}
+
+fn distanceSquared(point: Point) -> Float {
+    return point.x * point.x + point.y * point.y
+}
+
+fn main() {
+    var point = Point(3.0, 4.0)
+    let snapshot = point
+    point.x = 5.0
+    println(distanceSquared(snapshot))
+}
+```
+
+Structs have no `init`, methods, destructors, ownership syntax, or custom
+memory layout attributes. A struct field whose type is a class holds a class
+reference; copying the struct copies that reference, so the referenced class
+instance retains identity. In contrast, class variables are references to
+heap-allocated instances, and assigning one shares the same object. Class
+fields/methods and struct fields are public within the source unit because
+visibility modifiers are not implemented in v0.1. Recursive struct fields by
+value are rejected because they have no finite layout.
 
 ## Built-in runtime
 
