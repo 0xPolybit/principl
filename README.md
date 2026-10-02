@@ -68,7 +68,7 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
 | `codegen` | Lower typed procedural, class, struct, and list subsets to LLVM IR, verify it, emit a Windows object, and link the executable. |
-| `runtime` | Route source built-ins through a private ABI and provide Windows runtime helpers. |
+| `runtime` | Route source built-ins and managed allocation through private Windows runtime APIs. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
 analysis, procedural/class/struct/list lowering, minimal runtime, and Windows
@@ -149,9 +149,8 @@ or passing it to a function shares the same contents. `let` prevents replacing
 the binding, but allows changing the list contents with indexing or `.add`.
 There is no `remove`, `Map`, `Set`, `Queue`, or `Deque`, and no comprehensions,
 iterators, or higher-order collection functions. Lists themselves are not
-printable with `print`.
-There is no deallocation operation; list storage remains allocated until the
-process exits.
+printable with `print`. Managed list storage is retained until Princi `main`
+returns, then released by the runtime as a group.
 
 Scopes are lexical. The top-level function body shares a scope with its
 parameters; nested blocks and loop bodies introduce child scopes. A name may
@@ -292,6 +291,31 @@ fields/methods and struct fields are public within the source unit because
 visibility modifiers are not implemented in v0.1. Recursive struct fields by
 value are rejected because they have no finite layout.
 
+## Managed memory
+
+`String`, class instances, and `List<T>` values are managed references in the
+compiler type system. Struct values are copied inline, though a struct may
+contain managed references. The LLVM backend represents managed references as
+opaque pointers; Princi has no raw-pointer type or manual allocation/free
+operations.
+
+In v0.1, the private managed-memory ABI uses a process-lifetime heap registry.
+Dynamic String concatenation buffers, class instances, list headers, and list
+backing storage are all registered through the same allocator. The generated entry
+wrapper releases every registered block after Princi `main` returns; runtime
+failure paths also release the managed heap before exiting. String literals remain
+immutable module constants and do not use the heap.
+
+The heap never collects individual unreachable values while a program is
+running. Temporary objects, abandoned lists, concatenation results, and old
+list buffers retained during growth therefore contribute to peak memory until
+exit. This keeps aliases and cycles valid without source-level lifetime rules,
+but memory use can grow throughout a long-running program. A future tracing
+collector, potentially generational or concurrent, can replace the private
+allocation ABI without changing Princi syntax. Raw pointers, `alloc<T>`,
+`free`, `pin`, borrowing, ownership, and user-controlled arenas are outside
+v0.1.
+
 ## Built-in runtime
 
 `print(value)` writes an `Int`, `Float`, `Bool`, or `String` without a
@@ -300,12 +324,11 @@ by a line break. The type-specific `princi_rt_*` symbols are compiler-internal;
 they are not callable from Princi source.
 
 String literals use immutable, NUL-terminated UTF-8 storage in the generated
-module. String concatenation allocates a new buffer through the Windows C
-runtime; buffers live until process termination. The generated Windows entry
-wrapper calls Princi `main` and passes its `Int` result to the MinGW C runtime
-as the process exit code, or returns zero for a `Void` entry point. The runtime
-is embedded into generated LLVM IR and linked automatically whenever the
-`princi build` command runs.
+module. String concatenation uses the managed heap described above. The
+generated Windows entry wrapper calls Princi `main`, releases managed storage,
+and passes its `Int` result to the MinGW C runtime as the process exit code, or
+returns zero for a `Void` entry point. The runtime is embedded into generated
+LLVM IR and linked automatically whenever the `princi build` command runs.
 
 Class instances use zero-initialized heap storage. Their internal layout starts
 with a type-metadata pointer, followed by fields in declaration order. Fields
@@ -339,7 +362,7 @@ The following are explicitly excluded:
 - Package manager, REPL, formatter, documentation generator, debugger, and IDE
   integration.
 - Linux and macOS targets, WebAssembly, and targets other than Windows x86-64.
-- Raw pointers, unsafe blocks, ownership and borrowing, and arenas.
+- Raw pointers, unsafe blocks, ownership and borrowing, and user-controlled arenas.
 - Async/await, traits, interfaces, inheritance, advanced generics, reflection,
   and Python interoperability.
 

@@ -2426,6 +2426,55 @@ fn main() {
     }
 
     #[test]
+    fn routes_heap_values_through_managed_runtime_and_shuts_down_after_main() {
+        let ir = lower(
+            r#"class Node {
+    links: List<Node>
+    value: Int
+
+    init(links: List<Node>, value: Int) {
+        self.links = links
+        self.value = value
+    }
+}
+fn main() {
+    let links: List<Node> = []
+    let object = Node(links, 7)
+    links.add(object)
+    let text = "managed" + " string"
+    let values = [object]
+    values.add(Node(links, 8))
+    print(text)
+    print(values.length)
+}"#,
+        )
+        .expect("managed values should lower through the runtime ABI");
+
+        assert!(ir.contains("%princi.class.4e6f6465 = type { ptr, ptr, i64 }"));
+        assert!(ir.contains("define internal ptr @princi_rt_managed_alloc(i64 %size)"));
+        assert!(ir.contains("define internal ptr @princi_rt_managed_calloc(i64 %size)"));
+        assert!(ir.contains("define internal ptr @princi_rt_managed_grow(ptr %old"));
+        assert!(ir.contains("call ptr @princi_rt_managed_alloc(i64 %allocation.size)"));
+        assert!(ir.contains("call ptr @princi_rt_managed_calloc(i64"));
+        assert!(ir.contains("call ptr @princi_rt_managed_grow(ptr"));
+        assert_eq!(ir.matches("call ptr @malloc(i64").count(), 1);
+        assert!(!ir.contains("call ptr @calloc("));
+        assert!(!ir.contains("call ptr @realloc("));
+        assert!(ir.contains("call void @free(ptr %current)"));
+        assert!(ir.contains("call void @princi_rt_managed_shutdown()\n  ret i32 0"));
+
+        let int_main =
+            lower("fn main() -> Int { return 17 }").expect("integer entry point should lower");
+        let wrapper = int_main
+            .split("define i32 @main()")
+            .nth(1)
+            .expect("generated module should contain its Windows entry point");
+        assert!(wrapper.contains(
+            "call void @princi_rt_managed_shutdown()\n  %princi.exit32 = trunc i64 %princi.exit to i32"
+        ));
+    }
+
+    #[test]
     fn lowers_struct_aggregates_by_value_for_construction_access_calls_and_returns() {
         let ir = lower(
             r#"struct Point { x: Float; y: Float }

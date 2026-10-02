@@ -1,8 +1,8 @@
 //! LLVM runtime ABI for the x86-64 Windows GNU toolchain.
 //!
-//! Princi strings are NUL-terminated UTF-8 pointers. Literals are backed by
-//! module constants and concatenation allocates a new process-lifetime buffer
-//! with the MinGW C runtime.
+//! Managed values use a private process-lifetime heap registry. The allocation
+//! ABI is isolated here so a future collector can replace it without changing
+//! codegen.
 
 use crate::types::Type;
 
@@ -11,9 +11,9 @@ declare i32 @putchar(i32)
 declare i32 @strcmp(ptr, ptr)
 declare i64 @strlen(ptr)
 declare ptr @malloc(i64)
+declare void @free(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
-declare ptr @calloc(i64, i64)
-declare ptr @realloc(ptr, i64)
+declare ptr @memset(ptr, i32, i64)
 declare void @exit(i32) noreturn
 
 @.princi.rt.fmt.int = private unnamed_addr constant [5 x i8] c"%lld\00", align 1
@@ -21,6 +21,82 @@ declare void @exit(i32) noreturn
 @.princi.rt.fmt.string = private unnamed_addr constant [3 x i8] c"%s\00", align 1
 @.princi.rt.bool.true = private unnamed_addr constant [5 x i8] c"true\00", align 1
 @.princi.rt.bool.false = private unnamed_addr constant [6 x i8] c"false\00", align 1
+@.princi.rt.managed.allocation.error = private unnamed_addr constant [27 x i8] c"managed allocation failed\0A\00", align 1
+
+%princi.rt.managed.block = type { ptr }
+@.princi.rt.managed.head = internal global ptr null, align 8
+
+define internal void @princi_rt_managed_shutdown() {
+entry:
+  br label %loop
+loop:
+  %current = load ptr, ptr @.princi.rt.managed.head
+  %finished = icmp eq ptr %current, null
+  br i1 %finished, label %done, label %release
+release:
+  %next.slot = getelementptr inbounds %princi.rt.managed.block, ptr %current, i32 0, i32 0
+  %next = load ptr, ptr %next.slot
+  store ptr %next, ptr @.princi.rt.managed.head
+  call void @free(ptr %current)
+  br label %loop
+done:
+  ret void
+}
+
+define internal void @princi_rt_managed_panic_allocation() {
+entry:
+  %message = getelementptr inbounds [27 x i8], ptr @.princi.rt.managed.allocation.error, i64 0, i64 0
+  %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @princi_rt_managed_shutdown()
+  call void @exit(i32 1)
+  unreachable
+}
+
+define internal ptr @princi_rt_managed_alloc(i64 %size) {
+entry:
+  %valid.size = icmp sge i64 %size, 0
+  br i1 %valid.size, label %layout, label %invalid
+invalid:
+  call void @princi_rt_managed_panic_allocation()
+  unreachable
+layout:
+  %header.end = getelementptr %princi.rt.managed.block, ptr null, i32 1
+  %header.size = ptrtoint ptr %header.end to i64
+  %total.size = add i64 %header.size, %size
+  %overflow = icmp ult i64 %total.size, %header.size
+  br i1 %overflow, label %invalid, label %allocate
+allocate:
+  %block = call ptr @malloc(i64 %total.size)
+  %allocation.failed = icmp eq ptr %block, null
+  br i1 %allocation.failed, label %invalid, label %register
+register:
+  %next.slot = getelementptr inbounds %princi.rt.managed.block, ptr %block, i32 0, i32 0
+  %head = load ptr, ptr @.princi.rt.managed.head
+  store ptr %head, ptr %next.slot
+  store ptr %block, ptr @.princi.rt.managed.head
+  %payload = getelementptr inbounds i8, ptr %block, i64 %header.size
+  ret ptr %payload
+}
+
+define internal ptr @princi_rt_managed_calloc(i64 %size) {
+entry:
+  %memory = call ptr @princi_rt_managed_alloc(i64 %size)
+  %ignored = call ptr @memset(ptr %memory, i32 0, i64 %size)
+  ret ptr %memory
+}
+
+define internal ptr @princi_rt_managed_grow(ptr %old, i64 %old.size, i64 %new.size) {
+entry:
+  ; Keep the old block registered; shutdown reclaims it with every other block.
+  %memory = call ptr @princi_rt_managed_alloc(i64 %new.size)
+  %empty = icmp eq i64 %old.size, 0
+  br i1 %empty, label %done, label %copy
+copy:
+  %ignored = call ptr @memcpy(ptr %memory, ptr %old, i64 %old.size)
+  br label %done
+done:
+  ret ptr %memory
+}
 
 define internal void @princi_rt_print_int(i64 %value) {
 entry:
@@ -85,8 +161,17 @@ entry:
   %left.length = call i64 @strlen(ptr %left)
   %right.length = call i64 @strlen(ptr %right)
   %length = add i64 %left.length, %right.length
+  %length.overflow = icmp ult i64 %length, %left.length
+  br i1 %length.overflow, label %allocation.failed, label %size
+size:
   %allocation.size = add i64 %length, 1
-  %result = call ptr @malloc(i64 %allocation.size)
+  %size.overflow = icmp ult i64 %allocation.size, %length
+  br i1 %size.overflow, label %allocation.failed, label %allocate
+allocation.failed:
+  call void @princi_rt_managed_panic_allocation()
+  unreachable
+allocate:
+  %result = call ptr @princi_rt_managed_alloc(i64 %allocation.size)
   %left.copy = call ptr @memcpy(ptr %result, ptr %left, i64 %left.length)
   %destination = getelementptr inbounds i8, ptr %result, i64 %left.length
   %right.size = add i64 %right.length, 1
@@ -103,7 +188,7 @@ entry:
 
 define internal ptr @princi_rt_alloc_object(i64 %size) {
 entry:
-  %object = call ptr @calloc(i64 1, i64 %size)
+  %object = call ptr @princi_rt_managed_calloc(i64 %size)
   ret ptr %object
 }
 "#;
@@ -118,6 +203,7 @@ define internal void @princi_rt_list_panic_bounds() {
 entry:
   %message = getelementptr inbounds [26 x i8], ptr @.princi.rt.list.bounds, i64 0, i64 0
   %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @princi_rt_managed_shutdown()
   call void @exit(i32 1)
   unreachable
 }
@@ -125,6 +211,7 @@ define internal void @princi_rt_list_panic_type() {
 entry:
   %message = getelementptr inbounds [28 x i8], ptr @.princi.rt.list.type, i64 0, i64 0
   %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @princi_rt_managed_shutdown()
   call void @exit(i32 1)
   unreachable
 }
@@ -132,6 +219,7 @@ define internal void @princi_rt_list_panic_allocation() {
 entry:
   %message = getelementptr inbounds [24 x i8], ptr @.princi.rt.list.allocation, i64 0, i64 0
   %ignored = call i32 (ptr, ...) @printf(ptr %message)
+  call void @princi_rt_managed_shutdown()
   call void @exit(i32 1)
   unreachable
 }
@@ -145,13 +233,7 @@ invalid:
 allocate:
   %header.end = getelementptr %princi.rt.list, ptr null, i32 1
   %header.size = ptrtoint ptr %header.end to i64
-  %list = call ptr @calloc(i64 1, i64 %header.size)
-  %failed = icmp eq ptr %list, null
-  br i1 %failed, label %allocation.failed, label %initialize
-allocation.failed:
-  call void @princi_rt_list_panic_allocation()
-  unreachable
-initialize:
+  %list = call ptr @princi_rt_managed_calloc(i64 %header.size)
   %element.size.slot = getelementptr inbounds %princi.rt.list, ptr %list, i32 0, i32 3
   store i64 %element.size, ptr %element.size.slot
   ret ptr %list
@@ -252,12 +334,9 @@ grow.capacity:
   br i1 %capacity.fits, label %allocate.data, label %growth.error
 allocate.data:
   %new.bytes = mul i64 %new.capacity, %storage.size
-  %new.data = call ptr @realloc(ptr %old.data, i64 %new.bytes)
-  %allocation.failed = icmp eq ptr %new.data, null
-  br i1 %allocation.failed, label %allocation.error, label %grow.done
-allocation.error:
-  call void @princi_rt_list_panic_allocation()
-  unreachable
+  %old.bytes = mul i64 %capacity, %storage.size
+  %new.data = call ptr @princi_rt_managed_grow(ptr %old.data, i64 %old.bytes, i64 %new.bytes)
+  br label %grow.done
 growth.error:
   call void @princi_rt_list_panic_allocation()
   unreachable
@@ -324,10 +403,12 @@ pub(crate) fn list_add_function() -> &'static str {
 pub(crate) fn entry_point(main_symbol: &str, returns_int: bool) -> String {
     let body = if returns_int {
         format!(
-            "  %princi.exit = call i64 @{main_symbol}()\n  %princi.exit32 = trunc i64 %princi.exit to i32\n  ret i32 %princi.exit32\n"
+            "  %princi.exit = call i64 @{main_symbol}()\n  call void @princi_rt_managed_shutdown()\n  %princi.exit32 = trunc i64 %princi.exit to i32\n  ret i32 %princi.exit32\n"
         )
     } else {
-        format!("  call void @{main_symbol}()\n  ret i32 0\n")
+        format!(
+            "  call void @{main_symbol}()\n  call void @princi_rt_managed_shutdown()\n  ret i32 0\n"
+        )
     };
     format!("define i32 @main() {{\nentry:\n{body}}}\n")
 }

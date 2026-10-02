@@ -502,3 +502,52 @@ fn list_indexing_reports_negative_and_past_end_bounds_errors() {
         );
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn process_lifetime_managed_heap_survives_temporary_cycles_and_growth_stress() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "managed memory stress.prnc",
+        r#"class StressNode {
+    links: List<StressNode>
+    value: Int
+
+    init(links: List<StressNode>, value: Int) {
+        self.links = links
+        self.value = value
+    }
+}
+
+fn main() {
+    let retained: List<StressNode> = []
+    let retained_strings: List<String> = []
+    var index = 0
+    while index < 10000 {
+        let outgoing: List<StressNode> = []
+        let node = StressNode(outgoing, index)
+        outgoing.add(node)
+
+        let phrase = "managed" + " memory"
+        let decorated = phrase + "!"
+        let temporary_strings = [phrase, decorated]
+        if index % 1000 == 0 {
+            retained.add(node)
+            retained_strings.add(temporary_strings[1])
+        }
+        index += 1
+    }
+
+    println(retained.length)
+    println(retained[9].value)
+    println(retained[9].links[0].value)
+    println(retained[9].links.length)
+    println(retained_strings.length)
+    println(retained_strings[9])
+}"#,
+    );
+    assert_eq!(stdout, "10\n9000\n9000\n1\n10\nmanaged memory!\n");
+}

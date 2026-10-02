@@ -1,8 +1,10 @@
 use std::fmt;
 
-/// A resolved Princi type. `Any`, `Error`, function, and range types are
-/// compiler-internal; source declarations can name primitive and declared
-/// class/struct types, plus the built-in generic `List<T>` collection.
+/// A resolved Princi type. `String`, `Class`, and `List` are managed-reference
+/// types; they are distinct from inline values such as structs. Princi has no
+/// raw-pointer type. `Any`, `Error`, function, and range types are also
+/// compiler-internal; source declarations can name primitives, declared
+/// class/struct types, and the built-in generic `List<T>` collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
@@ -55,6 +57,12 @@ impl Type {
     pub fn is_error(&self) -> bool {
         matches!(self, Type::Error)
     }
+
+    /// Whether this value is an opaque reference managed by the runtime.
+    /// Struct values can contain references but are copied inline themselves.
+    pub fn is_managed_reference(&self) -> bool {
+        matches!(self, Type::String | Type::Class(_) | Type::List(_))
+    }
 }
 
 impl fmt::Display for Type {
@@ -104,5 +112,14 @@ mod tests {
         assert!(!Type::Int.accepts(&Type::String));
         assert!(!Type::Int.accepts(&Type::Any));
         assert!(!Type::Any.accepts(&Type::Void));
+    }
+
+    #[test]
+    fn distinguishes_managed_references_from_inline_values() {
+        assert!(Type::String.is_managed_reference());
+        assert!(Type::Class("User".to_owned()).is_managed_reference());
+        assert!(Type::List(Box::new(Type::Int)).is_managed_reference());
+        assert!(!Type::Int.is_managed_reference());
+        assert!(!Type::Struct("Point".to_owned()).is_managed_reference());
     }
 }
