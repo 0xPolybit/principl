@@ -518,6 +518,12 @@ impl<'a> Analyzer<'a> {
                         Type::Error
                     }
                 };
+                if !element_type.is_error() && element_type != Type::Int {
+                    self.error(
+                        format!("for loop range requires Int bounds, found {element_type}"),
+                        for_statement.range.span,
+                    );
+                }
                 self.push_scope();
                 self.variable_types
                     .insert(for_statement.variable.span, element_type.clone());
@@ -1617,5 +1623,18 @@ fn main() {
                 .variable_type(variable(&result, "main", 1)),
             Some(&Type::List(Box::new(Type::Any)))
         );
+    }
+
+    #[test]
+    fn procedural_ranges_require_int_and_numeric_types_do_not_convert_implicitly() {
+        let result = analyze_text(
+            "fn take_float(value: Float) {}\nfn main() {\n for index in 0.0..2.0 {}\n take_float(1)\n let value: Float = 1\n}",
+        );
+
+        assert!(has_message(
+            &result,
+            "for loop range requires Int bounds, found Float"
+        ));
+        assert!(has_message(&result, "expression expects Float, found Int"));
     }
 }

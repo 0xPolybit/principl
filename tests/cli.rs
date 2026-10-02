@@ -32,35 +32,43 @@ impl Drop for TestDir {
 }
 
 #[test]
-fn both_extensions_reach_the_compiler_pipeline() {
+#[cfg(windows)]
+fn both_extensions_build_native_executables() {
     let dir = TestDir::new();
 
     for name in ["hello.prnc", "hello.princi"] {
         let source = dir.source(name);
-        fs::write(&source, "fn main() { let value: Int = 1 + 2 * 3 }")
+        fs::write(&source, "fn main() { print(1 + 2 * 3) }")
             .expect("valid Princi program should be written");
-        let output = dir.0.join("program.exe");
+        let output = source.with_extension("exe");
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))
             .arg("build")
             .arg(&source)
-            .arg("-o")
-            .arg(&output)
             .output()
             .expect("CLI process should start");
 
-        assert!(!result.status.success(), "incomplete pipeline must fail");
-        let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("the code generation stage is not implemented yet"),
-            "expected a pipeline diagnostic for {name}, got: {stderr}"
+            result.status.success(),
+            "native compilation should succeed: {}",
+            String::from_utf8_lossy(&result.stderr)
         );
+        assert!(
+            output.is_file(),
+            "build should produce {}",
+            output.display()
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
             !stderr.contains("unsupported source extension"),
             "{name} should be accepted by extension validation"
         );
-        assert!(
-            !output.exists(),
-            "incomplete compilation must not claim output"
+        let execution = Command::new(&output)
+            .output()
+            .expect("generated Windows executable should run");
+        assert!(execution.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&execution.stdout).replace("\r\n", "\n"),
+            "7\n"
         );
     }
 }

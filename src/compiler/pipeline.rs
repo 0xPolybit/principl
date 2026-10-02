@@ -1,11 +1,12 @@
+use crate::codegen;
 use crate::compiler::BuildOptions;
-use crate::diagnostics::{Diagnostic, DiagnosticBundle};
+use crate::diagnostics::DiagnosticBundle;
 use crate::lexer;
 use crate::parser;
 use crate::semantic;
 use crate::source::SourceFile;
 
-pub fn compile(source: &SourceFile, _options: &BuildOptions) -> Result<(), DiagnosticBundle> {
+pub fn compile(source: &SourceFile, options: &BuildOptions) -> Result<(), DiagnosticBundle> {
     let tokens = lexer::lex(source).map_err(DiagnosticBundle::from)?;
     let parsed = parser::parse(source, tokens);
     if !parsed.diagnostics.is_empty() {
@@ -17,6 +18,7 @@ pub fn compile(source: &SourceFile, _options: &BuildOptions) -> Result<(), Diagn
         return Err(DiagnosticBundle::from_diagnostics(analyzed.diagnostics));
     }
 
-    // Typed IR lowering and later stages are still under development.
-    Err(Diagnostic::pipeline_stage_incomplete("code generation").into())
+    let c_source =
+        codegen::generate_c(&analyzed.typed_program, source).map_err(DiagnosticBundle::from)?;
+    codegen::compile_native(&c_source, options).map_err(DiagnosticBundle::from)
 }

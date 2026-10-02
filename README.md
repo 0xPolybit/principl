@@ -1,8 +1,8 @@
 # Princi
 
-Princi is a programming language and compiler project. Its v0.1 Rust frontend
-includes source loading, located diagnostics, a lexer, an AST, type checking,
-and semantic analysis. Native executable generation is still under development.
+Princi is a programming language and compiler project. Its Rust v0.1 compiler
+loads, parses, and type-checks source, then generates Windows x86-64 executables
+for the core procedural subset.
 
 ## v0.1 compiler contract
 
@@ -33,7 +33,7 @@ commands in this version.
 
 ## Compiler architecture
 
-The planned compilation pipeline is:
+The frontend and native bootstrap path currently run as follows:
 
 ```text
 source
@@ -42,10 +42,17 @@ source
   → AST
   → semantic analysis
   → typed representation
-  → LLVM IR
-  → Windows object/native code
+  → procedural C backend
+  → MinGW GCC (Windows x86-64)
   → .exe
 ```
+
+The planned backend boundary is typed representation → LLVM IR → Windows
+object/native code. This checkout has no LLVM command-line toolchain, so the
+v0.1 bootstrap backend emits a small C translation unit and invokes MinGW GCC
+to produce the Windows executable. The backend accepts `TypedProgram` and is
+isolated from the parser and semantic analyzer so the native bridge can be
+replaced without changing source semantics.
 
 The compiler is implemented in Rust. The internal module boundaries are:
 
@@ -59,13 +66,14 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `ast` | Define the source-oriented abstract syntax tree. |
 | `semantic` | Check names, scopes, and language rules. |
 | `types` | Represent and check source and typed-IR types. |
-| `codegen` | Lower typed representation through LLVM IR to Windows output. |
-| `runtime` | Provide only runtime support required by v0.1 programs. |
+| `codegen` | Lower the typed procedural subset to native input and link Windows output. |
+| `runtime` | Provide the primitive print and string helpers required by v0.1. |
 
 The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
-analysis, compiler options, and pipeline entry point are implemented. Typed IR,
-LLVM lowering, Windows executable generation, and runtime support remain under
-development.
+analysis, procedural native lowering, minimal runtime, and Windows executable
+generation are implemented. Classes, structs, lists, indexing, and member
+access are parsed and type-checked but are not part of the native v0.1 subset;
+the backend reports a positioned error if one reaches code generation.
 
 ## v0.1 syntax
 
@@ -92,15 +100,18 @@ unary operators, then calls, member access, and indexing.
 The parser retains end-exclusive UTF-8 byte spans throughout the AST and
 reports source-positioned syntax diagnostics. It recovers at statement,
 member, and declaration boundaries so a build can report multiple parse errors.
-These syntax features define the v0.1 parser boundary; they do not imply that
-native executable generation is complete.
+These syntax features define the v0.1 parser boundary. Native generation is
+implemented for the procedural subset described below; additional parsed
+constructs receive an explicit backend diagnostic until their lowering exists.
 
 ## v0.1 static typing
 
-The built-in types are `Int`, `Float`, `Bool`, `String`, and `Void`. Declared
-classes and structs introduce nominal types with their declared names. There
-are no implicit numeric conversions: arithmetic and comparisons require matching
-numeric operand types. `+` also concatenates two strings; `%` accepts two
+The built-in types are `Int`, `Float`, `Bool`, `String`, and `Void`. In the
+native backend, `Int` is signed 64-bit and `Float` is a 64-bit floating-point
+value. Integer overflow wraps at 64 bits. Declared classes and structs
+introduce nominal types with their declared names. There are no implicit
+numeric conversions: arithmetic and comparisons require matching numeric
+operand types. `+` also concatenates two strings; `%` accepts two
 integers. Equality operators accept matching primitive types. `&&`, `||`, and
 `!` require `Bool`; `if` and `while` conditions must also be `Bool`.
 
@@ -124,8 +135,8 @@ List literals infer a single element type: `[1, 2]` has internal type
 element type; the v0.1 source annotation `List` represents `List<Any>` and can
 be used for empty or dynamically typed lists. Generic source syntax such as
 `List<Int>` is not part of v0.1. Indexing requires an `Int` and returns the
-list's element type. A range requires matching numeric bounds and a `for` loop
-binds its variable to that numeric type.
+list's element type. A range expression requires matching numeric bounds;
+native `for` loops require `Int` bounds and use an exclusive end.
 
 Scopes are lexical. The top-level function body shares a scope with its
 parameters; nested blocks and loop bodies introduce child scopes. A name may
@@ -138,6 +149,34 @@ exactly once with a compatible value type and initializes those fields directly.
 A positional call such as `Point(1, 2)` invokes the declared `init` constructor;
 without `init`, the compiler provides a positional constructor in field
 declaration order.
+
+## Native procedural subset
+
+The backend generates native code for `Int`, `Float`, `Bool`, and `String`;
+local `let`/`var` bindings and assignment; arithmetic, comparison, and boolean
+expressions; `if`/`else`, `while`, and integer `for` loops; functions,
+parameters, returns, calls, recursion, and `print`. Integer range loops use an
+inclusive start and exclusive end (`0..count`). Numeric types do not implicitly
+convert. `main` must take no parameters and return `Void` or `Int`; `Void`
+functions return process status zero.
+
+```princi
+fn factorial(n: Int) -> Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn main() {
+    let result = factorial(5)
+    print(result)
+}
+```
+
+This program prints `120`. The parser also accepts classes, structs, lists,
+indexing, member access, and imports, but those features are not part of the
+native v0.1 subset and do not yet produce executables.
 
 ## Supported lexical syntax
 
@@ -175,8 +214,10 @@ boundary and details.
 
 ## Installation and development
 
-Install the Rust stable toolchain with Cargo, then build or install the CLI from
-the repository root:
+Install the Rust stable toolchain with Cargo and MinGW-w64 GCC for the
+`x86_64-w64-mingw32` target. `gcc -dumpmachine` should report that target. The
+compiler also accepts `PRINCI_CC` to select a compatible GCC executable.
+Build or install the CLI from the repository root:
 
 ```text
 cargo build --release
@@ -197,9 +238,7 @@ princi build hello.princi
 princi build hello.prnc -o program.exe
 ```
 
-The CLI validates and normalizes the input and output paths, then runs the
-lexer, parser, and semantic analysis. Semantic errors stop the pipeline with
-source-positioned diagnostics. Until native code generation is implemented,
-semantically valid programs receive an explicit code-generation-incomplete
-diagnostic and the command exits non-zero without claiming to have produced an
+The CLI validates and normalizes paths, then runs the lexer, parser, semantic
+analysis, and native backend. Frontend and backend errors retain source
+locations; a failed build exits non-zero and does not publish a partial
 executable.

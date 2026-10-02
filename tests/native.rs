@@ -1,0 +1,158 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(windows)]
+static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(windows)]
+struct TestDir(PathBuf);
+
+#[cfg(windows)]
+impl TestDir {
+    fn new() -> Self {
+        let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "princi-native-integration-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temporary directory should be created");
+        Self(path)
+    }
+
+    fn build(&self, name: &str, source: &str) -> PathBuf {
+        let source_path = self.0.join(name);
+        let output_path = source_path.with_extension("exe");
+        fs::write(&source_path, source).expect("Princi source should be written");
+
+        let build = Command::new(env!("CARGO_BIN_EXE_princi"))
+            .arg("build")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&output_path)
+            .output()
+            .expect("compiler should start");
+        assert!(
+            build.status.success(),
+            "build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(output_path.is_file(), "compiler should write an executable");
+        output_path
+    }
+
+    fn build_and_run(&self, name: &str, source: &str) -> String {
+        let output_path = self.build(name, source);
+        let run = Command::new(output_path)
+            .output()
+            .expect("generated Windows executable should run");
+        assert!(
+            run.status.success(),
+            "generated program failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n")
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn factorial_recursion_mutation_branches_while_and_integer_ranges_execute() {
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "procedural.prnc",
+        r#"fn factorial(n: Int) -> Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn sum_to(end: Int) -> Int {
+    var total = 0
+    for index in 0..end {
+        total += index
+    }
+    return total
+}
+
+fn main() {
+    var result = factorial(5)
+    var count = 0
+    while count < 3 {
+        result += 1
+        count += 1
+    }
+    if result == 123 {
+        let result = 7
+        print(result)
+    } else {
+        let result = 0
+        print(result)
+    }
+    print(result)
+    print(sum_to(4))
+}"#,
+    );
+    assert_eq!(stdout, "7\n123\n6\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn floats_booleans_strings_immutable_bindings_and_functions_execute() {
+    let dir = TestDir::new();
+    let stdout = dir.build_and_run(
+        "values.princi",
+        r#"fn area(width: Float, height: Float) -> Float {
+    return width * height
+}
+
+fn greet(name: String) -> String {
+    return "Hello, " + name
+}
+
+fn main() {
+    let measurement = area(2.0, 1.0)
+    let ready: Bool = 1.5 < measurement && true
+    let greeting = greet("Mira")
+    if ready {
+        print(greeting)
+    } else {
+        print("not ready")
+    }
+    print(measurement)
+    print(ready)
+    print(!ready || false)
+    print(measurement > 1.0 && measurement != 0.0)
+    var count: Int = 1
+    count *= 4
+    print(count)
+    print(9223372036854775807 + 1)
+    print(-9223372036854775808)
+}"#,
+    );
+    assert_eq!(
+        stdout,
+        "Hello, Mira\n2\ntrue\nfalse\ntrue\n4\n-9223372036854775808\n-9223372036854775808\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn integer_main_return_becomes_the_process_exit_status() {
+    let dir = TestDir::new();
+    let executable = dir.build("exit.prnc", "fn main() -> Int { return 17 }");
+    let run = Command::new(executable)
+        .output()
+        .expect("generated Windows executable should run");
+
+    assert_eq!(run.status.code(), Some(17));
+}
