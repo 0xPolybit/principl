@@ -19,6 +19,7 @@ pub enum DiagnosticCode {
     MissingMain,
     InvalidReturn,
     UnknownModule,
+    UninitializedVariable,
     Semantic,
     UnsupportedFeature,
     InternalCompiler,
@@ -46,6 +47,7 @@ impl DiagnosticCode {
             Self::MissingMain => "E0207",
             Self::InvalidReturn => "E0208",
             Self::UnknownModule => "E0209",
+            Self::UninitializedVariable => "E0210",
             Self::Semantic => "E0299",
             Self::UnsupportedFeature => "E0301",
             Self::InternalCompiler => "E9001",
@@ -140,13 +142,6 @@ impl Diagnostic {
         Self::coded(
             DiagnosticCode::UnsupportedExtension,
             format!("unsupported source extension '{extension}'; expected .prnc or .princi"),
-        )
-    }
-
-    pub fn pipeline_stage_incomplete(stage: &str) -> Self {
-        Self::coded(
-            DiagnosticCode::UnsupportedFeature,
-            format!("the {stage} language feature is not supported by this compiler version"),
         )
     }
 

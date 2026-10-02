@@ -61,6 +61,7 @@ pub fn analyze_with_modules(
 struct VariableSymbol {
     ty: Type,
     mutable: bool,
+    initialized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +110,7 @@ impl SymbolTable {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Scope {
     variables: HashMap<String, VariableSymbol>,
 }
@@ -685,6 +686,7 @@ impl<'a> Analyzer<'a> {
                 },
                 owner_type,
                 true,
+                true,
             );
         }
 
@@ -695,7 +697,7 @@ impl<'a> Analyzer<'a> {
                 .cloned()
                 .unwrap_or(Type::Error);
             self.variable_types.insert(parameter.name.span, ty.clone());
-            self.declare_local(&parameter.name.name, &parameter.name, ty, false);
+            self.declare_local(&parameter.name.name, &parameter.name, ty, false, true);
         }
 
         self.check_block(body, false);
@@ -728,9 +730,21 @@ impl<'a> Analyzer<'a> {
                     if_statement.condition.span,
                     "if condition",
                 );
+                let before = self.scopes.clone();
                 self.check_block(&if_statement.then_branch, true);
+                let then_scopes = self.scopes.clone();
+                self.scopes = before.clone();
                 if let Some(else_branch) = &if_statement.else_branch {
                     self.check_statement(else_branch);
+                }
+                for (scope_index, scope) in self.scopes.iter_mut().enumerate() {
+                    for (name, variable) in &mut scope.variables {
+                        let initialized_in_then = then_scopes
+                            .get(scope_index)
+                            .and_then(|then_scope| then_scope.variables.get(name))
+                            .is_some_and(|then_variable| then_variable.initialized);
+                        variable.initialized &= initialized_in_then;
+                    }
                 }
             }
             StatementKind::While(while_statement) => {
@@ -741,7 +755,11 @@ impl<'a> Analyzer<'a> {
                     while_statement.condition.span,
                     "while condition",
                 );
+                let before = self.scopes.clone();
                 self.check_block(&while_statement.body, true);
+                // A while body may execute zero times, so it cannot establish
+                // definite initialization after the loop.
+                self.scopes = before;
             }
             StatementKind::For(for_statement) => {
                 let range_type = self.check_expression(&for_statement.range, None);
@@ -762,6 +780,7 @@ impl<'a> Analyzer<'a> {
                         for_statement.range.span,
                     );
                 }
+                let before = self.scopes.clone();
                 self.push_scope();
                 self.variable_types
                     .insert(for_statement.variable.span, element_type.clone());
@@ -770,9 +789,13 @@ impl<'a> Analyzer<'a> {
                     &for_statement.variable,
                     element_type,
                     false,
+                    true,
                 );
                 self.check_block(&for_statement.body, true);
                 self.pop_scope();
+                // A range may be empty, so assignments inside it are not
+                // guaranteed to execute.
+                self.scopes = before;
             }
             StatementKind::Return(value) => self.check_return(value.as_ref(), statement.span),
             StatementKind::Expression(expression) => {
@@ -813,10 +836,33 @@ impl<'a> Analyzer<'a> {
         };
 
         self.variable_types.insert(variable.name.span, ty.clone());
-        self.declare_local(&variable.name.name, &variable.name, ty, variable.mutable);
+        self.declare_local(
+            &variable.name.name,
+            &variable.name,
+            ty,
+            variable.mutable,
+            variable.initializer.is_some(),
+        );
     }
 
     fn check_assignment(&mut self, assignment: &Assignment) {
+        if assignment.operator != AssignmentOperator::Assign {
+            if let ExpressionKind::Identifier(identifier) = ungroup_kind(&assignment.target.kind) {
+                if self
+                    .lookup_variable(&identifier.name)
+                    .is_some_and(|variable| !variable.initialized)
+                {
+                    self.error_with(
+                        DiagnosticCode::UninitializedVariable,
+                        format!(
+                            "variable '{}' may be read before it is initialized",
+                            identifier.name
+                        ),
+                        identifier.span,
+                    );
+                }
+            }
+        }
         let (target_type, mutable) = self.check_assignment_target(&assignment.target);
         if !mutable && !target_type.is_error() {
             self.error(
@@ -863,6 +909,9 @@ impl<'a> Analyzer<'a> {
                 format!("expected {target_type}, found {value_type}"),
                 assignment.value.span,
             );
+        }
+        if assignment.operator == AssignmentOperator::Assign {
+            self.mark_assignment_initialized(&assignment.target);
         }
     }
 
@@ -1083,8 +1132,19 @@ impl<'a> Analyzer<'a> {
     }
 
     fn check_identifier(&mut self, identifier: &Identifier) -> Type {
-        if let Some(variable) = self.lookup_variable(&identifier.name) {
-            return variable.ty.clone();
+        if let Some(variable) = self.lookup_variable(&identifier.name).cloned() {
+            if !variable.initialized {
+                self.error_with(
+                    DiagnosticCode::UninitializedVariable,
+                    format!(
+                        "variable '{}' may be read before it is initialized",
+                        identifier.name
+                    ),
+                    identifier.span,
+                );
+                return Type::Error;
+            }
+            return variable.ty;
         }
         match self.globals.get(&identifier.name) {
             Some(GlobalSymbol::Function(signature)) => Type::Function(signature.clone()),
@@ -1492,7 +1552,14 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn declare_local(&mut self, name: &str, identifier: &Identifier, ty: Type, mutable: bool) {
+    fn declare_local(
+        &mut self,
+        name: &str,
+        identifier: &Identifier,
+        ty: Type,
+        mutable: bool,
+        initialized: bool,
+    ) {
         let Some(scope) = self.scopes.last_mut() else {
             return;
         };
@@ -1504,9 +1571,26 @@ impl<'a> Analyzer<'a> {
             );
             return;
         }
-        scope
-            .variables
-            .insert(name.to_owned(), VariableSymbol { ty, mutable });
+        scope.variables.insert(
+            name.to_owned(),
+            VariableSymbol {
+                ty,
+                mutable,
+                initialized,
+            },
+        );
+    }
+
+    fn mark_assignment_initialized(&mut self, target: &Expression) {
+        let ExpressionKind::Identifier(identifier) = ungroup_kind(&target.kind) else {
+            return;
+        };
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(variable) = scope.variables.get_mut(&identifier.name) {
+                variable.initialized = true;
+                return;
+            }
+        }
     }
 
     fn lookup_variable(&self, name: &str) -> Option<&VariableSymbol> {
@@ -1532,6 +1616,13 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .push(Diagnostic::at_source(code, message, self.source, span));
     }
+}
+
+fn ungroup_kind(mut kind: &ExpressionKind) -> &ExpressionKind {
+    while let ExpressionKind::Group(inner) = kind {
+        kind = &inner.kind;
+    }
+    kind
 }
 
 fn is_reserved_type_name(name: &str) -> bool {
@@ -1606,6 +1697,7 @@ fn binary_text(operator: BinaryOperator) -> &'static str {
 mod tests {
     use super::analyze;
     use crate::ast::{Declaration, StatementKind};
+    use crate::diagnostics::DiagnosticCode;
     use crate::lexer;
     use crate::parser;
     use crate::source::SourceFile;
@@ -2021,6 +2113,71 @@ fn update_parameter(value: Int) { value = 2 }"#,
             &result,
             "range bounds must have the same numeric type"
         ));
+    }
+
+    #[test]
+    fn tracks_definite_initialization_across_assignments_branches_and_loops() {
+        let initialized = analyze_text(
+            r#"fn check(flag: Bool) {
+    var assigned: Int
+    assigned = 4
+    print(assigned)
+
+    var branch: Int
+    if flag {
+        branch = 1
+    } else {
+        branch = 2
+    }
+    print(branch)
+}
+fn main() {
+    check(true)
+}"#,
+        );
+        assert!(
+            initialized.diagnostics.is_empty(),
+            "{:?}",
+            initialized.diagnostics
+        );
+
+        let uninitialized = analyze_text(
+            r#"fn direct() {
+    var value: Int
+    print(value)
+}
+fn compound() {
+    var value: Int
+    value += 1
+}
+fn one_branch(flag: Bool) {
+    var value: Int
+    if flag { value = 1 }
+    print(value)
+}
+fn while_body() {
+    var value: Int
+    while false { value = 1 }
+    print(value)
+}
+fn for_body() {
+    var value: Int
+    for index in 0..1 { value = index }
+    print(value)
+}"#,
+        );
+        let errors = uninitialized
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DiagnosticCode::UninitializedVariable)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 5, "{:?}", uninitialized.diagnostics);
+        assert!(errors.iter().all(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("may be read before it is initialized")
+                && diagnostic.location().is_some()
+        }));
     }
 
     #[test]

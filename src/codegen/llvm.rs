@@ -2252,7 +2252,6 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             (Type::Float, BinaryOperator::Subtract) => ("fsub", Type::Float),
             (Type::Float, BinaryOperator::Multiply) => ("fmul", Type::Float),
             (Type::Float, BinaryOperator::Divide) => ("fdiv", Type::Float),
-            (Type::Float, BinaryOperator::Remainder) => ("frem", Type::Float),
             (Type::Int, BinaryOperator::Equal) | (Type::Bool, BinaryOperator::Equal) => {
                 ("icmp eq", Type::Bool)
             }

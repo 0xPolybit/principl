@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use princi::{codegen, lexer, modules, parser, semantic, source::SourceFile};
+
 static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
 
 struct TestDir(PathBuf);
@@ -24,6 +26,7 @@ impl TestDir {
 
     fn build(&self, source: &Path, output: Option<&Path>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_princi"));
+        command.current_dir(&self.0);
         command.arg("build").arg(source);
         if let Some(output) = output {
             command.arg("-o").arg(output);
@@ -40,6 +43,22 @@ impl Drop for TestDir {
 
 fn normalize_newlines(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+fn generate_llvm_ir(file_name: &str, source_text: &str) -> String {
+    let source = SourceFile::from_text(file_name, source_text);
+    let tokens = lexer::lex(&source).expect("conformance source should lex");
+    let parsed = parser::parse(&source, tokens);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let resolved = modules::resolve(&source, &parsed.program).expect("imports should resolve");
+    let analyzed = semantic::analyze_with_modules(&source, &parsed.program, &resolved);
+    assert!(
+        analyzed.diagnostics.is_empty(),
+        "{:?}",
+        analyzed.diagnostics
+    );
+    codegen::generate_llvm_ir(&analyzed.typed_program, &source)
+        .expect("conformance program should lower to LLVM IR")
 }
 
 fn reject_fixture(name: &str, fixture: &str, code: &str, custom_output: bool) {
@@ -104,6 +123,12 @@ fn negative_fixtures_report_diagnostics_and_never_emit_executables() {
         "E0299",
         false,
     );
+    reject_fixture(
+        "uninitialized read.prnc",
+        include_str!("fixtures/invalid/uninitialized_read.prnc"),
+        "E0210",
+        false,
+    );
 
     for (name, fixture, code) in [
         (
@@ -153,6 +178,31 @@ fn positive_conformance_fixtures_keep_both_suffixes_as_exact_aliases() {
         include_str!("fixtures/conformance/v0_1.princi"),
         ".prnc and .princi fixtures must contain the same program"
     );
+    assert_eq!(
+        include_str!("fixtures/conformance/hello.prnc"),
+        include_str!("fixtures/conformance/hello.princi"),
+        "hello acceptance fixtures must use identical source text"
+    );
+}
+
+#[test]
+fn hello_and_full_conformance_sources_lower_identically_from_both_extensions() {
+    for (prnc, princi) in [
+        (
+            include_str!("fixtures/conformance/hello.prnc"),
+            include_str!("fixtures/conformance/hello.princi"),
+        ),
+        (
+            include_str!("fixtures/conformance/v0_1.prnc"),
+            include_str!("fixtures/conformance/v0_1.princi"),
+        ),
+    ] {
+        let prnc_ir = generate_llvm_ir("program.prnc", prnc);
+        let princi_ir = generate_llvm_ir("program.princi", princi);
+        assert_eq!(prnc_ir, princi_ir, "extensions must lower identically");
+        assert!(prnc_ir.contains("target triple = \"x86_64-w64-windows-gnu\""));
+        assert!(prnc_ir.contains("@princi_rt_print_string"));
+    }
 }
 
 #[cfg(windows)]
@@ -248,4 +298,62 @@ fn complete_v0_1_program_builds_and_runs_identically_with_both_extensions() {
         );
         assert_eq!(run.status.code(), Some(expected_exit));
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn hello_acceptance_builds_default_and_explicit_executable_paths() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+
+    for (extension, source_text) in [
+        ("prnc", include_str!("fixtures/conformance/hello.prnc")),
+        ("princi", include_str!("fixtures/conformance/hello.princi")),
+    ] {
+        let dir = TestDir::new();
+        let source = dir.source(&format!("hello.{extension}"), source_text);
+        let build = dir.build(&source, None);
+        assert!(
+            build.status.success(),
+            "hello .{extension} build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(build.stdout.is_empty());
+        assert!(build.stderr.is_empty());
+
+        let executable = source.with_extension("exe");
+        assert!(executable.is_file(), "expected {}", executable.display());
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated hello executable should launch");
+        assert_eq!(run.status.code(), Some(0));
+        assert_eq!(run.stdout, b"Hello from Princi!");
+        assert!(run.stderr.is_empty());
+    }
+
+    let dir = TestDir::new();
+    let source = dir.source(
+        "hello.prnc",
+        include_str!("fixtures/conformance/hello.prnc"),
+    );
+    let relative_output = PathBuf::from("app.exe");
+    let build = dir.build(&source, Some(&relative_output));
+    assert!(
+        build.status.success(),
+        "explicit-output build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(build.stdout.is_empty());
+    assert!(build.stderr.is_empty());
+    let executable = dir.0.join("app.exe");
+    assert!(executable.is_file(), "expected {}", executable.display());
+    assert!(!source.with_extension("exe").exists());
+
+    let run = Command::new(executable)
+        .output()
+        .expect("generated explicit-output executable should launch");
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(run.stdout, b"Hello from Princi!");
+    assert!(run.stderr.is_empty());
 }

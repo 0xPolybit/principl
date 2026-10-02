@@ -1,8 +1,9 @@
 # Princi
 
-Princi is a programming language and compiler project. Its Rust v0.1 compiler
-loads, parses, and type-checks source, then generates Windows x86-64 executables
-for the procedural language, classes, structs, and typed lists.
+Princi v0.1.0 is a statically typed, compiled programming language for native
+Windows x86-64 programs. The v0.1 compiler is written in Rust, lowers checked
+source to LLVM IR, and links a Windows `.exe`. Its language includes procedural
+programming, classes, value-oriented structs, and the built-in `List<T>` type.
 
 ## v0.1 compiler contract
 
@@ -130,8 +131,11 @@ the runtime implementation from the checked argument type.
 
 `var` declares a mutable binding and `let` declares an immutable binding.
 `let` requires an initializer; `var` may declare only an explicit type and
-receive its value later. Parameters and `for` loop variables are immutable. A
-declaration with an initializer but no annotation infers that initializer's
+receive its value later. A local cannot be read until it is definitely
+initialized. Assignments in both arms of an `if` establish initialization;
+assignments inside `while` or `for` bodies do not, because those loops may run
+zero times. Parameters and `for` loop variables are immutable. A declaration
+with an initializer but no annotation infers that initializer's
 type, so `var x = 10` has type `Int` and `var name = "Octrie"` has type
 `String`. An annotation may be used with an initializer, as in
 `var count: Int = 10` or `let pi: Float = 3.14159`. Assignments must match the
@@ -384,8 +388,10 @@ by a line break. The type-specific `princi_rt_*` symbols are compiler-internal;
 they are not callable from Princi source.
 
 String literals use immutable, NUL-terminated UTF-8 storage in the generated
-module. String concatenation uses the managed heap described above. The
-generated Windows entry wrapper calls Princi `main`, releases managed storage,
+module. Embedded NUL bytes are rejected in v0.1 so printing, concatenation,
+and equality preserve the full String value. String concatenation uses the
+managed heap described above. The generated Windows entry wrapper calls
+Princi `main`, releases managed storage,
 and passes its `Int` result to the MinGW C runtime as the process exit code, or
 returns zero for a `Void` entry point. The runtime is embedded into generated
 LLVM IR and linked automatically whenever the `princi build` command runs.
@@ -400,9 +406,10 @@ do not require vtables.
 The lexer recognizes identifiers beginning with a Unicode letter or `_` and
 continuing with letters, digits, or `_`; decimal integer and floating-point
 literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
-`\r`, `\t`, and `\0` escapes; and `true`/`false` boolean literals. It recognizes
-the keywords `fn`, `return`, `let`, `var`, `if`, `else`, `while`, `for`, `in`,
-`class`, `struct`, `init`, `self`, `import`, and `extern`.
+`\r`, and `\t` escapes; and `true`/`false` boolean literals. NUL bytes and
+`\0` escapes are rejected because v0.1 Strings use NUL-terminated storage.
+The lexer recognizes the keywords `fn`, `return`, `let`, `var`, `if`, `else`,
+`while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and `extern`.
 
 Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
 `>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
@@ -422,64 +429,139 @@ The following are explicitly excluded:
 - Package manager, REPL, formatter, documentation generator, debugger, and IDE
   integration.
 - Linux and macOS targets, WebAssembly, and targets other than Windows x86-64.
-- Raw pointers, unsafe blocks, ownership and borrowing, and user-controlled arenas.
-- Async/await, traits, interfaces, inheritance, advanced generics, reflection,
-  and Python interoperability.
+- Raw pointers, unsafe blocks, ownership and borrowing, and user-controlled
+  arenas.
+- Enums, `match`, decorators, async/await, traits, interfaces, inheritance,
+  virtual or abstract classes, method/operator overloading, and advanced
+  generics.
+- Raw C pointers, `repr(C)` structs, callbacks, variadic FFI, reflection, and
+  Python interoperability.
+- `Map`, `Set`, `Queue`, `Deque`, comprehensions, iterators, and higher-order
+  collection functions.
 
 See [the v0.1 scope and architecture](docs/v0.1-scope.md) for the canonical
 boundary and details.
 
-## Installation and development
+## Roadmap beyond v0.1
 
-Install the Rust stable toolchain with Cargo, LLVM/Clang 15 or newer with LLVM
-IR input support and the X86 backend, and MinGW-w64 GCC for the
-x86_64-w64-mingw32 target. clang --print-targets lists registered targets;
-gcc -dumpmachine should report x86_64-w64-mingw32. The compiler accepts
-PRINCI_CLANG and PRINCI_CC to select those executables explicitly. Missing or
-incompatible toolchain components produce build diagnostics.
-Build or install the CLI from the repository root:
+Later versions may add user-defined multi-file modules, a tracing garbage
+collector, richer generics and collection types, and a broader C ABI boundary.
+Those designs are intentionally outside v0.1 and are not promised by the
+current compiler.
 
-```text
+## Windows setup
+
+Princi v0.1 targets Windows x86-64 and requires three tools:
+
+1. Install the stable Rust toolchain and Cargo with
+   [rustup](https://rust-lang.org/tools/install/).
+2. Install LLVM/Clang 15 or newer from the [official LLVM releases](https://releases.llvm.org/).
+   Add its `bin` directory to `PATH`. Check `clang --version` and verify that
+   `clang --print-targets` lists X86.
+3. Install [MSYS2](https://www.msys2.org/). Open its UCRT64 terminal, update
+   packages with `pacman -Syu`, reopen the terminal, then install the x86-64
+   [MinGW-w64 GCC package](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-gcc?repo=ucrt64)
+   with:
+
+   ```sh
+   pacman -S mingw-w64-ucrt-x86_64-gcc
+   ```
+
+   Add the MSYS2 `ucrt64\bin` directory (normally `C:\msys64\ucrt64\bin`) to
+   Windows `PATH`. Check `gcc -dumpmachine`; it must print
+   `x86_64-w64-mingw32`.
+
+The compiler reads `clang` and `gcc` from `PATH` by default. Set
+`PRINCI_CLANG` or `PRINCI_CC` to select a different executable. Missing or
+incompatible tools produce compiler diagnostics. Windows Rust installation
+may also prompt you to install the Visual Studio C++ Build Tools needed by the
+Rust host toolchain.
+
+## Build and install the compiler
+
+From a clean clone, build the debug CLI and release CLI with Cargo:
+
+```powershell
+git clone https://github.com/0xPolybit/principl.git
+cd principl
+cargo build
 cargo build --release
+```
+
+The binaries are `target\debug\princi.exe` and
+`target\release\princi.exe`. To install the release CLI into Cargo's binary
+directory, run:
+
+```powershell
 cargo install --path .
 ```
 
-Run the automated tests with:
+If `princi` is not found, add `%USERPROFILE%\.cargo\bin` to `PATH` and open a
+new terminal. The v0.1 CLI has one command: `princi build <source-file>`.
 
-```text
+## Compile a Princi program
+
+Save this source as `hello.prnc` or `hello.princi`:
+
+```princi
+fn main() {
+    print("Hello from Princi!")
+}
+```
+
+From the directory containing the source, run either command:
+
+```powershell
+princi build hello.prnc
+princi build hello.princi
+```
+
+Both commands produce `hello.exe` beside the input. Launch it with:
+
+```powershell
+.\hello.exe
+```
+
+It prints `Hello from Princi!` without a trailing newline. Select another
+output path with `-o`:
+
+```powershell
+princi build hello.prnc -o app.exe
+```
+
+This produces `app.exe`; relative `-o` paths are resolved from the current
+working directory. The compiler automatically runs the lexer, parser, semantic
+analysis, LLVM IR verification, Windows object generation, and MinGW linker.
+Failed builds exit non-zero and do not publish a partial executable.
+
+## Run the tests
+
+Run all unit, CLI, and fixture-driven checks with:
+
+```powershell
 cargo test
 ```
 
-The suite includes lexer/parser/semantic/LLVM unit tests, CLI diagnostics, and
-fixture-driven conformance checks under `tests/fixtures`. On Windows, native
-integration tests compile generated `.exe` files, launch them, and check their
-stdout, stderr, and exit status. Those tests require LLVM/Clang with X86 support
-and x86-64 MinGW-w64 GCC. If either tool is unavailable, native integration
-tests emit a skip note (visible with `cargo test -- --nocapture`) while the
-compiler and diagnostic tests continue to run. To make a missing native
-toolchain fail the test run instead of allowing those skips, set
-`PRINCI_REQUIRE_NATIVE_TESTS` before running Cargo:
+On Windows with LLVM/Clang and x86-64 MinGW-w64 GCC available, native tests
+build generated `.exe` files and check their output and exit status. If the
+native toolchain is missing, those tests print a skip note when output capture
+is disabled:
+
+```powershell
+cargo test -- --nocapture
+```
+
+Set `PRINCI_REQUIRE_NATIVE_TESTS=1` to make missing native tools fail the test
+run instead of skipping the executable checks:
 
 ```powershell
 $env:PRINCI_REQUIRE_NATIVE_TESTS = "1"
 cargo test
 ```
 
-The conformance fixtures include matching `.prnc` and `.princi` programs and
-invalid programs that verify diagnostics and confirm failed builds do not
-produce executables.
-
-The build command accepts either source extension:
-
-```text
-princi build hello.prnc
-princi build hello.princi
-princi build hello.prnc -o program.exe
-```
-
-The CLI validates and normalizes paths, then runs the lexer, parser, semantic
-analysis, LLVM IR verification, Windows x86-64 object generation, and native
-linker. Failed builds exit non-zero and do not publish a partial executable.
+Fixtures under `tests/fixtures` include a full feature program and identical
+`.prnc`/`.princi` hello programs. Negative fixtures check diagnostic codes and
+that failed builds do not produce executables.
 
 ## Diagnostics and toolchain troubleshooting
 
@@ -499,7 +581,8 @@ file errors, `E0100` for lexical errors, and `E0101` for syntax errors,
 `E0203` for unknown types, `E0204` for incorrect argument counts, `E0205` for
 invalid member access, `E0206` for duplicate declarations, `E0207` for a
 missing or invalid `main`, `E0208` for invalid returns, and `E0209` for
-unsupported imports.
+unsupported imports. `E0210` reports a local read before definite
+initialization.
 
 Toolchain errors are separate from source errors: `E0401` means LLVM/Clang is
 missing, `E0403` means the Windows MinGW linker is missing or targets the wrong

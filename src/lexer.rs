@@ -228,7 +228,13 @@ impl<'a> Lexer<'a> {
                         'n' => value.push('\n'),
                         'r' => value.push('\r'),
                         't' => value.push('\t'),
-                        '0' => value.push('\0'),
+                        '0' => {
+                            return Err(self.error(
+                                "NUL bytes are not supported in v0.1 string literals",
+                                escape_start,
+                                self.offset,
+                            ));
+                        }
                         '\r' | '\n' => {
                             return Err(self.error(
                                 "unterminated string literal",
@@ -244,6 +250,15 @@ impl<'a> Lexer<'a> {
                             ));
                         }
                     }
+                }
+                Some('\0') => {
+                    let nul_start = self.offset;
+                    self.advance();
+                    return Err(self.error(
+                        "NUL bytes are not supported in v0.1 string literals",
+                        nul_start,
+                        self.offset,
+                    ));
                 }
                 Some(character) => {
                     self.advance();
@@ -550,6 +565,8 @@ mod tests {
         for (text, message) in [
             ("\"line\nbreak\"", "unterminated string literal"),
             ("\"bad\\q\"", "invalid escape sequence"),
+            ("\"bad\\0\"", "NUL bytes are not supported"),
+            ("\"bad\0text\"", "NUL bytes are not supported"),
             ("12e+", "malformed floating-point literal"),
             ("@", "unexpected character"),
         ] {
