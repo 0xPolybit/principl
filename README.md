@@ -1,8 +1,8 @@
 # Princi
 
 Princi is a programming language and compiler project. Its v0.1 Rust frontend
-includes source loading, located diagnostics, a lexer, an AST, and a parser.
-Semantic analysis and executable generation are still under development.
+includes source loading, located diagnostics, a lexer, an AST, type checking,
+and semantic analysis. Native executable generation is still under development.
 
 ## v0.1 compiler contract
 
@@ -62,8 +62,8 @@ The compiler is implemented in Rust. The internal module boundaries are:
 | `codegen` | Lower typed representation through LLVM IR to Windows output. |
 | `runtime` | Provide only runtime support required by v0.1 programs. |
 
-The CLI, source loader, diagnostics, lexer, AST, parser, compiler options, and
-pipeline entry point are implemented. Semantic analysis, typed representation,
+The CLI, source loader, diagnostics, lexer, AST, parser, type system, semantic
+analysis, compiler options, and pipeline entry point are implemented. Typed IR,
 LLVM lowering, Windows executable generation, and runtime support remain under
 development.
 
@@ -93,7 +93,51 @@ The parser retains end-exclusive UTF-8 byte spans throughout the AST and
 reports source-positioned syntax diagnostics. It recovers at statement,
 member, and declaration boundaries so a build can report multiple parse errors.
 These syntax features define the v0.1 parser boundary; they do not imply that
-semantic analysis or executable generation is complete.
+native executable generation is complete.
+
+## v0.1 static typing
+
+The built-in types are `Int`, `Float`, `Bool`, `String`, and `Void`. Declared
+classes and structs introduce nominal types with their declared names. There
+are no implicit numeric conversions: arithmetic and comparisons require matching
+numeric operand types. `+` also concatenates two strings; `%` accepts two
+integers. Equality operators accept matching primitive types. `&&`, `||`, and
+`!` require `Bool`; `if` and `while` conditions must also be `Bool`.
+
+An omitted function or method return type means `Void`. A `Void` function may
+use `return` without a value; non-`Void` returns must provide a matching value.
+Function and method calls require the declared argument count and matching
+argument types. `print(value)` is a built-in that accepts one non-`Void` value
+and returns `Void`.
+
+`var` declares a mutable binding and `let` declares an immutable binding.
+`let` requires an initializer; `var` may declare only an explicit type and
+receive its value later. Parameters and `for` loop variables are immutable. A
+declaration with an initializer but no annotation infers that initializer's
+type, so `var x = 10` has type `Int` and `var name = "Octrie"` has type
+`String`. An annotation may be used with an initializer, as in
+`var count: Int = 10` or `let pi: Float = 3.14159`. Assignments must match the
+binding's type, and immutable bindings cannot be assigned through.
+
+List literals infer a single element type: `[1, 2]` has internal type
+`List<Int>`. Mixed element types are rejected. An empty list needs an expected
+element type; the v0.1 source annotation `List` represents `List<Any>` and can
+be used for empty or dynamically typed lists. Generic source syntax such as
+`List<Int>` is not part of v0.1. Indexing requires an `Int` and returns the
+list's element type. A range requires matching numeric bounds and a `for` loop
+binds its variable to that numeric type.
+
+Scopes are lexical. The top-level function body shares a scope with its
+parameters; nested blocks and loop bodies introduce child scopes. A name may
+shadow an outer local in a child scope, but duplicate declarations in the same
+scope are errors. Class and struct member names share one namespace per type.
+Member access checks the receiver's declared class or struct type.
+
+Named construction (`Point { x: 1, y: 2 }`) requires every declared field
+exactly once with a compatible value type and initializes those fields directly.
+A positional call such as `Point(1, 2)` invokes the declared `init` constructor;
+without `init`, the compiler provides a positional constructor in field
+declaration order.
 
 ## Supported lexical syntax
 
@@ -154,6 +198,8 @@ princi build hello.prnc -o program.exe
 ```
 
 The CLI validates and normalizes the input and output paths, then runs the
-lexer and parser. Until semantic analysis and native code generation are
-implemented, valid programs receive an explicit incomplete-stage diagnostic
-and the command exits non-zero without claiming to have produced an executable.
+lexer, parser, and semantic analysis. Semantic errors stop the pipeline with
+source-positioned diagnostics. Until native code generation is implemented,
+semantically valid programs receive an explicit code-generation-incomplete
+diagnostic and the command exits non-zero without claiming to have produced an
+executable.

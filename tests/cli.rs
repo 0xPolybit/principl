@@ -51,7 +51,7 @@ fn both_extensions_reach_the_compiler_pipeline() {
         assert!(!result.status.success(), "incomplete pipeline must fail");
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("the semantic analysis stage is not implemented yet"),
+            stderr.contains("the code generation stage is not implemented yet"),
             "expected a pipeline diagnostic for {name}, got: {stderr}"
         );
         assert!(
@@ -109,5 +109,34 @@ fn malformed_source_reports_its_file_line_and_column() {
             expected_path.display()
         )),
         "expected located lexical diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn semantic_errors_are_reported_before_later_pipeline_stages() {
+    let dir = TestDir::new();
+    let source = dir.0.join("type_error.princi");
+    fs::write(&source, "fn main() {\n    let count: Int = \"wrong\"\n}")
+        .expect("source with a type error should be written");
+    let expected_path = fs::canonicalize(&source).expect("source should canonicalize");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        .arg("build")
+        .arg(&source)
+        .output()
+        .expect("CLI process should start");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "{}:2:22: error: expression expects Int, found String",
+            expected_path.display()
+        )),
+        "expected a located semantic diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("code generation stage"),
+        "semantic failures must stop before later pipeline stages"
     );
 }

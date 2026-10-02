@@ -4,7 +4,9 @@ pub mod compiler;
 pub mod diagnostics;
 pub mod lexer;
 pub mod parser;
+pub mod semantic;
 pub mod source;
+pub mod types;
 
 use std::ffi::OsString;
 
