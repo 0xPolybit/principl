@@ -20,7 +20,7 @@ export function SiteFooter() {
               {item.label}
             </Link>
           ))}
-          <Link href="/installation">Install</Link>
+          <Link href="/docs/installation">Install</Link>
           <Link href="/architecture">Architecture</Link>
           <Link href="/roadmap">Roadmap</Link>
           <a href={repositoryUrl} rel="noreferrer" target="_blank">

@@ -318,7 +318,7 @@ export default function Home() {
               Save the program as <code>hello.prnc</code> or <code>hello.princi</code>;
               the compiler treats them identically.
             </p>
-            <ButtonLink href="/installation" variant="secondary">
+            <ButtonLink href="/docs/installation" variant="secondary">
               Windows installation guide <ArrowUpRight />
             </ButtonLink>
           </div>

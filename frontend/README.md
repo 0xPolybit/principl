@@ -78,10 +78,10 @@ future work as roadmap rather than shipped capability.
 Documentation is Markdown under `content/docs/`, organized by reader task:
 getting started, language guide, compiler, reference, and project. The
 registry in `content/docs/navigation.ts` is the single source for page paths,
-titles, descriptions, sidebar order, breadcrumbs, active-page links,
-previous/next navigation, and GitHub edit links. Add a Markdown file and one
-registry entry to publish a page; the route is statically generated from that
-registry.
+legacy path aliases, titles, descriptions, sidebar order, breadcrumbs,
+active-page links, previous/next navigation, and GitHub edit links. Add a
+Markdown file and one registry entry to publish a page; the route is statically
+generated from that registry.
 
 The `/docs` route and `/docs/[...slug]` use the shared shell in
 `components/docs/`. It renders a collapsible section sidebar, breadcrumbs,

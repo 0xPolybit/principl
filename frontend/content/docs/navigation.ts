@@ -1,5 +1,6 @@
 export type DocsPage = {
   slug: string;
+  aliases?: string[];
   title: string;
   description: string;
   section: string;
@@ -16,9 +17,17 @@ function page(
   slug: string,
   title: string,
   description: string,
+  options: { file?: string; aliases?: string[] } = {},
 ): DocsPage {
-  const file = slug || "getting-started/introduction";
-  return { section, slug, title, description, file: file + ".md" };
+  const file = options.file ?? (slug || "getting-started/introduction");
+  return {
+    section,
+    slug,
+    title,
+    description,
+    file: file + ".md",
+    aliases: options.aliases,
+  };
 }
 
 export const docsSections: DocsSection[] = [
@@ -26,9 +35,10 @@ export const docsSections: DocsSection[] = [
     title: "Getting started",
     pages: [
       page("Getting started", "", "Introduction", "What Princi is, what v0.1 supports, and where to go next."),
-      page("Getting started", "getting-started/installation", "Installation", "Set up the compiler and Windows native toolchain."),
-      page("Getting started", "getting-started/hello-world", "Hello, world", "Build and run a first Princi program."),
-      page("Getting started", "getting-started/compiling-programs", "Compiling programs", "Use the v0.1 build command and output option."),
+      page("Getting started", "getting-started", "Getting started", "Set up Princi, build the compiler, and compile your first Windows program.", { file: "getting-started/index" }),
+      page("Getting started", "installation", "Installation", "Set up Rust, LLVM/Clang, MinGW-w64, and the Princi compiler.", { file: "getting-started/installation", aliases: ["getting-started/installation"] }),
+      page("Getting started", "hello-world", "Hello, world", "Build and run your first Princi program.", { file: "getting-started/hello-world", aliases: ["getting-started/hello-world"] }),
+      page("Getting started", "compiling", "Compiling programs", "Use the v0.1 build command and choose an executable output path.", { file: "getting-started/compiling-programs", aliases: ["getting-started/compiling-programs"] }),
     ],
   },
   {
@@ -85,7 +95,7 @@ export function docsHref(doc: DocsPage) {
 }
 
 export function findDocsPage(slug: string) {
-  return docsPages.find((doc) => doc.slug === slug);
+  return docsPages.find((doc) => doc.slug === slug || doc.aliases?.includes(slug));
 }
 
 export function findDocsSection(doc: DocsPage) {
@@ -101,7 +111,7 @@ export function docsNeighbors(doc: DocsPage) {
 }
 
 export function docsRouteParams() {
-  return docsPages
-    .filter((doc) => doc.slug.length > 0)
-    .map((doc) => ({ slug: doc.slug.split("/") }));
+  return docsPages.flatMap((doc) => [doc.slug, ...(doc.aliases ?? [])])
+    .filter((slug) => slug.length > 0)
+    .map((slug) => ({ slug: slug.split("/") }));
 }

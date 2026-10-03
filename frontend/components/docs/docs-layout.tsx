@@ -18,7 +18,7 @@ function Breadcrumbs({ doc }: { doc: DocsPage }) {
     <nav aria-label="Breadcrumb" className="docs-breadcrumbs">
       <ol>
         <li><Link href="/docs">Documentation</Link></li>
-        {section ? <li><span aria-current="page">{section.title}</span></li> : null}
+        {section && section.title !== doc.title ? <li><span>{section.title}</span></li> : null}
         <li><span aria-current="page">{doc.title}</span></li>
       </ol>
     </nav>

@@ -1,29 +1,69 @@
-The v0.1 command-line interface has one command:
+The v0.1 compiler exposes one user-facing command:
 
-~~~text
+```text
 princi build <source-file> [-o <output-file>]
-~~~
+```
 
-## Default output
+The source must have the `.prnc` or `.princi` extension. Those extensions are exact aliases for the same Princi source language.
 
-~~~powershell
+## Build with the default output name
+
+From PowerShell, in the source directory:
+
+```powershell
 princi build hello.prnc
-~~~
+```
 
-The compiler derives `hello.exe` from the input's filename and writes it beside the source. The same behavior applies to `hello.princi`.
+The compiler writes `hello.exe` beside `hello.prnc`. The extension does not change the output rule:
 
-## Explicit output
+```powershell
+princi build hello.princi
+```
 
-~~~powershell
-princi build src\hello.princi -o out\app.exe
-~~~
+This also writes `hello.exe` beside the input. Existing output files with the same path are replaced only after the new executable has linked successfully.
 
-The `-o` option selects the executable path. Paths may contain spaces when they are quoted according to the shell:
+## Choose an output path
 
-~~~powershell
-princi build "examples\first program.prnc" -o "build output\first.exe"
-~~~
+Pass `-o` followed by an executable path:
 
-The compiler parses and checks the program, verifies generated LLVM IR, emits a Windows object, and links the final executable. Intermediate files are normally kept in a temporary build directory and removed. Set `PRINCI_KEEP_INTERMEDIATES=1` when debugging the compiler to retain them.
+```powershell
+princi build hello.prnc -o app.exe
+```
 
-No `run`, `test`, `fmt`, package, installation, or REPL command is part of the v0.1 CLI.
+This creates `app.exe`. A relative output path is resolved from the current working directory, not the directory containing the source. You can also pass a nested or absolute path:
+
+```powershell
+princi build src\hello.princi -o build\app.exe
+princi build src\hello.prnc -o "C:\Users\Public\Princi builds\app.exe"
+```
+
+Quote paths with spaces according to PowerShell syntax. Ensure the destination directory exists and is writable.
+
+## Run the output
+
+The build command compiles; it does not launch the result. Run a relative executable from PowerShell with `.` and a backslash:
+
+```powershell
+.\hello.exe
+.\app.exe
+```
+
+The produced file is a Windows x86-64 executable. A failed compilation or link exits with a non-zero status and does not leave a partial executable at the requested output path. The CLI does not include `run`, `test`, `fmt`, `package`, `install`, or `repl` subcommands.
+
+## What happens during a build
+
+```text
+.prnc / .princi
+  → source loading
+  → lexer
+  → parser and AST
+  → built-in module resolution
+  → semantic analysis and typed representation
+  → LLVM IR verification and Windows COFF object generation
+  → MinGW-w64 link
+  → Windows x86-64 .exe
+```
+
+Clang verifies the generated LLVM IR and emits an object for `x86_64-w64-windows-gnu`. MinGW-w64 GCC, which must report `x86_64-w64-mingw32`, links the object with the Windows C runtime. Temporary LLVM IR and object files are removed after the build by default; compiler development can retain them with `PRINCI_KEEP_INTERMEDIATES=1`.
+
+For installation and PATH troubleshooting, see [Installation](/docs/installation). For stage-by-stage details, see the [compilation pipeline](/docs/compiler/compilation-pipeline).
