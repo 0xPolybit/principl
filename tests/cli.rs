@@ -148,7 +148,7 @@ fn missing_mingw_linker_has_an_actionable_diagnostic() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("toolchain error[E0403]"));
-    assert!(stderr.contains("install x86-64 MinGW GCC"));
+    assert!(stderr.contains("install x86-64 MinGW-w64 GCC"));
 }
 
 #[test]
