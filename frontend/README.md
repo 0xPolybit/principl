@@ -38,8 +38,8 @@ npm run start
 | --- | --- |
 | `app/` | App Router pages, shared layout, metadata, and global styles |
 | `components/` | Shared shell, reusable design primitives, article, code sample, tabs, and copy controls |
-| `content/` | Compiler-grounded landing-page details and example source strings |
-| `lib/` | Site navigation and shared helpers |
+| `content/` | Compiler-grounded landing-page details, example source, and Markdown docs |
+| `lib/` | Shared site helpers and Markdown outline extraction |
 | `public/` | Public static assets |
 | `styles/` | Shared design tokens |
 | `briefs/` | Internal page briefs used during site design |
@@ -72,3 +72,32 @@ The landing page introduces only implemented v0.1 behavior as current. It
 separates the process-lifetime managed heap from future memory-control ideas,
 shows the class/reference and struct/value distinction, and labels possible
 future work as roadmap rather than shipped capability.
+
+## Documentation architecture
+
+Documentation is Markdown under `content/docs/`, organized by reader task:
+getting started, language guide, compiler, reference, and project. The
+registry in `content/docs/navigation.ts` is the single source for page paths,
+titles, descriptions, sidebar order, breadcrumbs, active-page links,
+previous/next navigation, and GitHub edit links. Add a Markdown file and one
+registry entry to publish a page; the route is statically generated from that
+registry.
+
+The `/docs` route and `/docs/[...slug]` use the shared shell in
+`components/docs/`. It renders a collapsible section sidebar, breadcrumbs,
+the v0.1 marker, generated page outline, and page navigation. Markdown headings
+provide deep-link IDs and the right-side “On this page” list. At tablet/mobile
+widths the section list and outline become keyboard-accessible `<details>`
+drawers.
+
+`react-markdown` renders content as Server Components. `remark-gfm` adds GFM
+tables; `rehype-slug` creates heading IDs; `rehype-highlight` maps Princi
+examples to the Rust grammar; `rehype-highlight-code-lines` supports numbered
+and selected lines with fenced-code metadata such as
+`~~~princi showLineNumbers {2}`. Code blocks use the existing copy control.
+Blockquotes render as callouts. Raw HTML in Markdown is not enabled.
+
+The former `/installation`, `/language`, `/architecture`, and `/roadmap` URLs
+redirect to the matching canonical documentation pages so content does not
+need to be maintained twice. Keep claims aligned with the root `README.md` and
+`docs/v0.1-scope.md`.
