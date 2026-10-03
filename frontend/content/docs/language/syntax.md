@@ -1,8 +1,8 @@
-Princi uses explicit blocks with braces. Newlines commonly separate statements, so semicolons are optional where the parser can identify a statement boundary. A newline after an operator continues the expression.
+Princi source uses braces for blocks and a small set of top-level declarations. A source file can use either `.prnc` or `.princi`; the suffix does not change the grammar or meaning of the program.
 
 ## Top-level declarations
 
-The parser accepts functions, classes, structs, built-in imports, and restricted `extern "C"` blocks:
+The v0.1 parser accepts functions, classes, structs, built-in imports, and restricted C declarations:
 
 ~~~princi
 import io
@@ -10,30 +10,78 @@ import io
 fn square(value: Int) -> Int {
     return value * value
 }
+
+struct Point {
+    x: Float
+    y: Float
+}
 ~~~
 
-Imports resolve only against the built-in registry. The native backend currently compiles the procedural, class, field-only struct, string, and List<T> subset.
+Function bodies contain local declarations, assignments, branches, loops, returns, nested blocks, and expression statements. Class bodies contain fields, methods, and at most one `init`; structs contain fields only.
 
-## Statements
+## Statements and line breaks
 
-Function bodies support `let` and `var` declarations, assignments, nested blocks, `if`/`else`, `while`, integer range `for` loops, `return`, and expression statements.
+Semicolons can separate statements, but a line break is normally enough:
 
-## Expressions
+~~~princi
+fn main() {
+    let first = 1
+    let second = 2;
+    println(first + second)
+}
+~~~
 
-Expressions include primitive literals, names, `self`, list literals, named-field construction, function and method calls, member access, indexes, ranges, unary operators, and binary operators.
+The parser treats a line break as a statement boundary when the next token cannot continue the preceding expression. A line break after an operator continues that expression. Braces delimit blocks; parentheses group expressions and parameter/argument lists; lists use square brackets; generic type arguments use angle brackets.
 
-Binary operators associate left to right. Precedence, from low to high:
+~~~princi
+fn total() -> Int {
+    return 10
+        + 20
+        * 2
+}
+~~~
 
-| Level | Operators |
+## Expressions and precedence
+
+Calls, member access, and indexing bind most tightly. Binary operators associate left to right; ranges are non-associative unless parentheses explicitly group them.
+
+| Precedence, low to high | Operators |
 | --- | --- |
-| 1 | `..` |
+| 1 | `..` range |
 | 2 | `||` |
 | 3 | `&&` |
 | 4 | `==`, `!=` |
 | 5 | `<`, `<=`, `>`, `>=` |
 | 6 | `+`, `-` |
 | 7 | `*`, `/`, `%` |
-| 8 | Unary `+`, `-`, `!` |
-| 9 | Calls, member access, indexes |
+| 8 | unary `+`, `-`, `!` |
+| 9 | calls, member access, indexing |
 
-Ranges are non-associative unless parenthesized. See [lexical syntax](/docs/reference/lexical-syntax) for the token boundary.
+~~~princi
+fn main() {
+    let arithmetic = 2 + 3 * 4
+    let decision = true || false && false
+    println(arithmetic)
+    println(decision)
+}
+~~~
+
+Both accepted extensions compile as the same language:
+
+~~~text
+princi build hello.prnc
+princi build hello.princi
+~~~
+
+See [variables](/docs/language/variables), [operators](/docs/language/operators), and [lexical syntax](/docs/reference/lexical-syntax) for details.
+
+## Current v0.1 limitations
+
+There are no semantically active indentation rules, macros, decorators, pattern matching, enums, or expression-valued assignments. A range cannot be chained without explicit grouping. Some syntax parsed by the frontend may still be rejected if it falls outside the implemented v0.1 semantic or native backend subset.
+
+## Related topics
+
+- [Variables](/docs/language/variables)
+- [Functions](/docs/language/functions)
+- [Control flow](/docs/language/control-flow)
+- [Operators](/docs/language/operators)

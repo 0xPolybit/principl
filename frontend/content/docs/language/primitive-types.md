@@ -1,19 +1,82 @@
-Princi v0.1 has five primitive types:
+Princi v0.1 has five primitive types. A variable annotation, parameter, field, or return declaration names a type directly.
 
-| Type | Meaning |
-| --- | --- |
-| `Int` | Signed 64-bit integer in the native backend |
-| `Float` | 64-bit floating-point value |
-| `Bool` | `true` or `false` |
-| `String` | UTF-8 string value |
-| `Void` | No returned value |
+| Type | Source values | Current native representation |
+| --- | --- | --- |
+| `Int` | Whole signed integers | Signed 64-bit integer (`i64`) |
+| `Float` | Floating-point numbers | 64-bit IEEE floating-point (`double`) |
+| `Bool` | `true`, `false` | LLVM `i1` boolean value |
+| `String` | UTF-8 text | Runtime-managed pointer to NUL-terminated UTF-8 storage |
+| `Void` | No value | No result value |
 
-Function and method return types default to `Void`. Parameters and fields require explicit non-`Void` types.
+~~~princi
+fn describe(count: Int, ratio: Float, active: Bool, label: String) {
+    println(label)
+    println(count)
+    println(ratio)
+    println(active)
+}
 
-## No implicit numeric conversion
+fn main() {
+    describe(3, 0.75, true, "ready")
+}
+~~~
 
-Integer and floating-point expressions do not automatically convert between `Int` and `Float`. Arithmetic and comparisons require matching numeric operand types. The compiler does not apply a common numeric type to mixed expressions or list literals.
+## Numeric types
 
-## Nominal user types and List
+`Int` is signed 64-bit in the native backend. Integer arithmetic wraps on 64-bit overflow. `Float` is 64-bit floating point. Numeric expressions require matching operand types; Princi does not implicitly convert between `Int` and `Float`.
 
-Class and struct declarations introduce nominal types with their declared names. `List<T>` is the only generic source type in v0.1 and requires one non-`Void` element type. See [built-in types](/docs/reference/built-in-types) for list behavior.
+~~~princi
+fn main() {
+    let whole: Int = 12
+    let fractional: Float = 12.5
+    println(whole)
+    println(fractional)
+    println(whole < 20)
+}
+~~~
+
+## Boolean and strings
+
+Boolean literals are the lowercase words `true` and `false`. Conditions and boolean operators require `Bool`. Strings are double-quoted UTF-8 values; see [Strings](/docs/language/strings) for escapes and storage behavior.
+
+~~~princi
+fn main() {
+    let is_ready: Bool = true
+    let message: String = "build complete"
+    if is_ready {
+        println(message)
+    }
+}
+~~~
+
+## Void
+
+When a function or method omits `-> Type`, its return type is `Void`. It may use `return` without a value or reach the end. A non-`Void` function must return a matching value along every control-flow path.
+
+~~~princi
+fn log_count(value: Int) {
+    println(value)
+    return
+}
+
+fn answer() -> Int {
+    return 42
+}
+
+fn main() {
+    log_count(answer())
+}
+~~~
+
+`Void` is not valid for parameters, fields, list elements, or local value inference.
+
+## Current v0.1 limitations
+
+There are no unsigned integer, smaller integer, decimal, character, or nullable types. Numeric conversions must be explicit only if a future language version defines them; v0.1 has no cast syntax. String storage rejects embedded NUL bytes. See [C interoperability](/docs/language/c-ffi) for the separate FFI-only integer and float widths.
+
+## Related topics
+
+- [Variables](/docs/language/variables)
+- [Operators](/docs/language/operators)
+- [Functions](/docs/language/functions)
+- [C interoperability](/docs/language/c-ffi)

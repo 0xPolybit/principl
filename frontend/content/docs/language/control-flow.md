@@ -1,35 +1,70 @@
-Conditions for `if` and `while` must have type `Bool`:
+Princi uses `if`/`else`, `while`, and integer range `for` statements to control execution. Blocks are written with braces. `if` and `while` conditions must evaluate to `Bool`.
+
+## If and else
+
+An `if` may have no `else`, a block `else`, or an `else if` chain:
+
+~~~princi
+fn describe(score: Int) {
+    if score >= 90 {
+        println("high")
+    } else if score >= 50 {
+        println("passing")
+    } else {
+        println("keep going")
+    }
+}
+
+fn main() {
+    describe(72)
+}
+~~~
+
+Conditions are not implicitly converted from numbers or other types. Use comparisons or boolean expressions to produce a `Bool`.
+
+## While
+
+`while` checks its condition before each iteration, so its body may execute zero times:
 
 ~~~princi
 fn main() {
     var count = 0
-
-    if count == 0 {
-        println("starting")
-    } else {
-        println("already running")
-    }
-
     while count < 3 {
+        println(count)
         count += 1
     }
 }
 ~~~
 
-An `if` may omit `else`. Blocks introduce lexical child scopes.
+## Return and branch coverage
 
-## Integer ranges
-
-The `for` loop iterates from an inclusive start to an exclusive end:
+`return` exits the current function. A non-`Void` function must provide a value of its declared return type on every possible path:
 
 ~~~princi
-for index in 0..count {
-    println(index)
+fn absolute(value: Int) -> Int {
+    if value < 0 {
+        return -value
+    } else {
+        return value
+    }
+}
+
+fn main() {
+    println(absolute(-4))
 }
 ~~~
 
-Native `for` loops require `Int` bounds. The loop variable is immutable and scoped to the loop body. A range expression outside a `for` loop accepts matching numeric bound types, but does not itself imply a loop.
+Definite initialization follows the same branch rule: assigning a local in both the `if` and `else` branches initializes it afterward. With no `else`, the compiler cannot assume the branch ran.
 
-## Returns
+## Current v0.1 limitations
 
-A `Void` function may use a bare `return`. Other functions must return a value matching the declared result type on every control-flow path.
+Conditions must be `Bool`. There are no `break`, `continue`, `switch`, `match`, pattern matching, or exception-handling statements. A loop body does not guarantee that a local assigned only inside it is initialized after the loop.
+
+See [Loops](/docs/language/loops) for range behavior and [Functions](/docs/language/functions) for return rules.
+
+## Related topics
+
+- [Variables and definite initialization](/docs/language/variables)
+- [Loops](/docs/language/loops)
+- [Operators](/docs/language/operators)
+- [Functions](/docs/language/functions)

@@ -76,8 +76,10 @@ future work as roadmap rather than shipped capability.
 ## Documentation architecture
 
 Documentation is Markdown under `content/docs/`, organized by reader task:
-getting started, language guide, compiler, reference, and project. The
-registry in `content/docs/navigation.ts` is the single source for page paths,
+getting started, language guide, compiler, reference, and project. The Language
+Guide has separate v0.1 pages for syntax, types, expressions, control flow,
+classes, constructors, methods, structs, lists, imports, and C interoperability.
+The registry in `content/docs/navigation.ts` is the single source for page paths,
 legacy path aliases, titles, descriptions, sidebar order, breadcrumbs,
 active-page links, previous/next navigation, and GitHub edit links. Add a
 Markdown file and one registry entry to publish a page; the route is statically
