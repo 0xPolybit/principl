@@ -1,0 +1,23 @@
+:root {
+  color-scheme: light;
+  --paper: #f3f0e8;
+  --paper-deep: #e9e4d8;
+  --paper-highlight: #fbf9f3;
+  --ink: #19211f;
+  --ink-soft: #49504b;
+  --ink-faint: #737a73;
+  --line: #d5d0c4;
+  --line-strong: #b9b2a4;
+  --accent: #bc462d;
+  --accent-dark: #893420;
+  --sage: #66786a;
+  --night: #1c2724;
+  --night-soft: #283632;
+  --code-ink: #edf0e9;
+  --font-newsreader: "Newsreader Variable", Georgia, serif;
+  --font-dm-sans: "DM Sans Variable", Arial, sans-serif;
+  --font-ibm-plex-mono: "IBM Plex Mono", Consolas, monospace;
+  --page-width: 1240px;
+  --reading-width: 760px;
+  --page-gutter: clamp(1.25rem, 5vw, 5rem);
+}

@@ -592,3 +592,9 @@ those tools. A generated-IR failure is reported as an internal compiler error
 (`E9002`); set `PRINCI_KEEP_INTERMEDIATES=1` to preserve its `.ll` input for
 investigation. Unexpected compiler failures use `E9001` and exit non-zero
 without exposing a Rust panic or backtrace.
+
+## Website development
+
+The separate Next.js website lives in [`frontend/`](frontend/README.md). To
+run it locally, change to that directory, run `npm install`, then
+`npm run dev`. See its README for lint and production build instructions.
