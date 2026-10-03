@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowUpRight } from "@/components/site-primitives";
 import { DocsSidebar } from "@/components/docs/docs-sidebar";
+import { DocsSearchPalette } from "@/components/docs/docs-search-palette";
 import { DocsTableOfContents } from "@/components/docs/docs-toc";
 import {
   docsHref,
@@ -11,6 +12,7 @@ import {
 } from "@/content/docs/navigation";
 import type { DocsHeading } from "@/lib/docs-content";
 import { repositoryUrl } from "@/lib/site";
+import { getPublicSiteOrigin } from "@/lib/site-url";
 
 function Breadcrumbs({ doc }: { doc: DocsPage }) {
   const section = findDocsSection(doc);
@@ -55,20 +57,32 @@ export function DocsLayout({
   children: React.ReactNode;
 }) {
   const editUrl = repositoryUrl + "/edit/main/frontend/content/docs/" + doc.file;
+  const siteOrigin = getPublicSiteOrigin();
+  const breadcrumbs = [
+    { name: "Documentation", href: `${siteOrigin ?? ""}/docs` },
+    { name: doc.title, href: `${siteOrigin ?? ""}${docsHref(doc)}` },
+  ];
+  const breadcrumbData = siteOrigin
+    ? {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: breadcrumbs.map((item, index) => ({
+          "@type": "ListItem",
+          position: index + 1,
+          name: item.name,
+          item: item.href,
+        })),
+      }
+    : undefined;
 
   return (
     <div className="docs-layout page-width">
       <DocsSidebar activeSlug={doc.slug} sections={docsSections} />
       <main className="docs-main" id="main-content">
-        <Breadcrumbs doc={doc} />
-        {headings.length > 0 ? (
-          <div className="docs-mobile-toc">
-            <details>
-              <summary>On this page</summary>
-              <DocsTableOfContents headings={headings} />
-            </details>
-          </div>
-        ) : null}
+        <div className="docs-toolbar">
+          <Breadcrumbs doc={doc} />
+          <DocsSearchPalette />
+        </div>
         <article className="docs-article">
           <header className="docs-page-header">
             <div className="docs-title-row">
@@ -77,6 +91,14 @@ export function DocsLayout({
             </div>
             <p>{doc.description}</p>
           </header>
+          {headings.length > 0 ? (
+            <div className="docs-mobile-toc">
+              <details>
+                <summary>On this page</summary>
+                <DocsTableOfContents headings={headings} />
+              </details>
+            </div>
+          ) : null}
           {children}
           <PageNavigation doc={doc} />
           <div className="docs-edit-link">
@@ -87,6 +109,12 @@ export function DocsLayout({
         </article>
       </main>
       <DocsTableOfContents headings={headings} />
+      {breadcrumbData ? (
+        <script
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbData).replace(/</g, "\\u003c") }}
+          type="application/ld+json"
+        />
+      ) : null}
     </div>
   );
 }

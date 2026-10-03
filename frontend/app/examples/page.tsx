@@ -1,14 +1,14 @@
-import type { Metadata } from "next";
 import { DocShell } from "@/components/doc-shell";
 import { ExampleGallery } from "@/components/examples/example-gallery";
 import { princiExamples } from "@/content/examples";
 import { pageTitle } from "@/lib/site";
+import { publicPageMetadata } from "@/lib/site-metadata";
 
-export const metadata: Metadata = {
-  title: pageTitle("Examples"),
-  description:
-    "Browse and copy Princi v0.1 programs for functions, control flow, classes, structs, lists, imports, and the limited C FFI.",
-};
+export const metadata = publicPageMetadata(
+  pageTitle("Examples"),
+  "Browse and copy Princi v0.1 programs for functions, control flow, classes, structs, lists, imports, and the limited C FFI.",
+  "/examples",
+);
 
 export default function ExamplesPage() {
   return (

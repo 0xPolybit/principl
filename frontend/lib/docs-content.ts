@@ -46,3 +46,15 @@ export function extractDocsHeadings(source: string): DocsHeading[] {
   visit(tree);
   return headings;
 }
+
+export function extractDocsText(source: string): string {
+  const tree = remark().use(remarkGfm).parse(source) as unknown as MarkdownNode;
+
+  function collect(node: MarkdownNode): string {
+    if (node.type === "image") return "";
+    if (node.value) return node.value;
+    return (node.children ?? []).map(collect).join(" ");
+  }
+
+  return collect(tree).replace(/<!--[\s\S]*?-->/g, " ").replace(/\s+/g, " ").trim();
+}

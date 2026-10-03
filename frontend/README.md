@@ -121,6 +121,40 @@ and selected lines with fenced-code metadata such as
 `~~~princi showLineNumbers {2}`. Code blocks use the existing copy control.
 Blockquotes render as callouts. Raw HTML in Markdown is not enabled.
 
+### Documentation search, navigation, and metadata
+
+`lib/docs-search-index.ts` builds a compact inverted index from the registered
+Markdown pages during static generation. The static `/docs/search-index` route
+serves that index locally; the browser fetches it only when search is first
+opened so every docs page does not carry the full index. It indexes page titles,
+descriptions, registry keywords, headings, and page text. The client palette
+ranks title/heading matches first and can navigate to either a page or a
+matching heading. It does not call a hosted search provider. Press **Ctrl+K** or
+**Cmd+K** on a docs page to open the keyboard accessible native dialog; arrow
+keys move through results, Enter opens one, and Escape closes it.
+
+The docs shell keeps the navigation registry as its source for breadcrumbs,
+active sidebar state, and previous/next links. The outline marks the section
+nearest the current scroll position. Mobile uses native disclosure menus for
+the docs sidebar and page outline. Heading controls copy a deep link, while code
+copy reads the rendered code text so syntax highlighting does not alter the
+clipboard contents. A docs loading skeleton and the shared not-found page cover
+route transitions and broken links.
+
+Each docs route emits a title in the form `Classes — PrinciPL Documentation`,
+its registered description, Open Graph metadata, and Twitter card metadata.
+The App Router uses `app/icon.svg` and generated Apple/social image routes. Docs
+breadcrumbs add `BreadcrumbList` JSON-LD when the public origin is configured.
+There is no analytics provider or tracking code.
+
+The repository does not define a public website hostname. Set
+`NEXT_PUBLIC_SITE_URL` to the actual deployed origin (for example, in the
+deployment environment) to enable self-referencing canonical links, absolute
+URLs in the sitemap, and the sitemap entry in `robots.txt`. Without it, the
+site omits canonical URLs and the sitemap contains no entries rather than
+publishing a guessed hostname. Next.js uses a local origin only to resolve
+social image URLs during local development.
+
 The former `/installation`, `/language`, `/architecture`, and `/roadmap` URLs
 redirect to the matching canonical documentation pages so content does not
 need to be maintained twice. Keep claims aligned with the root `README.md` and

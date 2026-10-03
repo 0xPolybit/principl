@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 import { DocsDocument } from "@/components/docs/docs-document";
 import { docsHref, docsRouteParams, findDocsPage } from "@/content/docs/navigation";
-import { pageTitle } from "@/lib/site";
+import { docsMetadata } from "@/lib/docs-metadata";
 
 type DocsRouteProps = {
   params: Promise<{ slug: string[] }>;
@@ -24,10 +24,7 @@ export async function generateMetadata({
 }: DocsRouteProps): Promise<Metadata> {
   const doc = await pageForParams(params);
   if (!doc) notFound();
-  return {
-    title: pageTitle(doc.title),
-    description: doc.description,
-  };
+  return docsMetadata(doc.title, doc.description, docsHref(doc));
 }
 
 export default async function DocumentationEntry({ params }: DocsRouteProps) {

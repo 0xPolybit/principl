@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Script from "next/script";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
+import { getMetadataBaseUrl } from "@/lib/site-url";
 import "@fontsource-variable/dm-sans/wght.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
@@ -15,12 +16,12 @@ const themeInitialization = `(() => {
   } catch {}
   document.documentElement.dataset.theme = theme;
 })();`;
-
 export const metadata: Metadata = {
   title: "PrinciPL — Princi Programming Language",
   description:
     "Explore Princi, a statically typed language compiled to native Windows x86-64 programs. Read the v0.1 language guide, installation steps, examples, and compiler architecture.",
   applicationName: "PrinciPL",
+  metadataBase: getMetadataBaseUrl(),
   keywords: [
     "PrinciPL",
     "Princi Programming Language",
@@ -35,6 +36,11 @@ export const metadata: Metadata = {
     description:
       "A statically typed language and Rust compiler for native Windows x86-64 programs.",
   },
+  twitter: {
+    card: "summary_large_image",
+    title: "PrinciPL — Princi Programming Language",
+    description: "A statically typed language and Rust compiler for native Windows x86-64 programs.",
+  },
 };
 
 export default function RootLayout({
@@ -43,7 +49,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html data-scroll-behavior="smooth" lang="en" suppressHydrationWarning>
       <head>
         <Script
           dangerouslySetInnerHTML={{ __html: themeInitialization }}

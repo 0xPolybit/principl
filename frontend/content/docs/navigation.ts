@@ -3,6 +3,7 @@ export type DocsPage = {
   aliases?: string[];
   title: string;
   description: string;
+  keywords: string[];
   section: string;
   file: string;
 };
@@ -17,7 +18,7 @@ function page(
   slug: string,
   title: string,
   description: string,
-  options: { file?: string; aliases?: string[] } = {},
+  options: { file?: string; aliases?: string[]; keywords?: string[] } = {},
 ): DocsPage {
   const file = options.file ?? (slug || "getting-started/introduction");
   return {
@@ -25,6 +26,7 @@ function page(
     slug,
     title,
     description,
+    keywords: options.keywords ?? [title, section, ...slug.split("/").filter(Boolean)],
     file: file + ".md",
     aliases: options.aliases,
   };
@@ -56,9 +58,9 @@ export const docsSections: DocsSection[] = [
       page("Language guide", "language/constructors", "Constructors", "Class init constructors and positional or named construction."),
       page("Language guide", "language/methods", "Methods", "Instance methods, self, field access, and static dispatch."),
       page("Language guide", "language/structs", "Structs", "Field-only structs with value-copy semantics."),
-      page("Language guide", "language/lists", "Lists", "The built-in List<T> collection and its checked operations."),
+      page("Language guide", "language/lists", "Lists", "The built-in List<T> collection and its checked operations.", { keywords: ["List<T>", "collection", "indexing", "bounds checks", "add", "length"] }),
       page("Language guide", "language/imports", "Imports", "The fixed built-in io and math module registry."),
-      page("Language guide", "language/c-ffi", "C interoperability", "The restricted Windows x64 C ABI boundary."),
+      page("Language guide", "language/c-ffi", "C interoperability", "The restricted Windows x64 C ABI boundary.", { keywords: ["FFI", "foreign function interface", "extern C", "native ABI"] }),
     ],
   },
   {

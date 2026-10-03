@@ -1,15 +1,10 @@
-import type { Metadata } from "next";
 import { DocsDocument } from "@/components/docs/docs-document";
 import { docsSections } from "@/content/docs/navigation";
-import { pageTitle } from "@/lib/site";
+import { docsMetadata } from "@/lib/docs-metadata";
 
 const introduction = docsSections[0].pages[0];
 
-export const metadata: Metadata = {
-  title: pageTitle(introduction.title),
-  description:
-    "A practical guide to Princi v0.1: language syntax, the Windows compiler, runtime, and current limitations.",
-};
+export const metadata = docsMetadata(introduction.title, introduction.description, "/docs");
 
 export default function DocumentationPage() {
   return <DocsDocument doc={introduction} />;

@@ -18,6 +18,13 @@ import {
   variablesSource,
 } from "@/content/princi";
 import { repositoryUrl } from "@/lib/site";
+import { publicPageMetadata } from "@/lib/site-metadata";
+
+export const metadata = publicPageMetadata(
+  "PrinciPL — Princi Programming Language",
+  "Explore Princi, a statically typed language compiled to native Windows x86-64 programs. Read the v0.1 language guide, installation steps, examples, and compiler architecture.",
+  "/",
+);
 
 const languageSamples = [
   {
