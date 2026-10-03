@@ -37,8 +37,8 @@ npm run start
 | Path | Contents |
 | --- | --- |
 | `app/` | App Router pages, shared layout, metadata, and global styles |
-| `components/` | Shared shell, reusable design primitives, article, code sample, tabs, and copy controls |
-| `content/` | Compiler-grounded landing-page details, example source, and Markdown docs |
+| `components/` | Shared shell, reusable design primitives, docs diagrams, example gallery, syntax display, and copy controls |
+| `content/` | Compiler-grounded page data, the example catalog, and Markdown docs |
 | `lib/` | Shared site helpers and Markdown outline extraction |
 | `public/` | Public static assets |
 | `styles/` | Shared design tokens |
@@ -51,6 +51,22 @@ Components because they use browser interaction. DM Sans and IBM Plex Mono
 are bundled locally from Fontsource packages; their SIL Open Font License
 texts are in `licenses/`. The site does not request fonts from an external
 service.
+
+## Examples gallery
+
+`/examples` reads its single catalog from `content/examples.ts`. Each entry
+contains a complete v0.1 source file, its `.prnc` or `.princi` filename,
+difficulty, concepts, explanation, deterministic static output, and related
+language-guide links. `components/examples/example-gallery.tsx` provides
+client-side search and category filters; `components/princi-code.tsx` applies
+a small tokenizer for the language's current keywords, types, literals,
+operators, and comments. Copy controls write the original, unhighlighted source
+string. The output panels are labeled static: the browser does not execute
+Princi code.
+
+The gallery examples are built and run locally through the repository's
+Windows compiler during authoring. Keep them synchronized with the Rust source,
+`README.md`, and `docs/v0.1-scope.md` when language behavior changes.
 
 ## Design system
 
