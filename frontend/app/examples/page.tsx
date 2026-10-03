@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CodeSample } from "@/components/code-sample";
 import { DocShell } from "@/components/doc-shell";
+import { Tabs } from "@/components/tabs";
 import {
   classSource,
   factorialSource,
@@ -46,7 +47,21 @@ export default function ExamplesPage() {
       <section className="example-section" id="hello">
         <h2>First program</h2>
         <p>Printing a string works in the smallest complete program.</p>
-        <CodeSample code={helloSource} title="Hello from Princi" filename="hello.prnc" />
+        <Tabs
+          label="Hello program source extension"
+          items={[
+            {
+              id: "prnc",
+              label: ".prnc",
+              content: <CodeSample code={helloSource} title="Hello from Princi" filename="hello.prnc" />,
+            },
+            {
+              id: "princi",
+              label: ".princi",
+              content: <CodeSample code={helloSource} title="Hello from Princi" filename="hello.princi" />,
+            },
+          ]}
+        />
       </section>
 
       <section className="example-section" id="functions">

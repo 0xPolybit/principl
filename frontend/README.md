@@ -37,8 +37,8 @@ npm run start
 | Path | Contents |
 | --- | --- |
 | `app/` | App Router pages, shared layout, metadata, and global styles |
-| `components/` | Reusable navigation, article, code sample, and copy controls |
-| `content/` | Compiler-grounded feature summaries and example source strings |
+| `components/` | Shared shell, reusable design primitives, article, code sample, tabs, and copy controls |
+| `content/` | Compiler-grounded landing-page details and example source strings |
 | `lib/` | Site navigation and shared helpers |
 | `public/` | Public static assets |
 | `styles/` | Shared design tokens |
@@ -46,6 +46,29 @@ npm run start
 | `licenses/` | Third-party font license texts |
 
 The landing page and guide pages are Server Components. The responsive menu
-and code-copy control are small Client Components because they use browser
-interaction. Newsreader, DM Sans, and IBM Plex Mono are bundled locally from
-Fontsource packages; their SIL Open Font License texts are in `licenses/`.
+theme preference, extension tabs, and code-copy control are small Client
+Components because they use browser interaction. DM Sans and IBM Plex Mono
+are bundled locally from Fontsource packages; their SIL Open Font License
+texts are in `licenses/`. The site does not request fonts from an external
+service.
+
+## Design system
+
+The shared design is a compact compiler field guide: paper and graphite
+surfaces, a restrained copper action color, and a small citron status accent.
+DM Sans is used for interface and reading text; IBM Plex Mono is reserved for
+source, commands, filenames, and technical labels. Color tokens are semantic
+and support light, dark, and system themes. The selected preference is stored
+in local browser storage, while system mode follows the operating-system
+setting.
+
+`components/site-primitives.tsx` contains reusable button links, badges,
+cards, callouts, section headings, feature grids, and inline code. The shared
+shell and navigation live in `site-header.tsx`, `site-footer.tsx`, and
+`navigation-link.tsx`; `tabs.tsx` provides keyboard-operable tabs. Focus rings,
+active navigation, and selected-tab states remain visible in both themes.
+
+The landing page introduces only implemented v0.1 behavior as current. It
+separates the process-lifetime managed heap from future memory-control ideas,
+shows the class/reference and struct/value distinction, and labels possible
+future work as roadmap rather than shipped capability.

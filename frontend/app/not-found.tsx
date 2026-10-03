@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ArrowUpRight } from "@/components/site-primitives";
 
 export default function NotFound() {
   return (
@@ -7,7 +8,7 @@ export default function NotFound() {
       <h1>This page is out of bounds.</h1>
       <p>The address may have changed. Return to the PrinciPL home page.</p>
       <Link className="button-primary" href="/">
-        Go to the home page <span aria-hidden="true">↗</span>
+        Go to the home page <ArrowUpRight />
       </Link>
     </main>
   );

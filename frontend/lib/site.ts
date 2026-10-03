@@ -1,11 +1,10 @@
 export const repositoryUrl = "https://github.com/0xPolybit/principl";
 
 export const navigation = [
-  { label: "Language", href: "/language" },
-  { label: "Install", href: "/installation" },
-  { label: "Architecture", href: "/architecture" },
+  { label: "Home", href: "/" },
+  { label: "Docs", href: "/docs" },
+  { label: "Learn", href: "/language" },
   { label: "Examples", href: "/examples" },
-  { label: "Roadmap", href: "/roadmap" },
 ];
 
 export const docsNavigation = [

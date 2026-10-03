@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { DocShell } from "@/components/doc-shell";
+import { Callout } from "@/components/site-primitives";
 import { deferredAreas } from "@/content/princi";
 import { pageTitle } from "@/lib/site";
 
@@ -60,14 +61,14 @@ export default function RoadmapPage() {
         <ul>
           {deferredAreas.map((item) => <li key={item}>{item}</li>)}
         </ul>
-        <div className="callout">
+        <Callout>
           <strong>Scope follows the compiler.</strong>
           <p>
             The repository&apos;s <code>docs/v0.1-scope.md</code>{" "}defines the current
             boundary. The website does not imply that a deferred feature has
             shipped.
           </p>
-        </div>
+        </Callout>
       </section>
     </DocShell>
   );

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { navigation, repositoryUrl } from "@/lib/site";
 import { PrinciMark } from "@/components/princi-mark";
+import { ArrowUpRight, Badge } from "@/components/site-primitives";
 
 export function SiteFooter() {
   return (
@@ -10,7 +11,7 @@ export function SiteFooter() {
           <PrinciMark small />
           <div>
             <p className="footer-wordmark">PrinciPL</p>
-            <p className="footer-note">A language, still taking shape.</p>
+            <p className="footer-note">A statically typed language for native programs.</p>
           </div>
         </div>
         <nav aria-label="Footer navigation" className="footer-links">
@@ -19,13 +20,16 @@ export function SiteFooter() {
               {item.label}
             </Link>
           ))}
+          <Link href="/installation">Install</Link>
+          <Link href="/architecture">Architecture</Link>
+          <Link href="/roadmap">Roadmap</Link>
           <a href={repositoryUrl} rel="noreferrer" target="_blank">
-            Source on GitHub <span aria-hidden="true">↗</span>
+            GitHub <ArrowUpRight />
           </a>
         </nav>
       </div>
       <div className="page-width footer-bottom">
-        <span>Princi v0.1.0</span>
+        <span><Badge>Princi v0.1</Badge></span>
         <span>Windows x86-64 target</span>
         <Link href="/docs">Documentation</Link>
       </div>

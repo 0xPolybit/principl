@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CodeSample } from "@/components/code-sample";
 import { DocShell } from "@/components/doc-shell";
+import { Callout } from "@/components/site-primitives";
 import { helloSource } from "@/content/princi";
 import { pageTitle } from "@/lib/site";
 
@@ -55,13 +56,13 @@ export default function InstallationPage() {
             </li>
           ))}
         </ol>
-        <div className="callout">
+        <Callout>
           <strong>Windows setup</strong>
           <p>
             The repository README includes a PowerShell and MSYS2 UCRT64 setup
             walkthrough, including the expected GCC target triple.
           </p>
-        </div>
+        </Callout>
       </section>
 
       <section className="article-section">
@@ -104,14 +105,14 @@ cargo install --path .`}
           title="Build and run"
           filename="PowerShell"
         />
-        <div className="callout">
+        <Callout>
           <strong>Expected output</strong>
           <p>
             The executable prints <code>Hello from Princi!</code> without a
             trailing line break. By default it is named{" "}<code>hello.exe</code> beside the
             source file.
           </p>
-        </div>
+        </Callout>
       </section>
 
       <section className="article-section">

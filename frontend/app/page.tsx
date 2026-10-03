@@ -1,213 +1,345 @@
 import Link from "next/link";
-import { pipeline, v0Features } from "@/content/princi";
+import {
+  ArrowUpRight,
+  Badge,
+  ButtonLink,
+  Callout,
+  SectionHeading,
+} from "@/components/site-primitives";
+import { CodeSample } from "@/components/code-sample";
+import {
+  classSource,
+  controlFlowSource,
+  factorialSource,
+  functionSource,
+  listSource,
+  nativePipeline,
+  structCopySource,
+  variablesSource,
+} from "@/content/princi";
 import { repositoryUrl } from "@/lib/site";
 
-const codeLines = [
-  <>
-    <span className="syntax-keyword">fn</span> main() &#123;
-  </>,
-  <>
-    print(<span className="syntax-string">"Hello from Princi!"</span>)
-  </>,
-  <>&#125;</>,
+const languageSamples = [
+  {
+    title: "Bindings",
+    filename: "values.prnc",
+    code: variablesSource,
+  },
+  {
+    title: "Functions and calls",
+    filename: "functions.prnc",
+    code: functionSource,
+  },
+  {
+    title: "Conditions and loops",
+    filename: "control.prnc",
+    code: controlFlowSource,
+  },
+  {
+    title: "Classes",
+    filename: "user.prnc",
+    code: classSource,
+  },
+  {
+    title: "Struct values",
+    filename: "point.prnc",
+    code: structCopySource,
+  },
+  {
+    title: "List<T>",
+    filename: "numbers.prnc",
+    code: listSource,
+  },
+];
+
+const shippedCapabilities = [
+  {
+    title: "Typed program core",
+    description:
+      "Int, Float, Bool, String, local inference, functions, recursion, assignments, and checked expressions.",
+  },
+  {
+    title: "Control flow and data",
+    description:
+      "if/else, while, integer ranges, reference-oriented classes, value-oriented structs, and List<T>.",
+  },
+  {
+    title: "Native build and runtime",
+    description:
+      "print/println, a limited C ABI, verified LLVM IR, and Windows x86-64 executable linking.",
+  },
+];
+
+const roadmapAreas = [
+  {
+    title: "Richer memory model",
+    description:
+      "Tracing collection is a future possibility. v0.1 keeps managed allocations until main returns; it does not collect during execution.",
+  },
+  {
+    title: "Ownership and raw memory",
+    description:
+      "Ownership, borrowing, raw pointers, and unsafe blocks are not part of the current language.",
+  },
+  {
+    title: "More targets and language tools",
+    description:
+      "Linux, macOS, WebAssembly, package management, richer generics, async, and traits remain deferred.",
+  },
 ];
 
 export default function Home() {
   return (
     <main id="main-content">
-      <section className="page-width hero">
-        <div className="hero-grid">
-          <div className="hero-copy">
-            <h1>
-              A small language.
-              <br />
-              A real <em>.exe.</em>
-            </h1>
-            <p>
-              Princi is a statically typed, compiled programming language. Its
-              v0.1 compiler turns focused source programs into native Windows
-              x86-64 executables.
-            </p>
-            <div className="hero-actions">
-              <Link className="button-primary" href="/installation">
-                Build your first program <span aria-hidden="true">↗</span>
-              </Link>
-              <Link className="button-secondary" href="/language">
-                Read the language guide <span aria-hidden="true">↗</span>
-              </Link>
-            </div>
-            <div className="extension-line" aria-label="Equivalent source extensions">
-              <code>.prnc</code>
-              <span className="extension-equals" aria-hidden="true">
-                =
-              </span>
-              <code>.princi</code>
-              <span>same source language, same compiler</span>
-            </div>
+      <section className="page-width landing-hero">
+        <div className="landing-hero-copy">
+          <div className="landing-hero-status">
+            <Badge tone="current">Princi v0.1</Badge>
+            <span>Windows x86-64</span>
           </div>
-
-          <section className="hero-proof" aria-label="A working Princi program">
-            <div className="proof-topline">
-              <span>hello.prnc</span>
-              <span>Princi v0.1.0</span>
-            </div>
-            <pre className="proof-source" aria-label="Princi source code">
-              <code>
-                {codeLines.map((line, index) => (
-                  <span className="proof-line" key={index}>
-                    <span aria-hidden="true" className="line-number">
-                      {String(index + 1).padStart(2, "0")}
-                    </span>
-                    {line}
-                  </span>
-                ))}
-              </code>
-            </pre>
-            <div className="proof-build">
-              <span className="proof-build-label">Build</span>
-              <code>princi build hello.prnc</code>
-            </div>
-            <div className="proof-bottomline">
-              <span>Windows x86-64</span>
-              <strong>hello.exe</strong>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section aria-label="Compiler facts" className="fact-strip">
-        <div className="page-width fact-strip-inner grid grid-cols-1 md:grid-cols-3">
-          <div className="fact-item">
-            <span aria-hidden="true" className="fact-symbol">
-              .prnc
-            </span>
-            <p>
-              <strong>One language, two suffixes</strong>
-              <code>.prnc</code> and <code>.princi</code> compile identically.
-            </p>
-          </div>
-          <div className="fact-item">
-            <span aria-hidden="true" className="fact-symbol">
-              → .exe
-            </span>
-            <p>
-              <strong>Native output</strong>
-              The sole v0.1 target is Windows x86-64.
-            </p>
-          </div>
-          <div className="fact-item">
-            <span aria-hidden="true" className="fact-symbol">
-              Rust
-            </span>
-            <p>
-              <strong>A compiler you can inspect</strong>
-              Frontend and tooling are implemented in Rust.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section className="page-width section-space">
-        <div className="section-header">
-          <h2>Expressive foundations, with the boundary in view.</h2>
-          <p>
-            v0.1 brings together a typed procedural core, a small object model,
-            and one built-in collection. Each feature is documented against the
-            compiler that ships today.
+          <h1>
+            Structure when needed.
+            <br />
+            Simplicity by default.
+          </h1>
+          <p className="landing-hero-description">
+            PrinciPL is a statically typed, compiled programming language. The
+            v0.1 compiler turns concise, structured source into native Windows
+            executables.
           </p>
+          <div className="landing-hero-facts">
+            <span><code>.prnc</code> and <code>.princi</code> are equivalent</span>
+            <span>One language, two source suffixes</span>
+          </div>
+          <div className="hero-actions landing-hero-actions">
+            <a
+              className="button-link button-primary"
+              href={repositoryUrl}
+              rel="noreferrer"
+              target="_blank"
+            >
+              View on GitHub <ArrowUpRight />
+            </a>
+            <ButtonLink href="/docs" variant="secondary">
+              Read the docs <ArrowUpRight />
+            </ButtonLink>
+          </div>
         </div>
-        <div className="feature-list">
-          {v0Features.map((feature, index) => (
-            <article className="feature-item" key={feature.title}>
-              <span className="pipeline-index">0{index + 1}</span>
-              <h3>{feature.title}</h3>
-              <p>{feature.description}</p>
-              <Link href="/language">
-                Language guide <span aria-hidden="true">↗</span>
-              </Link>
+
+        <div className="landing-hero-example">
+          <CodeSample
+            code={factorialSource}
+            title="Factorial and main"
+            filename="factorial.prnc"
+          />
+          <div className="landing-output-row">
+            <span>Build</span>
+            <code>princi build factorial.prnc</code>
+            <span aria-hidden="true" className="pipeline-arrow">→</span>
+            <strong>factorial.exe</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="landing-section why-section">
+        <div className="page-width">
+          <SectionHeading
+            title="Small programs stay direct. Larger ones have structure."
+            description="Princi combines explicit blocks and static types with local inference and a single native build command."
+          />
+          <div className="why-grid">
+            <article>
+              <span className="why-index">SYNTAX</span>
+              <h3>Concise syntax</h3>
+              <p>Typed function signatures, inferred local values, and optional semicolons keep everyday code compact.</p>
             </article>
+            <article>
+              <span className="why-index">CHECKING</span>
+              <h3>Static checks</h3>
+              <p>Names, types, calls, members, and control-flow conditions are checked before native code is emitted.</p>
+            </article>
+            <article>
+              <span className="why-index">DATA</span>
+              <h3>Two data shapes</h3>
+              <p>Classes share managed references; structs copy their fields by value. Both fit ordinary structured programs.</p>
+            </article>
+            <article>
+              <span className="why-index">TARGET</span>
+              <h3>Native compilation</h3>
+              <p>The current compiler lowers supported programs through LLVM and links Windows x86-64 executables.</p>
+            </article>
+          </div>
+
+          <Callout>
+            <div className="memory-direction-grid">
+              <div>
+                <Badge tone="current">v0.1 today</Badge>
+                <p>
+                  Strings, classes, and lists use managed allocations that are
+                  released when <code>main</code> returns. There is no tracing
+                  collection during execution.
+                </p>
+              </div>
+              <div>
+                <Badge tone="roadmap">Longer-term direction</Badge>
+                <p>
+                  Progressive memory control is a language philosophy, not a
+                  v0.1 capability. Ownership, borrowing, and raw-memory syntax
+                  are deferred.
+                </p>
+              </div>
+            </div>
+          </Callout>
+        </div>
+      </section>
+
+      <section className="page-width landing-section language-glance">
+        <SectionHeading
+          title="Language at a glance."
+          description="These examples use syntax that the v0.1 compiler parses, checks, and lowers for its Windows target."
+        />
+        <div className="language-sample-grid">
+          {languageSamples.map((sample) => (
+            <CodeSample
+              code={sample.code}
+              filename={sample.filename}
+              key={sample.title}
+              title={sample.title}
+            />
           ))}
         </div>
       </section>
 
-      <section className="pipeline-section section-space">
+      <section className="pipeline-section landing-section">
         <div className="page-width">
-          <div className="section-header">
-            <h2>From source to native code.</h2>
-            <p>
-              The compiler checks your program before producing LLVM IR,
-              Windows object code, and the executable. Intermediate files are
-              handled by the compiler.
-            </p>
-          </div>
-          <div className="pipeline-list">
-            {pipeline.map((stage, index) => (
-              <div className="pipeline-step" key={stage.name}>
-                <span className="pipeline-index">{index + 1} / 5</span>
-                <h3>{stage.name}</h3>
+          <SectionHeading
+            title="From source to a Windows executable."
+            description="Both source extensions enter the same compiler pipeline and produce the same target format."
+          />
+          <ol aria-label="Princi v0.1 compilation pipeline" className="native-pipeline">
+            {nativePipeline.map((stage, index) => (
+              <li className="native-pipeline-step" key={stage.title}>
+                <span className="pipeline-index">{String(index + 1).padStart(2, "0")}</span>
+                <h3>{stage.title}</h3>
                 <p>{stage.detail}</p>
-              </div>
+              </li>
+            ))}
+          </ol>
+          <p className="pipeline-footnote">
+            Clang verifies LLVM IR and emits the Windows COFF object; MinGW-w64
+            GCC links the executable and Windows C runtime.
+          </p>
+          <Link className="text-link text-link-large" href="/architecture">
+            Compiler architecture <ArrowUpRight />
+          </Link>
+        </div>
+      </section>
+
+      <section className="page-width landing-section type-comparison">
+        <SectionHeading
+          title="Objects for identity. Structs for values."
+          description="The distinction is explicit in v0.1: classes are references, while structs copy their fields."
+        />
+        <div className="type-comparison-grid">
+          <article className="type-comparison-column">
+            <div className="type-heading">
+              <Badge tone="current">Class · reference</Badge>
+              <h3>User</h3>
+            </div>
+            <p>Assigning a class value shares the same heap object. Instance methods use static dispatch.</p>
+            <CodeSample code={classSource} title="Class instance" filename="user.prnc" />
+            <p className="type-caption">No inheritance, virtual dispatch, or method overloading in v0.1.</p>
+          </article>
+          <article className="type-comparison-column">
+            <div className="type-heading">
+              <Badge tone="current">Struct · value</Badge>
+              <h3>Point</h3>
+            </div>
+            <p>Assignment, parameters, and returns copy struct fields. A mutable <code>var</code> can update its fields.</p>
+            <CodeSample code={structCopySource} title="Struct copy" filename="point.prnc" />
+            <p className="type-caption">Structs have fields only; methods and custom layouts are not supported.</p>
+          </article>
+        </div>
+        <Link className="text-link text-link-large" href="/language">
+          Read the language guide <ArrowUpRight />
+        </Link>
+      </section>
+
+      <section className="landing-section shipped-section">
+        <div className="page-width">
+          <SectionHeading
+            title="What v0.1 actually supports."
+            description="A deliberately bounded native compiler, with documented limits and no feature claims borrowed from the roadmap."
+          />
+          <div className="shipped-grid">
+            {shippedCapabilities.map((feature) => (
+              <article key={feature.title}>
+                <Badge tone="current">Implemented</Badge>
+                <h3>{feature.title}</h3>
+                <p>{feature.description}</p>
+              </article>
             ))}
           </div>
-          <Link className="text-link text-link-large" href="/architecture">
-            See the compiler architecture <span aria-hidden="true">↗</span>
-          </Link>
+          <p className="capability-note">
+            The compiler also recognizes the built-in <code>io</code> and <code>math</code> import names;
+            <code>math</code> currently exports nothing. C FFI is limited to
+            <code>Int32</code>, <code>Int64</code>, <code>Float64</code>, and <code>Void</code> signatures.
+          </p>
         </div>
       </section>
 
-      <section className="page-width section-space">
-        <div className="build-invite">
+      <section className="page-width landing-section roadmap-section">
+        <SectionHeading
+          title="Future direction, clearly marked."
+          description="These are possible areas beyond v0.1, not features available in the compiler today. No delivery dates are promised."
+        />
+        <div className="roadmap-list">
+          {roadmapAreas.map((area) => (
+            <article key={area.title}>
+              <Badge tone="roadmap">Roadmap</Badge>
+              <div>
+                <h3>{area.title}</h3>
+                <p>{area.description}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+        <Link className="text-link text-link-large" href="/roadmap">
+          See the full v0.1 boundary <ArrowUpRight />
+        </Link>
+      </section>
+
+      <section className="page-width landing-section get-started-section">
+        <div className="get-started-panel">
           <div>
-            <h2>Start with one file.</h2>
+            <Badge tone="current">Get started</Badge>
+            <h2>One file. One build command.</h2>
             <p>
-              Install the Windows toolchain, write a short <code>.prnc</code> or <code>.princi</code>{" "}
-              program, then use the single v0.1 build command.
+              Save the program as <code>hello.prnc</code> or <code>hello.princi</code>;
+              the compiler treats them identically.
             </p>
+            <ButtonLink href="/installation" variant="secondary">
+              Windows installation guide <ArrowUpRight />
+            </ButtonLink>
           </div>
-          <div className="build-terminal">
-            <div className="build-terminal-label">
-              <span>PowerShell</span>
-              <span>current directory</span>
-            </div>
-            <pre>
-              <code>{"princi build hello.prnc\n.\\hello.exe"}</code>
-            </pre>
-            <div className="build-terminal-output">Hello from Princi!</div>
+          <div className="build-command-panel" aria-label="Build command and output">
+            <span>PowerShell</span>
+            <code>princi build hello.prnc</code>
+            <span aria-hidden="true" className="pipeline-arrow">→</span>
+            <strong>hello.exe</strong>
+            <small>Use <code>-o app.exe</code> to choose another output path.</small>
           </div>
         </div>
       </section>
 
-      <section className="page-width boundary-line">
-        <h2>Focused by design. Still early by choice.</h2>
-        <div className="boundary-copy">
-          <p>
-            This is v0.1: useful language features and a direct native build
-            path, with important platform and runtime limits. Linux and macOS,
-            WebAssembly, packages, raw pointers, and advanced generics are not
-            supported yet.
-          </p>
-          <ul>
-            <li>Windows x86-64 only</li>
-            <li>Built-in modules only</li>
-            <li>Process-lifetime managed memory</li>
-            <li>Limited C interoperability</li>
-          </ul>
-          <Link className="text-link text-link-large" href="/roadmap">
-            Read what is deferred <span aria-hidden="true">↗</span>
-          </Link>
-        </div>
-      </section>
-
-      <section className="page-width boundary-line">
-        <h2>Open source, from the first token.</h2>
-        <div className="boundary-copy">
-          <p>
-            The compiler, test fixtures, examples, and v0.1 scope live in the
-            project repository. Browse the implementation or follow how the
-            language grows.
-          </p>
-          <a className="text-link text-link-large" href={repositoryUrl} rel="noreferrer" target="_blank">
-            Explore PrinciPL on GitHub <span aria-hidden="true">↗</span>
+      <section className="landing-github-cta">
+        <div className="page-width landing-github-inner">
+          <div>
+            <h2>Open source. Built in the open.</h2>
+            <p>Read the compiler, inspect the examples, and track the documented language boundary in the repository.</p>
+          </div>
+          <a className="button-link button-primary" href={repositoryUrl} rel="noreferrer" target="_blank">
+            Explore PrinciPL on GitHub <ArrowUpRight />
           </a>
         </div>
       </section>

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocShell } from "@/components/doc-shell";
+import { ArrowUpRight } from "@/components/site-primitives";
 import { docsNavigation, pageTitle } from "@/lib/site";
 
 export const metadata: Metadata = {
@@ -43,7 +44,7 @@ export default function DocumentationPage() {
                   </span>
                 </span>
                 <span aria-hidden="true" className="article-link-arrow">
-                  ↗
+                  <ArrowUpRight />
                 </span>
               </Link>
             ) : null;
@@ -74,7 +75,7 @@ export default function DocumentationPage() {
           source of truth.
         </p>
         <Link className="text-link text-link-large" href="/language">
-          Read the v0.1 language guide <span aria-hidden="true">↗</span>
+          Read the v0.1 language guide <ArrowUpRight />
         </Link>
       </section>
     </DocShell>
