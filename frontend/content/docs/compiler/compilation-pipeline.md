@@ -1,26 +1,32 @@
-Every source file follows the same compilation path:
+Every build uses the same ordered stages for `.prnc` and `.princi`. The diagram shows the actual v0.1 path implemented by `compiler::pipeline` and the native backend.
 
-~~~text
-.prnc / .princi
-  → source loading
-  → lexer
-  → parser
-  → AST
-  → built-in module resolution
-  → semantic analysis
-  → typed representation
-  → LLVM IR
-  → Windows x86-64 COFF object
-  → MinGW-w64 link
-  → .exe
-~~~
+<!-- princi-diagram:compiler-pipeline -->
 
-## Frontend and typed representation
+## Frontend stages
 
-Source loading validates the input and indexes line/column locations. The lexer emits located tokens, then the parser builds an AST with spans. Module resolution accepts only built-in names. Semantic analysis validates scopes, types, calls, members, constructors, and returns. If source diagnostics exist, the backend is not run.
+1. **Source loading.** The CLI resolves the source path and derives or normalizes the output path. `SourceFile` reads UTF-8 text and indexes line starts for diagnostics.
+2. **Lexer.** Source characters become tokens with source locations. Malformed literals and unexpected characters produce lexical diagnostics.
+3. **Parser and AST.** The parser consumes tokens, builds the source-oriented AST, and recovers at syntax boundaries to report errors. A build stops if parser diagnostics were collected.
+4. **Module resolution.** Imports are checked against the fixed, case-sensitive standard registry (`io`, `math`). Resolution does not search files on disk.
+5. **Semantic analysis.** Declarations, scopes, names, calls, assignments, control flow, and types are checked. Success returns a typed representation. Any source errors stop the backend.
 
-## LLVM and Windows native output
+## Native stages
 
-The backend lowers the typed representation to LLVM IR. Clang verifies and emits the object for the explicit `x86_64-w64-windows-gnu` target. MinGW-w64 GCC links the object and Windows C runtime. The resulting file is a Windows x86-64 executable.
+6. **LLVM IR.** `codegen::llvm` lowers the typed program and includes the explicit `x86_64-w64-windows-gnu` target configuration and private runtime definitions. It also validates the entry point.
+7. **Windows object.** Clang reads the generated LLVM IR, verifies it as it emits code, and writes a Windows x86-64 COFF object.
+8. **Executable link.** The compiler checks that the selected GCC targets `x86_64-w64-mingw32`, then asks MinGW-w64 GCC to link the object and Windows C runtime into an `.exe`.
 
-Intermediate LLVM IR and object files are placed in a temporary build directory and normally removed. For compiler development, set `PRINCI_KEEP_INTERMEDIATES=1` to retain them.
+LLVM IR and object files live in a temporary build directory and are removed after success or failure. Set `PRINCI_KEEP_INTERMEDIATES=1` to retain those compiler-development artifacts. The command remains `princi build <source-file>`; no intermediate path is required from the user.
+
+## Failure boundaries
+
+Source and semantic errors are reported before LLVM is generated. LLVM/Clang availability, LLVM/native emission, linker availability, and link failure have separate diagnostic codes. Failed builds return a nonzero process status and do not count as successful executable generation.
+
+## Related topics
+
+- [Compiler overview](/docs/compiler/architecture)
+- [Lexer & Parser](/docs/compiler/lexer-parser)
+- [Semantic analysis](/docs/compiler/semantic-analysis)
+- [LLVM backend](/docs/compiler/llvm-backend)
+- [Windows linking](/docs/compiler/windows-toolchain)
+- [Diagnostics](/docs/compiler/diagnostics)
