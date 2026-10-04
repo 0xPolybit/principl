@@ -499,6 +499,23 @@ cargo install --path .
 If `princi` is not found, add `%USERPROFILE%\.cargo\bin` to `PATH` and open a
 new terminal. The v0.1 CLI has one command: `princi build <source-file>`.
 
+### Install a Windows release
+
+Download the x64 installer from the
+[latest GitHub Release](https://github.com/0xPolybit/principl/releases/latest)
+and run it. The installer places `princi.exe` in your per-user programs folder
+and offers to add its `bin` directory to your user `PATH`. Open a new terminal
+after installation, then use `princi build ...` as shown below. You do not need
+Rust or Cargo to run the prebuilt compiler.
+
+The release installer does not bundle LLVM or MinGW-w64. The compiler still
+requires the LLVM/Clang and x86-64 MinGW-w64 tools described in [Windows
+setup](#windows-setup) on the machine that builds Princi programs. The
+installer can also add a **Build with Princi** Explorer action for `.prnc` and
+`.princi` files; this leaves your default source editor unchanged. A portable
+ZIP is available on the same release page for users who prefer to place the
+compiler manually.
+
 ## Compile a Princi program
 
 Save this source as `hello.prnc` or `hello.princi`:

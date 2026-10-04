@@ -1,0 +1,50 @@
+name: Compiler CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Windows x86-64 compiler tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PRINCI_REQUIRE_NATIVE_TESTS: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+
+      - name: Install MinGW-w64 GCC
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Install LLVM/Clang
+        shell: pwsh
+        run: choco install llvm --yes --no-progress
+
+      - name: Add toolchains to PATH
+        shell: pwsh
+        run: |
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:ProgramFiles "LLVM\bin")
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\msys64\ucrt64\bin"
+
+      - name: Verify toolchain targets
+        shell: pwsh
+        run: |
+          clang --version
+          if ((gcc -dumpmachine).Trim() -ne "x86_64-w64-mingw32") { throw "Wrong MinGW target" }
+
+      - name: Run compiler tests
+        run: cargo test
