@@ -442,12 +442,18 @@ The following are explicitly excluded:
 See [the v0.1 scope and architecture](docs/v0.1-scope.md) for the canonical
 boundary and details.
 
-## Roadmap beyond v0.1
+## Roadmap: proposed v0.2
 
-Later versions may add user-defined multi-file modules, a tracing garbage
-collector, richer generics and collection types, and a broader C ABI boundary.
-Those designs are intentionally outside v0.1 and are not promised by the
-current compiler.
+The current release is v0.1.0; none of the following proposed v0.2 features are
+implemented yet. The v0.2 scope adds general generics and compile-time
+specialization, trait bounds, interfaces and traits, algebraic enums, exhaustive
+pattern matching, `Result<T, E>`, and `?` error propagation. The compiler is
+planned to remain Windows x86-64 only with the existing `princi build` workflow
+and `.prnc`/`.princi` extension equivalence.
+
+The canonical boundary, compatibility expectations, and explicit exclusions
+are documented in [the PrinciPL v0.2 scope](docs/v0.2-scope.md). Features listed
+as outside v0.2 are not current functionality or release commitments.
 
 ## Windows setup
 
