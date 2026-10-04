@@ -58,3 +58,11 @@ export function ArrowUpRight() {
     </svg>
   );
 }
+
+export function DownloadIcon() {
+  return (
+    <svg aria-hidden="true" className="download-icon" fill="none" viewBox="0 0 16 16">
+      <path d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8M3.25 10.75v2.5h9.5v-2.5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
+    </svg>
+  );
+}

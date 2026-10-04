@@ -41,5 +41,6 @@ early and intentionally limited.
 ## Evidence on Hand
 
 The repository README, v0.1 scope document, `examples/modules.prnc`, compiler
-source, and automated test fixtures. No customer testimonials, benchmarks,
-download statistics, or release binaries are provided.
+source, automated test fixtures, and the published v0.1.0 installer and
+portable Windows x86-64 archive. No customer testimonials, benchmarks, or
+download statistics are provided.

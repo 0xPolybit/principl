@@ -2,6 +2,10 @@ Princi v0.1 builds native Windows x86-64 executables. A local setup needs the Ru
 
 > **Windows-only target:** These steps set up the supported v0.1 target. The compiler does not currently produce Linux, macOS, or WebAssembly programs.
 
+## Download the v0.1 compiler
+
+<!-- princi-release-downloads -->
+
 ## Prerequisites
 
 | Tool | Required setup | Verify |

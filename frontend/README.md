@@ -37,7 +37,7 @@ npm run start
 | Path | Contents |
 | --- | --- |
 | `app/` | App Router pages, shared layout, metadata, and global styles |
-| `components/` | Shared shell, reusable design primitives, docs diagrams, example gallery, syntax display, and copy controls |
+| `components/` | Shared shell, reusable design primitives, release download controls, docs diagrams, example gallery, syntax display, and copy controls |
 | `content/` | Compiler-grounded page data, the example catalog, and Markdown docs |
 | `lib/` | Shared site helpers and Markdown outline extraction |
 | `public/` | Public static assets |
@@ -113,8 +113,9 @@ and previous/next links; don't add the page separately to those components.
 The Compiler Internals section documents modules and stage boundaries against
 the Rust source tree. The pipeline and future memory direction use small
 server-rendered React diagrams rather than screenshots. Diagram slots in the
-two Markdown pages are expanded by `components/docs/docs-document.tsx`; their
-layout and narrow-screen behavior live in `compiler-diagrams.module.css`.
+Markdown pages and the release-download slot in the installation guide are
+expanded by `components/docs/docs-document.tsx`; diagram layout and
+narrow-screen behavior live in `compiler-diagrams.module.css`.
 
 The `/docs` route and `/docs/[...slug]` use the shared shell in
 `components/docs/`. It renders a collapsible section sidebar, breadcrumbs,

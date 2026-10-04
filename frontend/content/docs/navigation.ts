@@ -38,7 +38,7 @@ export const docsSections: DocsSection[] = [
     pages: [
       page("Getting started", "", "Introduction", "What Princi is, what v0.1 supports, and where to go next."),
       page("Getting started", "getting-started", "Getting started", "Set up Princi, build the compiler, and compile your first Windows program.", { file: "getting-started/index" }),
-      page("Getting started", "installation", "Installation", "Set up Rust, LLVM/Clang, MinGW-w64, and the Princi compiler.", { file: "getting-started/installation", aliases: ["getting-started/installation"] }),
+      page("Getting started", "installation", "Installation", "Download Princi v0.1.0 and set up the Windows native build toolchain.", { file: "getting-started/installation", aliases: ["getting-started/installation"], keywords: ["download", "Windows installer", "portable ZIP", "LLVM", "Clang", "MinGW-w64"] }),
       page("Getting started", "hello-world", "Hello, world", "Build and run your first Princi program.", { file: "getting-started/hello-world", aliases: ["getting-started/hello-world"] }),
       page("Getting started", "compiling", "Compiling programs", "Use the v0.1 build command and choose an executable output path.", { file: "getting-started/compiling-programs", aliases: ["getting-started/compiling-programs"] }),
     ],

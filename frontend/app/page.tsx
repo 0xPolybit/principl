@@ -4,6 +4,7 @@ import {
   Badge,
   ButtonLink,
   Callout,
+  DownloadIcon,
   SectionHeading,
 } from "@/components/site-primitives";
 import { CodeSample } from "@/components/code-sample";
@@ -17,7 +18,13 @@ import {
   structCopySource,
   variablesSource,
 } from "@/content/princi";
-import { repositoryUrl } from "@/lib/site";
+import {
+  latestReleasePageUrl,
+  releaseVersion,
+  repositoryUrl,
+  windowsInstallerUrl,
+  windowsPortableArchiveUrl,
+} from "@/lib/site";
 import { publicPageMetadata } from "@/lib/site-metadata";
 
 export const metadata = publicPageMetadata(
@@ -120,17 +127,21 @@ export default function Home() {
           </div>
           <div className="hero-actions landing-hero-actions">
             <a
+              aria-label={`Download Princi ${releaseVersion} Windows x86-64 installer`}
               className="button-link button-primary"
-              href={repositoryUrl}
-              rel="noreferrer"
-              target="_blank"
+              href={windowsInstallerUrl}
             >
-              View on GitHub <ArrowUpRight />
+              Download for Windows <DownloadIcon />
             </a>
             <ButtonLink href="/docs" variant="secondary">
               Read the docs <ArrowUpRight />
             </ButtonLink>
           </div>
+          <p className="landing-release-links">
+            <span>Princi {releaseVersion} · Windows x86-64</span>
+            <a href={windowsPortableArchiveUrl}>Portable ZIP</a>
+            <a href={latestReleasePageUrl}>All release files and checksums</a>
+          </p>
         </div>
 
         <div className="landing-hero-example">

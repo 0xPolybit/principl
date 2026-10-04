@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { navigation, repositoryUrl } from "@/lib/site";
+import { navigation, releaseVersion, repositoryUrl, windowsInstallerUrl } from "@/lib/site";
 import { PrinciMark } from "@/components/princi-mark";
-import { ArrowUpRight, Badge } from "@/components/site-primitives";
+import { ArrowUpRight, Badge, DownloadIcon } from "@/components/site-primitives";
 import { NavigationLink } from "@/components/navigation-link";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 
@@ -62,6 +62,14 @@ export function SiteHeader() {
               {item.label}
             </NavigationLink>
           ))}
+          <a
+            aria-label={`Download Princi ${releaseVersion} for Windows x86-64`}
+            className="nav-download button-link button-primary"
+            href={windowsInstallerUrl}
+            onClick={() => setMenuOpen(false)}
+          >
+            <DownloadIcon /> Download
+          </a>
           <a
             className="nav-github"
             href={repositoryUrl}
