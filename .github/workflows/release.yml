@@ -48,7 +48,8 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$packageVersion") { throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $packageVersion" }
 
       - name: Run compiler tests
-        run: cargo test
+        shell: pwsh
+        run: .\.github\scripts\run-tests.ps1
 
       - name: Build release compiler
         run: cargo build --release
