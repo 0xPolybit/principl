@@ -5,7 +5,7 @@ $testExitCode = $LASTEXITCODE
 
 if ($testExitCode -ne 0) {
     $failureLines = @($testOutput | Where-Object {
-        $_.ToString() -match '^(test result: FAILED|test .* \.\.\. FAILED|error(?:\[[^]]+\])?:|failures:|Caused by:|thread .+ panicked at)'
+        $_.ToString() -match '^(test result: FAILED|test .* \.\.\. FAILED|error(?:\[[^]]+\])?:|failures:|Caused by:|thread .+ panicked at)|^\s*(assertion .+ failed|left:|right:|unexpected stdout|unexpected stderr)'
     } | Select-Object -First 30 | ForEach-Object { $_.ToString() })
     if ($failureLines.Count -eq 0) {
         $failureLines = @($testOutput | Select-Object -Last 20 | ForEach-Object { $_.ToString() })
