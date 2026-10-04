@@ -251,8 +251,10 @@ fn complete_v0_1_program_builds_and_runs_identically_with_both_extensions() {
         prnc, princi,
         ".prnc and .princi must contain the same program"
     );
-    let expected_stdout = include_str!("fixtures/conformance/v0_1.stdout");
-    let expected_stderr = include_str!("fixtures/conformance/v0_1.stderr");
+    let expected_stdout =
+        normalize_newlines(include_str!("fixtures/conformance/v0_1.stdout").as_bytes());
+    let expected_stderr =
+        normalize_newlines(include_str!("fixtures/conformance/v0_1.stderr").as_bytes());
     let expected_exit = include_str!("fixtures/conformance/v0_1.exitcode")
         .trim()
         .parse::<i32>()
