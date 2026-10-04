@@ -1224,9 +1224,10 @@ mod tests {
     fn function_ast_matches_the_golden_snapshot() {
         let result = parse_text("add.prnc", "fn add(a: Int, b: Int) -> Int { return a + b }");
         let function = only_function(&result);
+        let expected = include_str!("../tests/snapshots/add.ast").replace("\r\n", "\n");
         assert_eq!(
             function_snapshot(function),
-            include_str!("../tests/snapshots/add.ast")
+            expected
         );
     }
 
