@@ -78,11 +78,13 @@ and support light, dark, and system themes. The selected preference is stored
 in local browser storage, while system mode follows the operating-system
 setting.
 
-`components/site-primitives.tsx` contains reusable button links, badges,
-cards, callouts, section headings, feature grids, and inline code. The shared
-shell and navigation live in `site-header.tsx`, `site-footer.tsx`, and
-`navigation-link.tsx`; `tabs.tsx` provides keyboard-operable tabs. Focus rings,
-active navigation, and selected-tab states remain visible in both themes.
+`components/site-primitives.tsx` contains the shared button-link, badge,
+callout, section-heading, inline-code, and arrow primitives. The shared shell
+and navigation live in `site-header.tsx`, `site-footer.tsx`, and
+`navigation-link.tsx`. Interactive behavior stays in small client components
+for navigation, theme preference, copy controls, example filtering, and
+documentation search. Focus rings and selected navigation states remain visible
+in both themes.
 
 The landing page introduces only implemented v0.1 behavior as current. It
 separates the process-lifetime managed heap from future memory-control ideas,
@@ -100,6 +102,13 @@ legacy path aliases, titles, descriptions, sidebar order, breadcrumbs,
 active-page links, previous/next navigation, and GitHub edit links. Add a
 Markdown file and one registry entry to publish a page; the route is statically
 generated from that registry.
+
+To add a page, create `content/docs/<section>/<slug>.md` using the `princi`
+fence language for source examples, then add a `page(...)` entry to
+`content/docs/navigation.ts` with its section, slug, title, description, and
+keywords. Set `file` when its filename differs from the slug-derived default.
+The registry drives the sidebar, generated route, breadcrumbs, search, metadata,
+and previous/next links; don't add the page separately to those components.
 
 The Compiler Internals section documents modules and stage boundaries against
 the Rust source tree. The pipeline and future memory direction use small
@@ -154,6 +163,35 @@ URLs in the sitemap, and the sitemap entry in `robots.txt`. Without it, the
 site omits canonical URLs and the sitemap contains no entries rather than
 publishing a guessed hostname. Next.js uses a local origin only to resolve
 social image URLs during local development.
+
+## Validation and deployment
+
+The frontend package exposes `lint`, `build`, and `start` scripts; it has no
+separate JavaScript unit-test script. Before deployment, install dependencies
+and run:
+
+```powershell
+npm install
+npm run lint
+npm run build
+npm run start
+```
+
+The website is an independent Next.js App Router project. Deploy `frontend/`
+with a normal Node-compatible Next.js host: use `npm run build` for its build
+step and `npm run start` for the server. No compiler binary, database,
+authentication service, search provider, or analytics account is required.
+Set `NEXT_PUBLIC_SITE_URL` to the final public origin in the deployment
+environment so canonical URLs, sitemap entries, robots metadata, and absolute
+social metadata point to the deployed site. The search index is generated from
+Markdown at build time and served by the local static route; it does not need a
+separate backend.
+
+`cargo test` from the repository root tests the Princi compiler and its native
+Windows integration behavior. It does not execute frontend JavaScript tests or
+automatically compile Markdown snippets; when editing documentation examples,
+check them with the repository's Windows compiler and inspect affected routes
+at desktop and mobile widths.
 
 The former `/installation`, `/language`, `/architecture`, and `/roadmap` URLs
 redirect to the matching canonical documentation pages so content does not

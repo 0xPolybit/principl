@@ -25,13 +25,6 @@ export function Badge({
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
-export function Card({
-  children,
-  className = "",
-}: PropsWithChildren<{ className?: string }>) {
-  return <article className={`ui-card ${className}`.trim()}>{children}</article>;
-}
-
 export function Callout({
   children,
   tone = "note",
@@ -52,10 +45,6 @@ export function SectionHeading({
       <p>{description}</p>
     </div>
   );
-}
-
-export function FeatureGrid({ children }: PropsWithChildren) {
-  return <div className="feature-list feature-grid">{children}</div>;
 }
 
 export function InlineCode({ children }: PropsWithChildren) {

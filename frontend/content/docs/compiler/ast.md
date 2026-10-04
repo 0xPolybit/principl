@@ -6,13 +6,21 @@ At the top level, `Program` contains declarations such as functions, classes, st
 
 Expressions form their own tree. Nodes represent identifiers, `self`, literals, list literals, named-field construction, calls, member access, indexes, unary and binary expressions, ranges, and parenthesized groups.
 
-For example, this expression:
+For example, the initializer in this complete program:
 
 ~~~princi
-total + price * count
+fn main() {
+    let total = 1
+    let price = 2
+    let count = 3
+    let result = total + price * count
+    println(result)
+}
 ~~~
 
-is represented with `+` at the root, `total` on its left, and a `*` expression on its right. Each node's span points back to its range in the original source.
+The initializer is represented with `+` at the root, `total` on its left, and
+a `*` expression on its right. Each expression node's span points back to its
+range in the original source. The full program compiles and prints `7`.
 
 ## Spans and diagnostics
 

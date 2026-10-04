@@ -595,6 +595,14 @@ without exposing a Rust panic or backtrace.
 
 ## Website development
 
-The separate Next.js website lives in [`frontend/`](frontend/README.md). To
-run it locally, change to that directory, run `npm install`, then
-`npm run dev`. See its README for lint and production build instructions.
+The separate Next.js website lives in [`frontend/`](frontend/README.md). From
+the repository root, start it locally with:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+See [`frontend/README.md`](frontend/README.md) for architecture, content
+maintenance, lint, production build, and deployment instructions.
