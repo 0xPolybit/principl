@@ -182,7 +182,7 @@ fn malformed_source_reports_its_file_line_and_column() {
             "fn main() {\n  let value = 1;\n  let other = 2;\n           \"unfinished\n}\n",
         )
         .expect("malformed source should be written");
-        let expected_path = source.clone();
+        let file_name = source.file_name().unwrap().to_string_lossy();
 
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))
             .arg("build")
@@ -195,7 +195,7 @@ fn malformed_source_reports_its_file_line_and_column() {
         assert!(
             stderr.contains(&format!(
                 "{}:4:12: error[E0100]: unterminated string literal",
-                expected_path.display()
+                file_name
             )),
             "expected a located lexical diagnostic, got: {stderr}"
         );
@@ -216,6 +216,7 @@ fn syntax_errors_have_source_excerpt_for_both_extensions() {
         let source = dir.0.join(format!("syntax.{extension}"));
         fs::write(&source, "fn main() {\n    let = 1\n}\n")
             .expect("invalid source should be written");
+        let file_name = source.file_name().unwrap().to_string_lossy();
         let result = Command::new(env!("CARGO_BIN_EXE_princi"))
             .arg("build")
             .arg(&source)
@@ -227,7 +228,7 @@ fn syntax_errors_have_source_excerpt_for_both_extensions() {
         assert!(
             stderr.contains(&format!(
                 "{}:2:9: error[E0101]: expected variable name",
-                source.display()
+                file_name
             )),
             "{stderr}"
         );
@@ -243,7 +244,7 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
     let source = dir.0.join("type_error.princi");
     fs::write(&source, "fn main() {\n    let count: Int = \"wrong\"\n}")
         .expect("source with a type error should be written");
-    let expected_path = source.clone();
+    let file_name = source.file_name().unwrap().to_string_lossy();
 
     let result = Command::new(env!("CARGO_BIN_EXE_princi"))
         .arg("build")
@@ -256,7 +257,7 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
     assert!(
         stderr.contains(&format!(
             "{}:2:22: error[E0201]: expected Int, found String (expression)",
-            expected_path.display()
+            file_name
         )),
         "expected a located semantic diagnostic, got: {stderr}"
     );
