@@ -145,9 +145,11 @@ binding's type, and immutable bindings cannot be assigned through.
 single element type, so `[1, 2]` has type `List<Int>`; heterogeneous literals
 are rejected because v0.1 defines no common element type or numeric promotion.
 An empty list needs an expected type, for example `var values: List<Int> = []`.
-Bare `List` and generic arguments on other types are rejected. A range
-expression requires matching numeric bounds; native `for` loops require `Int`
-bounds and use an exclusive end.
+Bare `List` is rejected. `List<T>` remains the only generic type with a complete
+v0.1 native implementation. The compiler now has an incomplete v0.2 frontend
+foundation for generic user-defined declarations and type references; that
+foundation is described below. A range expression requires matching numeric
+bounds; native `for` loops require `Int` bounds and use an exclusive end.
 
 Lists support `.length`, integer indexing for reads and writes, and
 `.add(value)`. The compiler checks element types at each operation and
@@ -444,12 +446,36 @@ boundary and details.
 
 ## Roadmap: proposed v0.2
 
-The current release is v0.1.0; none of the following proposed v0.2 features are
-implemented yet. The v0.2 scope adds general generics and compile-time
-specialization, trait bounds, interfaces and traits, algebraic enums, exhaustive
-pattern matching, `Result<T, E>`, and `?` error propagation. The compiler is
-planned to remain Windows x86-64 only with the existing `princi build` workflow
-and `.prnc`/`.princi` extension equivalence.
+The current release line remains v0.1.0. Work toward v0.2 has started with a
+generic type-system frontend foundation: the parser and semantic analyzer
+recognize generic function, class, and struct declarations, nested generic
+type references, generic function signatures, and basic explicit/inferred type
+arguments. Generic user-defined types and functions are not yet specialized
+for LLVM, so they do not currently compile to native executables. `List<T>`
+continues to use its existing native implementation.
+
+The remaining proposed v0.2 scope includes generic specialization and trait
+bounds, interfaces and traits, algebraic enums, exhaustive pattern matching,
+`Result<T, E>`, and `?` error propagation. The compiler is planned to remain
+Windows x86-64 only with the existing `princi build` workflow and
+`.prnc`/`.princi` extension equivalence.
+
+The frontend accepts generic declarations and nested generic type syntax. For
+example, `Box<Int>`, `Pair<String, Float>`, and `List<Box<Int>>` can be
+represented and checked by the current frontend. Generic user-defined code is
+not yet specialized into LLVM IR, so it cannot be built into a native program
+in this stage:
+
+```princi
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+```
 
 The canonical boundary, compatibility expectations, and explicit exclusions
 are documented in [the PrinciPL v0.2 scope](docs/v0.2-scope.md). Features listed

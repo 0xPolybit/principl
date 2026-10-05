@@ -15,7 +15,7 @@ use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::semantic::{GlobalSymbol, TypedProgram};
 use crate::source::{SourceFile, SourceSpan};
-use crate::types::{FunctionType, Type};
+use crate::types::{FunctionType, GenericTypeConstructor, Type};
 
 const WINDOWS_X86_64_TRIPLE: &str = "x86_64-w64-windows-gnu";
 const WINDOWS_X86_64_DATA_LAYOUT: &str =
@@ -664,7 +664,16 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::Bool => Ok("i1".to_owned()),
         Type::String => Ok("ptr".to_owned()),
         Type::Class(_) => Ok("ptr".to_owned()),
-        Type::List(_) => Ok("ptr".to_owned()),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::List,
+            arguments,
+        } if arguments.len() == 1 => Ok("ptr".to_owned()),
+        Type::GenericInstance { .. } | Type::TypeParameter(_) => Err(Diagnostic::at_source(
+            DiagnosticCode::UnsupportedFeature,
+            "generic type specialization is not implemented in the native backend yet",
+            source,
+            span,
+        )),
         Type::Struct(name) => Ok(struct_type_name(name)),
         Type::Void => Ok("void".to_owned()),
         _ => Err(Diagnostic::at_source(
@@ -1243,9 +1252,31 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 operator,
                 right,
             } => self.emit_binary(left, *operator, right, expression.span),
-            ExpressionKind::Construction { type_name, fields } => {
-                self.emit_named_construction(type_name, fields, expression.span)
+            ExpressionKind::Construction {
+                type_reference,
+                fields,
+            } => {
+                if !type_reference.arguments.is_empty() {
+                    return Err(self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "generic type specialization is not implemented in the native backend yet",
+                        expression.span,
+                    ));
+                }
+                self.emit_named_construction(
+                    &crate::ast::Identifier {
+                        name: type_reference.name.clone(),
+                        span: type_reference.span,
+                    },
+                    fields,
+                    expression.span,
+                )
             }
+            ExpressionKind::GenericReference { .. } => Err(self.error_with(
+                DiagnosticCode::UnsupportedFeature,
+                "generic function specialization is not implemented in the native backend yet",
+                expression.span,
+            )),
             ExpressionKind::Group(inner) => self.emit_expression(inner),
             ExpressionKind::List(elements) => self.emit_list_literal(elements, expression),
             ExpressionKind::Index { object, index } => {
@@ -1284,13 +1315,12 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .expression_type(expression)
             .cloned()
             .ok_or_else(|| self.error("missing semantic list type", expression.span))?;
-        let Type::List(element_type) = list_type else {
+        let Some(element_type) = list_type.clone().into_list_element() else {
             return Err(self.error(
                 format!("list literal has non-list type {list_type}"),
                 expression.span,
             ));
         };
-        let element_type = *element_type;
         let llvm_element_type = llvm_type(&element_type, expression.span, self.source)?;
         let element_size = self.emit_list_element_size(&element_type, expression.span)?;
         let list = self.fresh_value();
@@ -1317,7 +1347,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         }
         Ok(IrValue {
-            ty: Type::List(Box::new(element_type)),
+            ty: Type::list(element_type),
             operand: list,
         })
     }
@@ -1329,7 +1359,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
         let list_value = self.emit_expression(object)?;
-        let Type::List(element_type) = list_value.ty else {
+        let Some(element_type) = list_value.ty.clone().into_list_element() else {
             return Err(self.error(
                 format!("cannot lower indexing on {}", list_value.ty),
                 object.span,
@@ -1348,7 +1378,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let result = self.fresh_value();
         self.instruction(&format!("{result} = load {llvm_element_type}, ptr {slot}"));
         Ok(IrValue {
-            ty: *element_type,
+            ty: element_type,
             operand: result,
         })
     }
@@ -1360,7 +1390,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         index: &Expression,
     ) -> Result<(), Diagnostic> {
         let list_value = self.emit_expression(object)?;
-        let Type::List(element_type) = list_value.ty else {
+        let Some(element_type) = list_value.ty.clone().into_list_element() else {
             return Err(self.error(
                 format!("cannot lower assignment through {}", list_value.ty),
                 object.span,
@@ -1394,7 +1424,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let stored = if assignment.operator == AssignmentOperator::Assign {
             value.operand
         } else {
-            match (assignment.operator, element_type.as_ref()) {
+            match (assignment.operator, &element_type) {
                 (AssignmentOperator::AddAssign, Type::String) => {
                     let combined = self.fresh_value();
                     self.instruction(&format!(
@@ -1525,7 +1555,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .expression_type(object)
             .cloned()
             .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
-        if matches!(object_type, Type::List(_)) {
+        if object_type.list_element().is_some() {
             if member.name != "length" {
                 return Err(self.error(
                     format!("cannot use List member '{}' as a value", member.name),
@@ -1876,7 +1906,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
         let receiver = self.emit_expression(object)?;
-        if let Type::List(element_type) = &receiver.ty {
+        if let Some(element_type) = receiver.ty.list_element() {
             if member.name != "add" {
                 return Err(self.error(
                     format!("cannot dispatch List method '{}'", member.name),
@@ -2508,6 +2538,30 @@ mod tests {
         assert!(ir.contains("icmp sle i64"));
         assert!(ir.contains("define i32 @main()"));
         assert!(ir.contains("call void @princi_rt_print_int"));
+    }
+
+    #[test]
+    fn generic_templates_fail_with_a_controlled_not_yet_specialized_diagnostic() {
+        let source = SourceFile::from_text(
+            "generic.prnc",
+            "fn identity<T>(value: T) -> T { return value }\nfn main() { let answer = identity(42) }",
+        );
+        let tokens = lexer::lex(&source).expect("generic sample should lex");
+        let parsed = parser::parse(&source, tokens);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let analyzed = semantic::analyze(&source, &parsed.program);
+        assert!(
+            analyzed.diagnostics.is_empty(),
+            "{:?}",
+            analyzed.diagnostics
+        );
+
+        let diagnostic = generate_llvm_ir(&analyzed.typed_program, &source)
+            .expect_err("the v0.2 foundation does not specialize generic LLVM code");
+        assert_eq!(diagnostic.code(), DiagnosticCode::UnsupportedFeature);
+        assert!(diagnostic
+            .message()
+            .contains("generic type specialization is not implemented"));
     }
 
     #[test]

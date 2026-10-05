@@ -29,6 +29,11 @@ pub struct TypeReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParameterDeclaration {
+    pub name: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDeclaration {
     pub path: Vec<Identifier>,
     pub span: SourceSpan,
@@ -53,6 +58,7 @@ pub struct ExternalFunctionDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDeclaration {
     pub name: Identifier,
+    pub type_parameters: Vec<TypeParameterDeclaration>,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeReference>,
     pub body: Block,
@@ -76,6 +82,7 @@ pub enum TypeDeclarationKind {
 pub struct TypeDeclaration {
     pub kind: TypeDeclarationKind,
     pub name: Identifier,
+    pub type_parameters: Vec<TypeParameterDeclaration>,
     pub members: Vec<ClassMember>,
     pub span: SourceSpan,
 }
@@ -180,8 +187,12 @@ pub enum ExpressionKind {
     SelfValue,
     Literal(Literal),
     List(Vec<Expression>),
+    GenericReference {
+        name: Identifier,
+        arguments: Vec<TypeReference>,
+    },
     Construction {
-        type_name: Identifier,
+        type_reference: TypeReference,
         fields: Vec<FieldInitializer>,
     },
     Call {

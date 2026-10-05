@@ -178,6 +178,7 @@ impl Parser<'_> {
     fn parse_function(&mut self) -> Result<FunctionDeclaration, Diagnostic> {
         let start = self.advance().location.span.start;
         let name = self.expect_identifier("expected function name")?;
+        let type_parameters = self.parse_type_parameters()?;
         let parameters = self.parse_parameters()?;
         let return_type = if self.eat_punctuation(Punctuation::Arrow) {
             Some(self.parse_type_reference("expected return type after '->'")?)
@@ -189,11 +190,73 @@ impl Parser<'_> {
 
         Ok(FunctionDeclaration {
             name,
+            type_parameters,
             parameters,
             return_type,
             body,
             span,
         })
+    }
+
+    fn parse_type_parameters(&mut self) -> Result<Vec<TypeParameterDeclaration>, Diagnostic> {
+        if !self.eat_operator(Operator::Less) {
+            return Ok(Vec::new());
+        }
+
+        let mut parameters = Vec::new();
+        loop {
+            parameters.push(TypeParameterDeclaration {
+                name: self.expect_identifier("expected generic parameter name")?,
+            });
+            if self.eat_punctuation(Punctuation::Comma) {
+                continue;
+            }
+            let close = self.current().clone();
+            if close.kind != TokenKind::Operator(Operator::Greater) {
+                return Err(Diagnostic::at_source(
+                    DiagnosticCode::Syntax,
+                    "expected '>' after generic parameters",
+                    self.source,
+                    close.location.span,
+                ));
+            }
+            self.advance();
+            break;
+        }
+        Ok(parameters)
+    }
+
+    fn parse_type_arguments(&mut self) -> Result<(Vec<TypeReference>, SourceSpan), Diagnostic> {
+        let open = self.expect_operator(Operator::Less, "expected '<' before type arguments")?;
+        let mut arguments = Vec::new();
+        loop {
+            arguments.push(self.parse_type_reference("expected generic type argument")?);
+            if self.eat_punctuation(Punctuation::Comma) {
+                continue;
+            }
+            let close = self.current().clone();
+            if close.kind != TokenKind::Operator(Operator::Greater) {
+                return Err(Diagnostic::at_source(
+                    DiagnosticCode::Syntax,
+                    "expected '>' after type arguments",
+                    self.source,
+                    close.location.span,
+                ));
+            }
+            self.advance();
+            return Ok((
+                arguments,
+                SourceSpan::new(open.location.span.start, close.location.span.end),
+            ));
+        }
+    }
+
+    fn expect_operator(&mut self, operator: Operator, message: &str) -> Result<Token, Diagnostic> {
+        if self.eat_operator(operator) {
+            Ok(self.tokens[self.cursor - 1].clone())
+        } else {
+            Err(self.error_here(message))
+        }
     }
 
     fn parse_parameters(&mut self) -> Result<Vec<Parameter>, Diagnostic> {
@@ -227,32 +290,18 @@ impl Parser<'_> {
 
     fn parse_type_reference(&mut self, message: &str) -> Result<TypeReference, Diagnostic> {
         let name = self.expect_identifier(message)?;
-        let mut arguments = Vec::new();
         let mut end = name.span.end;
-        if self.eat_operator(Operator::Less) {
-            loop {
-                arguments.push(self.parse_type_reference("expected type argument")?);
-                if self.eat_punctuation(Punctuation::Comma) {
-                    continue;
-                }
-                let close = self.current().clone();
-                if close.kind != TokenKind::Operator(Operator::Greater) {
-                    return Err(Diagnostic::at_source(
-                        DiagnosticCode::Syntax,
-                        "expected '>' after type arguments",
-                        self.source,
-                        close.location.span,
-                    ));
-                }
-                self.advance();
-                end = close.location.span.end;
-                break;
-            }
-        }
+        let (arguments, span) = if self.check_operator(Operator::Less) {
+            let (arguments, span) = self.parse_type_arguments()?;
+            end = span.end;
+            (arguments, span)
+        } else {
+            (Vec::new(), SourceSpan::new(name.span.start, end))
+        };
         Ok(TypeReference {
             name: name.name,
             arguments,
-            span: SourceSpan::new(name.span.start, end),
+            span: SourceSpan::new(name.span.start, span.end.max(end)),
         })
     }
 
@@ -262,6 +311,7 @@ impl Parser<'_> {
     ) -> Result<TypeDeclaration, Diagnostic> {
         let start = self.advance().location.span.start;
         let name = self.expect_identifier("expected class or struct name")?;
+        let type_parameters = self.parse_type_parameters()?;
         self.expect_punctuation(Punctuation::LeftBrace, "expected '{' after type name")?;
         let mut members = Vec::new();
 
@@ -285,6 +335,7 @@ impl Parser<'_> {
         Ok(TypeDeclaration {
             kind,
             name,
+            type_parameters,
             members,
             span: SourceSpan::new(start, close.location.span.end),
         })
@@ -680,8 +731,36 @@ impl Parser<'_> {
                     name,
                     span: token.location.span,
                 };
+                if self.check_operator(Operator::Less) {
+                    let after_name = self.cursor;
+                    if let Ok((arguments, argument_span)) = self.parse_type_arguments() {
+                        if self.check_punctuation(Punctuation::LeftBrace) && allow_construction {
+                            let type_reference = TypeReference {
+                                name: identifier.name.clone(),
+                                arguments,
+                                span: SourceSpan::new(identifier.span.start, argument_span.end),
+                            };
+                            return self.parse_construction_expression(type_reference);
+                        }
+                        if self.check_punctuation(Punctuation::LeftParen) {
+                            let span = SourceSpan::new(identifier.span.start, argument_span.end);
+                            return Ok(Expression {
+                                kind: ExpressionKind::GenericReference {
+                                    name: identifier,
+                                    arguments,
+                                },
+                                span,
+                            });
+                        }
+                    }
+                    self.cursor = after_name;
+                }
                 if allow_construction && self.check_punctuation(Punctuation::LeftBrace) {
-                    self.parse_construction_expression(identifier)
+                    self.parse_construction_expression(TypeReference {
+                        name: identifier.name,
+                        arguments: Vec::new(),
+                        span: identifier.span,
+                    })
                 } else {
                     Ok(Expression {
                         span: token.location.span,
@@ -767,10 +846,10 @@ impl Parser<'_> {
 
     fn parse_construction_expression(
         &mut self,
-        type_name: Identifier,
+        type_reference: TypeReference,
     ) -> Result<Expression, Diagnostic> {
         self.advance();
-        let start = type_name.span.start;
+        let start = type_reference.span.start;
         let mut fields = Vec::new();
 
         if !self.check_punctuation(Punctuation::RightBrace) {
@@ -802,7 +881,10 @@ impl Parser<'_> {
             "expected '}' after constructed fields",
         )?;
         Ok(Expression {
-            kind: ExpressionKind::Construction { type_name, fields },
+            kind: ExpressionKind::Construction {
+                type_reference,
+                fields,
+            },
             span: SourceSpan::new(start, close.location.span.end),
         })
     }
@@ -1062,6 +1144,10 @@ impl Parser<'_> {
         }
     }
 
+    fn check_operator(&self, operator: Operator) -> bool {
+        self.current().kind == TokenKind::Operator(operator)
+    }
+
     fn current(&self) -> &Token {
         self.tokens.get(self.cursor).unwrap_or(&self.eof)
     }
@@ -1111,7 +1197,7 @@ mod tests {
     use super::parse;
     use crate::ast::{
         BinaryOperator, ClassMember, Declaration, Expression, ExpressionKind, Literal, Statement,
-        StatementKind, TypeDeclarationKind,
+        StatementKind, TypeDeclarationKind, VariableDeclaration,
     };
     use crate::source::SourceFile;
 
@@ -1225,10 +1311,7 @@ mod tests {
         let result = parse_text("add.prnc", "fn add(a: Int, b: Int) -> Int { return a + b }");
         let function = only_function(&result);
         let expected = include_str!("../tests/snapshots/add.ast").replace("\r\n", "\n");
-        assert_eq!(
-            function_snapshot(function),
-            expected
-        );
+        assert_eq!(function_snapshot(function), expected);
     }
 
     #[test]
@@ -1486,6 +1569,82 @@ struct Point {
                 ..function.parameters[0].type_reference.span.end],
             "List<List<Int>>"
         );
+    }
+
+    #[test]
+    fn parses_generic_declarations_nested_types_and_construction_arguments() {
+        let text = r#"class Box<T> { value: T }
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+fn identity<T>(value: T) -> T { return value }
+fn take(value: Box<List<Int>>) {}
+fn main() {
+    let box = Box<Int> { value: 3 }
+    let explicit = identity<Int>(box.value)
+    let positional = Box<List<Int>>([1, 2])
+}"#;
+        let result = parse_text("generic.prnc", text);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+
+        let Declaration::Class(box_declaration) = &result.program.declarations[0] else {
+            panic!("expected generic class declaration");
+        };
+        assert_eq!(box_declaration.type_parameters.len(), 1);
+        assert_eq!(box_declaration.type_parameters[0].name.name, "T");
+        let Declaration::Struct(pair_declaration) = &result.program.declarations[1] else {
+            panic!("expected generic struct declaration");
+        };
+        assert_eq!(
+            pair_declaration
+                .type_parameters
+                .iter()
+                .map(|parameter| parameter.name.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        let Declaration::Function(identity) = &result.program.declarations[2] else {
+            panic!("expected generic function declaration");
+        };
+        assert_eq!(identity.type_parameters[0].name.name, "T");
+        assert_eq!(identity.parameters[0].type_reference.name, "T");
+        assert_eq!(identity.return_type.as_ref().unwrap().name, "T");
+        let Declaration::Function(take) = &result.program.declarations[3] else {
+            panic!("expected nested generic function declaration");
+        };
+        assert_eq!(
+            type_reference_snapshot(&take.parameters[0].type_reference),
+            "Box<List<Int>>"
+        );
+        let Declaration::Function(main) = &result.program.declarations[4] else {
+            panic!("expected main function");
+        };
+        assert!(matches!(
+            &main.body.statements[0],
+            Statement { kind: StatementKind::Variable(VariableDeclaration { initializer: Some(Expression { kind: ExpressionKind::Construction { type_reference, .. }, .. }), .. }), .. }
+                if type_reference.name == "Box" && type_reference.arguments.len() == 1
+        ));
+        assert!(matches!(
+            &main.body.statements[1],
+            Statement { kind: StatementKind::Variable(VariableDeclaration { initializer: Some(Expression { kind: ExpressionKind::Call { callee, .. }, .. }), .. }), .. }
+                if matches!(&callee.kind, ExpressionKind::GenericReference { name, arguments } if name.name == "identity" && arguments.len() == 1)
+        ));
+        assert!(matches!(
+            &main.body.statements[2],
+            Statement { kind: StatementKind::Variable(VariableDeclaration { initializer: Some(Expression { kind: ExpressionKind::Call { callee, .. }, .. }), .. }), .. }
+                if matches!(&callee.kind, ExpressionKind::GenericReference { name, arguments } if name.name == "Box" && type_reference_snapshot(&arguments[0]) == "List<Int>")
+        ));
+    }
+
+    #[test]
+    fn generic_syntax_has_identical_ast_for_both_source_extensions() {
+        let text = "struct Pair<A, B> {\n first: A\n second: B\n}\nfn identity<T>(value: T) -> T { return value }";
+        let prnc = parse_text("pair.prnc", text);
+        let princi = parse_text("pair.princi", text);
+        assert!(prnc.diagnostics.is_empty(), "{:?}", prnc.diagnostics);
+        assert!(princi.diagnostics.is_empty(), "{:?}", princi.diagnostics);
+        assert_eq!(prnc.program, princi.program);
     }
 
     #[test]

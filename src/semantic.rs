@@ -4,13 +4,13 @@ use crate::ast::{
     Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
     ExpressionKind, ExternBlockDeclaration, FieldDeclaration, FunctionDeclaration, Identifier,
     InitializerDeclaration, Literal, Program, Statement, StatementKind, TypeDeclaration,
-    TypeDeclarationKind, UnaryOperator, VariableDeclaration,
+    TypeDeclarationKind, TypeParameterDeclaration, UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
 use crate::modules::ResolvedModules;
 use crate::source::{SourceFile, SourceSpan};
-use crate::types::{FunctionType, Type};
+use crate::types::{FunctionType, GenericTypeConstructor, GenericTypeParameter, Type};
 
 #[derive(Debug, Clone)]
 pub struct TypedProgram {
@@ -74,7 +74,9 @@ pub enum GlobalSymbol {
 #[derive(Debug, Clone)]
 pub struct TypeSymbols {
     pub ty: Type,
+    pub type_parameters: Vec<GenericTypeParameter>,
     pub fields: HashMap<String, Type>,
+    field_spans: HashMap<String, SourceSpan>,
     pub field_order: Vec<String>,
     pub methods: HashMap<String, FunctionType>,
     pub initializer: Option<FunctionType>,
@@ -82,10 +84,12 @@ pub struct TypeSymbols {
 }
 
 impl TypeSymbols {
-    fn new(ty: Type) -> Self {
+    fn new(ty: Type, type_parameters: Vec<GenericTypeParameter>) -> Self {
         Self {
             ty,
+            type_parameters,
             fields: HashMap::new(),
+            field_spans: HashMap::new(),
             field_order: Vec::new(),
             methods: HashMap::new(),
             initializer: None,
@@ -121,6 +125,9 @@ struct Analyzer<'a> {
     globals: HashMap<String, GlobalSymbol>,
     types: HashMap<String, TypeSymbols>,
     scopes: Vec<Scope>,
+    type_parameter_scopes: Vec<HashMap<String, GenericTypeParameter>>,
+    declared_type_parameter_names: HashSet<String>,
+    next_type_parameter_id: u32,
     accepted_type_declarations: HashSet<SourceSpan>,
     accepted_functions: HashSet<SourceSpan>,
     accepted_methods: HashSet<SourceSpan>,
@@ -152,6 +159,9 @@ impl<'a> Analyzer<'a> {
             ]),
             types: HashMap::new(),
             scopes: Vec::new(),
+            type_parameter_scopes: Vec::new(),
+            declared_type_parameter_names: HashSet::new(),
+            next_type_parameter_id: 0,
             accepted_type_declarations: HashSet::new(),
             accepted_functions: HashSet::new(),
             accepted_methods: HashSet::new(),
@@ -206,9 +216,12 @@ impl<'a> Analyzer<'a> {
                         TypeDeclarationKind::Class => Type::Class(name.clone()),
                         TypeDeclarationKind::Struct => Type::Struct(name.clone()),
                     };
+                    let type_parameters =
+                        self.declare_type_parameters(&type_declaration.type_parameters);
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
-                    self.types.insert(name.clone(), TypeSymbols::new(ty));
+                    self.types
+                        .insert(name.clone(), TypeSymbols::new(ty, type_parameters));
                     self.accepted_type_declarations
                         .insert(type_declaration.span);
                 }
@@ -346,8 +359,11 @@ impl<'a> Analyzer<'a> {
                 continue;
             }
 
-            let signature =
-                self.function_signature(&function.parameters, function.return_type.as_ref());
+            let signature = self.function_signature(
+                &function.type_parameters,
+                &function.parameters,
+                function.return_type.as_ref(),
+            );
             self.globals.insert(
                 function.name.name.clone(),
                 GlobalSymbol::Function(signature.clone()),
@@ -369,6 +385,13 @@ impl<'a> Analyzer<'a> {
             {
                 continue;
             }
+
+            let type_parameters = self
+                .types
+                .get(&type_declaration.name.name)
+                .map(|info| info.type_parameters.clone())
+                .unwrap_or_default();
+            self.push_type_parameters(&type_parameters);
 
             for member in &type_declaration.members {
                 match member {
@@ -392,12 +415,92 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
+            self.pop_type_parameters();
         }
     }
 
+    fn declare_type_parameters(
+        &mut self,
+        declarations: &[TypeParameterDeclaration],
+    ) -> Vec<GenericTypeParameter> {
+        let mut seen = HashSet::new();
+        let mut parameters = Vec::new();
+        for declaration in declarations {
+            let name = &declaration.name.name;
+            if !seen.insert(name.clone()) {
+                self.error_with(
+                    DiagnosticCode::DuplicateDeclaration,
+                    format!("duplicate generic parameter '{name}'"),
+                    declaration.name.span,
+                );
+                continue;
+            }
+            let parameter = GenericTypeParameter {
+                id: self.next_type_parameter_id,
+                name: name.clone(),
+            };
+            self.next_type_parameter_id = self.next_type_parameter_id.saturating_add(1);
+            self.declared_type_parameter_names.insert(name.clone());
+            parameters.push(parameter);
+        }
+        parameters
+    }
+
+    fn push_type_parameters(&mut self, parameters: &[GenericTypeParameter]) {
+        self.type_parameter_scopes.push(
+            parameters
+                .iter()
+                .map(|parameter| (parameter.name.clone(), parameter.clone()))
+                .collect(),
+        );
+    }
+
+    fn pop_type_parameters(&mut self) {
+        self.type_parameter_scopes.pop();
+    }
+
     fn validate_struct_value_layouts(&mut self, program: &Program) {
-        let mut graph = HashMap::<String, Vec<(String, SourceSpan)>>::new();
-        let mut source_order = Vec::new();
+        fn recursive_inline_span(
+            ty: &Type,
+            types: &HashMap<String, TypeSymbols>,
+            active: &mut Vec<String>,
+            incoming_span: Option<SourceSpan>,
+        ) -> Option<SourceSpan> {
+            if ty.list_element().is_some() || matches!(ty, Type::Class(_)) {
+                return None;
+            }
+            let Some(name) = ty.nominal_name() else {
+                return None;
+            };
+            let Some(info) = types.get(name) else {
+                return None;
+            };
+            if !ty.is_struct() {
+                return None;
+            }
+            if active.iter().any(|item| item == name) {
+                return incoming_span;
+            }
+
+            active.push(name.to_owned());
+            let substitutions = type_substitutions(&info.type_parameters, ty.generic_arguments());
+            for field_name in &info.field_order {
+                let Some(field_type) = info.fields.get(field_name) else {
+                    continue;
+                };
+                let instantiated_field = substitute_type(field_type, &substitutions);
+                let field_span = info.field_spans.get(field_name).copied();
+                if let Some(span) =
+                    recursive_inline_span(&instantiated_field, types, active, field_span)
+                {
+                    return Some(span);
+                }
+            }
+            active.pop();
+            None
+        }
+
+        let type_symbols = self.types.clone();
         for declaration in &program.declarations {
             let Declaration::Struct(structure) = declaration else {
                 continue;
@@ -405,54 +508,28 @@ impl<'a> Analyzer<'a> {
             if !self.accepted_type_declarations.contains(&structure.span) {
                 continue;
             }
-            let mut fields = Vec::new();
-            for member in &structure.members {
-                let ClassMember::Field(field) = member else {
-                    continue;
-                };
-                if let Some(Type::Struct(target)) = self
-                    .types
-                    .get(&structure.name.name)
-                    .and_then(|info| info.fields.get(&field.name.name))
-                {
-                    fields.push((target.clone(), field.type_reference.span));
-                }
-            }
-            graph.insert(structure.name.name.clone(), fields);
-            source_order.push(structure.name.name.clone());
-        }
-
-        fn find_cycle(
-            name: &str,
-            graph: &HashMap<String, Vec<(String, SourceSpan)>>,
-            states: &mut HashMap<String, u8>,
-        ) -> Option<SourceSpan> {
-            states.insert(name.to_owned(), 1);
-            for (target, span) in graph.get(name).into_iter().flatten() {
-                match states.get(target).copied().unwrap_or(0) {
-                    1 => return Some(*span),
-                    2 => continue,
-                    _ => {
-                        if let Some(cycle) = find_cycle(target, graph, states) {
-                            return Some(cycle);
-                        }
-                    }
-                }
-            }
-            states.insert(name.to_owned(), 2);
-            None
-        }
-
-        let mut states = HashMap::new();
-        for name in source_order {
-            if states.get(&name).copied().unwrap_or(0) == 0 {
-                if let Some(span) = find_cycle(&name, &graph, &mut states) {
-                    self.error(
-                        "recursive struct fields do not have a finite value layout",
-                        span,
-                    );
-                    break;
-                }
+            let Some(info) = type_symbols.get(&structure.name.name) else {
+                continue;
+            };
+            let root_type = if info.type_parameters.is_empty() {
+                info.ty.clone()
+            } else {
+                Type::generic_instance(
+                    GenericTypeConstructor::Struct(structure.name.name.clone()),
+                    info.type_parameters
+                        .iter()
+                        .cloned()
+                        .map(Type::TypeParameter)
+                        .collect(),
+                )
+            };
+            if let Some(span) =
+                recursive_inline_span(&root_type, &type_symbols, &mut Vec::new(), None)
+            {
+                self.error(
+                    "recursive struct fields do not have a finite value layout",
+                    span,
+                );
             }
         }
     }
@@ -465,6 +542,7 @@ impl<'a> Analyzer<'a> {
         if let Some(info) = self.types.get_mut(&owner.name.name) {
             info.field_order.push(field.name.name.clone());
             info.fields.insert(field.name.name.clone(), field_type);
+            info.field_spans.insert(field.name.name.clone(), field.span);
         }
     }
 
@@ -472,7 +550,11 @@ impl<'a> Analyzer<'a> {
         if !self.claim_member_name(owner, &method.name) {
             return;
         }
-        let signature = self.function_signature(&method.parameters, method.return_type.as_ref());
+        let signature = self.function_signature(
+            &method.type_parameters,
+            &method.parameters,
+            method.return_type.as_ref(),
+        );
         if let Some(info) = self.types.get_mut(&owner.name.name) {
             info.methods
                 .insert(method.name.name.clone(), signature.clone());
@@ -499,7 +581,7 @@ impl<'a> Analyzer<'a> {
             return;
         }
 
-        let signature = self.function_signature(&initializer.parameters, None);
+        let signature = self.function_signature(&[], &initializer.parameters, None);
         if let Some(info) = self.types.get_mut(&owner.name.name) {
             info.initializer = Some(signature.clone());
         }
@@ -528,9 +610,12 @@ impl<'a> Analyzer<'a> {
 
     fn function_signature(
         &mut self,
+        type_parameter_declarations: &[TypeParameterDeclaration],
         parameters: &[crate::ast::Parameter],
         return_type: Option<&crate::ast::TypeReference>,
     ) -> FunctionType {
+        let type_parameters = self.declare_type_parameters(type_parameter_declarations);
+        self.push_type_parameters(&type_parameters);
         let parameters = parameters
             .iter()
             .map(|parameter| self.resolve_type_reference(&parameter.type_reference, false))
@@ -538,7 +623,8 @@ impl<'a> Analyzer<'a> {
         let return_type = return_type
             .map(|type_reference| self.resolve_type_reference(type_reference, true))
             .unwrap_or(Type::Void);
-        FunctionType::new(parameters, return_type)
+        self.pop_type_parameters();
+        FunctionType::generic(type_parameters, parameters, return_type)
     }
 
     fn resolve_type_reference(
@@ -546,54 +632,28 @@ impl<'a> Analyzer<'a> {
         type_reference: &crate::ast::TypeReference,
         allow_void: bool,
     ) -> Type {
-        let ty = match type_reference.name.as_str() {
-            "Int" => Type::Int,
-            "Float" => Type::Float,
-            "Bool" => Type::Bool,
-            "String" => Type::String,
-            "Void" => Type::Void,
-            "Int32" | "Int64" | "Float64" => {
+        let active_parameter = self.lookup_type_parameter(&type_reference.name);
+        let arguments = type_reference
+            .arguments
+            .iter()
+            .map(|argument| self.resolve_type_reference(argument, false))
+            .collect::<Vec<_>>();
+
+        let ty = if let Some(parameter) = active_parameter {
+            if !arguments.is_empty() {
                 self.error(
-                    "C ABI types may only be used in extern \"C\" declarations",
+                    format!(
+                        "type parameter '{}' cannot take generic arguments",
+                        parameter.name
+                    ),
                     type_reference.span,
                 );
                 Type::Error
+            } else {
+                Type::TypeParameter(parameter)
             }
-            "List" => {
-                if type_reference.arguments.len() != 1 {
-                    self.error(
-                        "List requires exactly one type argument, such as List<Int>",
-                        type_reference.span,
-                    );
-                    Type::Error
-                } else {
-                    let element = self.resolve_type_reference(&type_reference.arguments[0], false);
-                    if element.is_error() || element == Type::Void {
-                        Type::Error
-                    } else {
-                        Type::List(Box::new(element))
-                    }
-                }
-            }
-            _ if !type_reference.arguments.is_empty() => {
-                self.error(
-                    "generic type arguments are only supported for List<T> in v0.1",
-                    type_reference.span,
-                );
-                Type::Error
-            }
-            name => self
-                .types
-                .get(name)
-                .map(|info| info.ty.clone())
-                .unwrap_or_else(|| {
-                    self.error_with(
-                        DiagnosticCode::UnknownType,
-                        format!("unknown type '{}'", type_reference.name),
-                        type_reference.span,
-                    );
-                    Type::Error
-                }),
+        } else {
+            self.resolve_named_type(type_reference, &arguments)
         };
 
         if matches!(ty, Type::Void) && !allow_void {
@@ -605,6 +665,83 @@ impl<'a> Analyzer<'a> {
         } else {
             ty
         }
+    }
+
+    fn resolve_named_type(&mut self, reference: &crate::ast::TypeReference, args: &[Type]) -> Type {
+        let expected_arity = match reference.name.as_str() {
+            "Int" | "Float" | "Bool" | "String" | "Void" | "Int32" | "Int64" | "Float64" => Some(0),
+            "List" => Some(1),
+            name => self.types.get(name).map(|info| info.type_parameters.len()),
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                self.error(
+                    format!(
+                        "type '{}' expects {expected} generic argument(s), found {}",
+                        reference.name,
+                        args.len()
+                    ),
+                    reference.span,
+                );
+                return Type::Error;
+            }
+        }
+
+        if args.iter().any(Type::is_error) {
+            return Type::Error;
+        }
+
+        match reference.name.as_str() {
+            "Int" => Type::Int,
+            "Float" => Type::Float,
+            "Bool" => Type::Bool,
+            "String" => Type::String,
+            "Void" => Type::Void,
+            "Int32" | "Int64" | "Float64" => {
+                self.error(
+                    "C ABI types may only be used in extern \"C\" declarations",
+                    reference.span,
+                );
+                Type::Error
+            }
+            "List" => {
+                if args.first().is_some_and(|ty| ty == &Type::Void) {
+                    self.error("List elements cannot have type Void", reference.span);
+                    Type::Error
+                } else {
+                    Type::list(args[0].clone())
+                }
+            }
+            name => {
+                let Some(info) = self.types.get(name) else {
+                    let message = if self.declared_type_parameter_names.contains(name) {
+                        format!("type parameter '{name}' is outside its declaration scope")
+                    } else {
+                        format!("unknown type '{name}'")
+                    };
+                    self.error_with(DiagnosticCode::UnknownType, message, reference.span);
+                    return Type::Error;
+                };
+                if info.type_parameters.is_empty() {
+                    info.ty.clone()
+                } else {
+                    let constructor = match &info.ty {
+                        Type::Class(_) => GenericTypeConstructor::Class(name.to_owned()),
+                        Type::Struct(_) => GenericTypeConstructor::Struct(name.to_owned()),
+                        _ => return Type::Error,
+                    };
+                    Type::generic_instance(constructor, args.to_vec())
+                }
+            }
+        }
+    }
+
+    fn lookup_type_parameter(&self, name: &str) -> Option<GenericTypeParameter> {
+        self.type_parameter_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     fn check_declaration_bodies(&mut self, program: &Program) {
@@ -629,13 +766,28 @@ impl<'a> Analyzer<'a> {
     }
 
     fn check_type_bodies(&mut self, type_declaration: &TypeDeclaration) {
-        let Some(owner_type) = self
-            .types
-            .get(&type_declaration.name.name)
-            .map(|info| info.ty.clone())
-        else {
+        let Some(info) = self.types.get(&type_declaration.name.name) else {
             return;
         };
+        let owner_type = if info.type_parameters.is_empty() {
+            info.ty.clone()
+        } else {
+            let constructor = match &info.ty {
+                Type::Class(name) => GenericTypeConstructor::Class(name.clone()),
+                Type::Struct(name) => GenericTypeConstructor::Struct(name.clone()),
+                _ => return,
+            };
+            Type::generic_instance(
+                constructor,
+                info.type_parameters
+                    .iter()
+                    .cloned()
+                    .map(Type::TypeParameter)
+                    .collect(),
+            )
+        };
+        let type_parameters = info.type_parameters.clone();
+        self.push_type_parameters(&type_parameters);
 
         for member in &type_declaration.members {
             match member {
@@ -662,6 +814,7 @@ impl<'a> Analyzer<'a> {
                 _ => {}
             }
         }
+        self.pop_type_parameters();
     }
 
     fn check_routine(
@@ -675,6 +828,7 @@ impl<'a> Analyzer<'a> {
             .current_return_type
             .replace(*signature.return_type.clone());
         let previous_type = std::mem::replace(&mut self.current_type, owner.clone());
+        self.push_type_parameters(&signature.type_parameters);
         self.push_scope();
 
         if let Some(owner_type) = owner {
@@ -702,6 +856,7 @@ impl<'a> Analyzer<'a> {
 
         self.check_block(body, false);
         self.pop_scope();
+        self.pop_type_parameters();
         self.current_return_type = previous_return;
         self.current_type = previous_type;
     }
@@ -873,7 +1028,7 @@ impl<'a> Analyzer<'a> {
 
         let value_type = match assignment.operator {
             AssignmentOperator::Assign => {
-                let expected = (matches!(target_type, Type::List(_))
+                let expected = (target_type.list_element().is_some()
                     && is_list_literal(&assignment.value))
                 .then_some(&target_type);
                 self.check_expression(&assignment.value, expected)
@@ -938,13 +1093,11 @@ impl<'a> Analyzer<'a> {
             }
             ExpressionKind::Member { object, member } => {
                 let object_type = self.check_expression(object, None);
-                if matches!(object_type, Type::List(_)) && member.name == "length" {
+                if object_type.list_element().is_some() && member.name == "length" {
                     self.error("list.length is read-only", member.span);
                     return (Type::Error, false);
                 }
-                if matches!(object_type, Type::Struct(_))
-                    && self.is_struct_list_element_path(object)
-                {
+                if object_type.is_struct() && self.is_struct_list_element_path(object) {
                     self.error(
                         "mutating fields of struct list elements is not supported in v0.1; assign the updated struct back to the list",
                         target.span,
@@ -966,17 +1119,20 @@ impl<'a> Analyzer<'a> {
                 let object_type = self.check_expression(object, None);
                 let index_type = self.check_expression(index, None);
                 self.require_type(&Type::Int, &index_type, index.span, "list index");
-                match object_type {
+                if let Some(element) = object_type.list_element() {
                     // Lists are heap-backed reference values: their elements
                     // remain mutable through a `let` binding.
-                    Type::List(element) => (*element, true),
-                    Type::Error => (Type::Error, false),
-                    other => {
-                        self.error(
-                            format!("cannot assign through an index on {other}"),
-                            target.span,
-                        );
-                        (Type::Error, false)
+                    (element.clone(), true)
+                } else {
+                    match object_type {
+                        Type::Error => (Type::Error, false),
+                        other => {
+                            self.error(
+                                format!("cannot assign through an index on {other}"),
+                                target.span,
+                            );
+                            (Type::Error, false)
+                        }
                     }
                 }
             }
@@ -1000,7 +1156,7 @@ impl<'a> Analyzer<'a> {
             ExpressionKind::Index { object, .. } => {
                 matches!(
                     self.expression_types.get(&expression.span),
-                    Some(Type::List(_))
+                    Some(ty) if ty.list_element().is_some()
                 ) || self.is_mutable_base(object)
             }
             ExpressionKind::Group(inner) => self.is_mutable_base(inner),
@@ -1020,7 +1176,7 @@ impl<'a> Analyzer<'a> {
 
         match value {
             Some(expression) => {
-                let expected = (matches!(return_type, Type::List(_))
+                let expected = (return_type.list_element().is_some()
                     && is_list_literal(expression))
                 .then_some(&return_type);
                 let actual = self.check_expression(expression, expected);
@@ -1062,9 +1218,13 @@ impl<'a> Analyzer<'a> {
                 Literal::Boolean(_) => Type::Bool,
             },
             ExpressionKind::List(elements) => self.check_list(elements, expected, expression.span),
-            ExpressionKind::Construction { type_name, fields } => {
-                self.check_construction(type_name, fields)
+            ExpressionKind::GenericReference { name, arguments } => {
+                self.check_generic_reference(name, arguments)
             }
+            ExpressionKind::Construction {
+                type_reference,
+                fields,
+            } => self.check_construction(type_reference, fields, expression.span),
             ExpressionKind::Call { callee, arguments } => {
                 self.check_call(callee, arguments, expression.span)
             }
@@ -1076,12 +1236,18 @@ impl<'a> Analyzer<'a> {
                 let object_type = self.check_expression(object, None);
                 let index_type = self.check_expression(index, None);
                 self.require_type(&Type::Int, &index_type, index.span, "list index");
-                match object_type {
-                    Type::List(element) => *element,
-                    Type::Error => Type::Error,
-                    other => {
-                        self.error(format!("cannot index a value of type {other}"), object.span);
-                        Type::Error
+                if let Some(element) = object_type.clone().into_list_element() {
+                    element
+                } else {
+                    match object_type {
+                        Type::Error => Type::Error,
+                        other => {
+                            self.error(
+                                format!("cannot index a value of type {other}"),
+                                object.span,
+                            );
+                            Type::Error
+                        }
                     }
                 }
             }
@@ -1179,10 +1345,7 @@ impl<'a> Analyzer<'a> {
         expected: Option<&Type>,
         span: SourceSpan,
     ) -> Type {
-        let expected_list_element = match expected {
-            Some(Type::List(element)) => Some(element.as_ref()),
-            _ => None,
-        };
+        let expected_list_element = expected.and_then(Type::list_element);
         let element_constraint =
             expected_list_element.filter(|element| !matches!(element, Type::Any));
         let mut element_type: Option<Type> = None;
@@ -1210,38 +1373,52 @@ impl<'a> Analyzer<'a> {
 
         if let Some(expected_element) = expected_list_element {
             if elements.is_empty() || matches!(expected_element, Type::Any) {
-                return Type::List(Box::new(
-                    element_type.unwrap_or_else(|| expected_element.clone()),
-                ));
+                return Type::list(element_type.unwrap_or_else(|| expected_element.clone()));
             }
             // The declaration's expected type is retained even when an element
             // mismatch was already diagnosed above, avoiding a duplicate error.
-            return Type::List(Box::new(expected_element.clone()));
+            return Type::list(expected_element.clone());
         }
 
         match element_type {
-            Some(element) => Type::List(Box::new(element)),
+            Some(element) => Type::list(element),
             None if elements.is_empty() => {
                 self.error("cannot infer the element type of an empty list", span);
                 Type::Error
             }
-            None => Type::List(Box::new(Type::Error)),
+            None => Type::list(Type::Error),
         }
     }
 
     fn check_construction(
         &mut self,
-        type_name: &Identifier,
+        type_reference: &crate::ast::TypeReference,
         fields: &[crate::ast::FieldInitializer],
+        _construction_span: SourceSpan,
     ) -> Type {
-        let Some(info) = self.types.get(&type_name.name).cloned() else {
+        let instantiated_type = self.resolve_type_reference(type_reference, false);
+        let Some(type_name) = instantiated_type.nominal_name().map(str::to_owned) else {
+            if !instantiated_type.is_error() {
+                self.error(
+                    format!("type '{}' cannot be constructed", type_reference.name),
+                    type_reference.span,
+                );
+            }
+            for initializer in fields {
+                self.check_expression(&initializer.value, None);
+            }
+            return Type::Error;
+        };
+        let Some(info) = self.types.get(&type_name).cloned() else {
             self.error_with(
                 DiagnosticCode::UnknownType,
-                format!("unknown type '{}' in construction", type_name.name),
-                type_name.span,
+                format!("unknown type '{}' in construction", type_name),
+                type_reference.span,
             );
             return Type::Error;
         };
+        let substitutions =
+            type_substitutions(&info.type_parameters, instantiated_type.generic_arguments());
 
         let mut initialized = HashSet::new();
         for initializer in fields {
@@ -1249,7 +1426,7 @@ impl<'a> Analyzer<'a> {
                 self.error(
                     format!(
                         "type '{}' has no field '{}'",
-                        type_name.name, initializer.name.name
+                        type_name, initializer.name.name
                     ),
                     initializer.name.span,
                 );
@@ -1265,6 +1442,7 @@ impl<'a> Analyzer<'a> {
                     initializer.name.span,
                 );
             }
+            let expected_type = substitute_type(&expected_type, &substitutions);
             self.check_expression(&initializer.value, Some(&expected_type));
         }
 
@@ -1272,11 +1450,26 @@ impl<'a> Analyzer<'a> {
             if !initialized.contains(field_name.as_str()) {
                 self.error(
                     format!("missing initializer for field '{field_name}'"),
-                    type_name.span,
+                    type_reference.span,
                 );
             }
         }
-        info.ty
+        instantiated_type
+    }
+
+    fn check_generic_reference(
+        &mut self,
+        name: &Identifier,
+        arguments: &[crate::ast::TypeReference],
+    ) -> Type {
+        for argument in arguments {
+            self.resolve_type_reference(argument, false);
+        }
+        self.error(
+            "generic type arguments are only valid on a generic function or type constructor",
+            name.span,
+        );
+        Type::Error
     }
 
     fn check_call(
@@ -1285,10 +1478,105 @@ impl<'a> Analyzer<'a> {
         arguments: &[Expression],
         call_span: SourceSpan,
     ) -> Type {
-        if let ExpressionKind::Identifier(identifier) = &callee.kind {
+        if let ExpressionKind::GenericReference {
+            name,
+            arguments: type_arguments,
+        } = &callee.kind
+        {
+            let resolved_arguments = type_arguments
+                .iter()
+                .map(|argument| self.resolve_type_reference(argument, false))
+                .collect::<Vec<_>>();
+            return if self.lookup_variable(&name.name).is_none() {
+                match self.globals.get(&name.name).cloned() {
+                    Some(GlobalSymbol::Type(_)) => {
+                        let Some(info) = self.types.get(&name.name).cloned() else {
+                            return Type::Error;
+                        };
+                        let ty = self.instantiate_declared_type(
+                            &name.name,
+                            &resolved_arguments,
+                            name.span,
+                        );
+                        let signature = self.constructor_signature(&name.name);
+                        let substitutions =
+                            type_substitutions(&info.type_parameters, &resolved_arguments);
+                        let signature = substitute_function_type(&signature, &substitutions);
+                        self.expression_types
+                            .insert(callee.span, Type::Function(signature.clone()));
+                        self.check_call_arguments(&name.name, &signature, arguments, call_span);
+                        if ty.is_error() || info.ty.is_error() {
+                            Type::Error
+                        } else {
+                            ty
+                        }
+                    }
+                    Some(GlobalSymbol::Function(signature)) => {
+                        let signature = self.instantiate_signature(
+                            &name.name,
+                            &signature,
+                            &resolved_arguments,
+                            arguments,
+                            call_span,
+                        );
+                        self.expression_types
+                            .insert(callee.span, Type::Function(signature.clone()));
+                        self.check_call_arguments(&name.name, &signature, arguments, call_span);
+                        *signature.return_type
+                    }
+                    Some(GlobalSymbol::ExternalFunction(_)) => {
+                        self.error(
+                            "C external functions do not accept generic type arguments",
+                            name.span,
+                        );
+                        for argument in arguments {
+                            self.check_expression(argument, None);
+                        }
+                        Type::Error
+                    }
+                    None => {
+                        self.error_with(
+                            DiagnosticCode::UnknownIdentifier,
+                            format!("undefined function or type '{}'", name.name),
+                            name.span,
+                        );
+                        for argument in arguments {
+                            self.check_expression(argument, None);
+                        }
+                        Type::Error
+                    }
+                }
+            } else {
+                self.error(
+                    "generic type arguments cannot be applied to a local value",
+                    name.span,
+                );
+                for argument in arguments {
+                    self.check_expression(argument, None);
+                }
+                Type::Error
+            };
+        } else if let ExpressionKind::Identifier(identifier) = &callee.kind {
             if self.lookup_variable(&identifier.name).is_none() {
                 match self.globals.get(&identifier.name).cloned() {
                     Some(GlobalSymbol::Type(ty)) => {
+                        let Some(info) = self.types.get(&identifier.name) else {
+                            return Type::Error;
+                        };
+                        if !info.type_parameters.is_empty() {
+                            self.error(
+                                format!(
+                                    "type '{}' requires {} generic argument(s) for construction",
+                                    identifier.name,
+                                    info.type_parameters.len()
+                                ),
+                                identifier.span,
+                            );
+                            for argument in arguments {
+                                self.check_expression(argument, None);
+                            }
+                            return Type::Error;
+                        }
                         let signature = self.constructor_signature(&identifier.name);
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
@@ -1301,6 +1589,13 @@ impl<'a> Analyzer<'a> {
                         return ty;
                     }
                     Some(GlobalSymbol::Function(signature)) => {
+                        let signature = self.instantiate_signature(
+                            &identifier.name,
+                            &signature,
+                            &[],
+                            arguments,
+                            call_span,
+                        );
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(
@@ -1337,11 +1632,45 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
+            let callee_type = self.check_expression(callee, None);
+            return match callee_type {
+                Type::Function(signature) => {
+                    let signature = self.instantiate_signature(
+                        "function value",
+                        &signature,
+                        &[],
+                        arguments,
+                        call_span,
+                    );
+                    self.check_call_arguments("function value", &signature, arguments, call_span);
+                    *signature.return_type
+                }
+                Type::Error => {
+                    for argument in arguments {
+                        self.check_expression(argument, None);
+                    }
+                    Type::Error
+                }
+                other => {
+                    self.error(format!("cannot call a value of type {other}"), callee.span);
+                    for argument in arguments {
+                        self.check_expression(argument, None);
+                    }
+                    Type::Error
+                }
+            };
         }
 
         let callee_type = self.check_expression(callee, None);
         match callee_type {
             Type::Function(signature) => {
+                let signature = self.instantiate_signature(
+                    "function value",
+                    &signature,
+                    &[],
+                    arguments,
+                    call_span,
+                );
                 self.check_call_arguments("function value", &signature, arguments, call_span);
                 *signature.return_type
             }
@@ -1365,14 +1694,127 @@ impl<'a> Analyzer<'a> {
         let Some(info) = self.types.get(type_name) else {
             return FunctionType::new(Vec::new(), Type::Error);
         };
-        info.initializer.clone().unwrap_or_else(|| {
+        let signature = info.initializer.clone().unwrap_or_else(|| {
             let parameters = info
                 .field_order
                 .iter()
                 .filter_map(|name| info.fields.get(name).cloned())
                 .collect();
             FunctionType::new(parameters, Type::Void)
-        })
+        });
+        FunctionType::generic(
+            info.type_parameters.clone(),
+            signature.parameters,
+            signature.return_type.as_ref().clone(),
+        )
+    }
+
+    fn instantiate_declared_type(
+        &mut self,
+        name: &str,
+        arguments: &[Type],
+        span: SourceSpan,
+    ) -> Type {
+        let Some(info) = self.types.get(name).cloned() else {
+            self.error_with(
+                DiagnosticCode::UnknownType,
+                format!("unknown type '{name}'"),
+                span,
+            );
+            return Type::Error;
+        };
+        if arguments.len() != info.type_parameters.len() {
+            self.error(
+                format!(
+                    "type '{name}' expects {} generic argument(s), found {}",
+                    info.type_parameters.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+            return Type::Error;
+        }
+        if arguments.iter().any(Type::is_error) {
+            return Type::Error;
+        }
+        if arguments.is_empty() {
+            return info.ty;
+        }
+        let constructor = match info.ty {
+            Type::Class(_) => GenericTypeConstructor::Class(name.to_owned()),
+            Type::Struct(_) => GenericTypeConstructor::Struct(name.to_owned()),
+            _ => return Type::Error,
+        };
+        Type::generic_instance(constructor, arguments.to_vec())
+    }
+
+    fn instantiate_signature(
+        &mut self,
+        name: &str,
+        signature: &FunctionType,
+        explicit_arguments: &[Type],
+        call_arguments: &[Expression],
+        call_span: SourceSpan,
+    ) -> FunctionType {
+        if signature.type_parameters.is_empty() {
+            if !explicit_arguments.is_empty() {
+                self.error(
+                    format!("'{name}' does not declare generic parameters"),
+                    call_span,
+                );
+            }
+            return signature.clone();
+        }
+
+        let mut substitutions = HashMap::new();
+        if !explicit_arguments.is_empty() {
+            if explicit_arguments.len() != signature.type_parameters.len() {
+                self.error(
+                    format!(
+                        "'{name}' expects {} generic argument(s), found {}",
+                        signature.type_parameters.len(),
+                        explicit_arguments.len()
+                    ),
+                    call_span,
+                );
+            }
+            for (parameter, argument) in signature
+                .type_parameters
+                .iter()
+                .zip(explicit_arguments.iter())
+            {
+                substitutions.insert(parameter.id, argument.clone());
+            }
+        } else {
+            let actuals = call_arguments
+                .iter()
+                .map(|argument| self.check_expression(argument, None))
+                .collect::<Vec<_>>();
+            for (pattern, actual) in signature.parameters.iter().zip(actuals.iter()) {
+                infer_type_arguments(
+                    pattern,
+                    actual,
+                    &signature.type_parameters,
+                    &mut substitutions,
+                );
+            }
+        }
+        for parameter in &signature.type_parameters {
+            if !substitutions.contains_key(&parameter.id) {
+                self.error(
+                    format!(
+                        "cannot infer generic type argument '{}' for '{name}'",
+                        parameter.name
+                    ),
+                    call_span,
+                );
+            }
+        }
+        let specialized = substitute_function_type(signature, &substitutions);
+        FunctionType::new(
+            specialized.parameters,
+            specialized.return_type.as_ref().clone(),
+        )
     }
 
     fn check_call_arguments(
@@ -1400,11 +1842,11 @@ impl<'a> Analyzer<'a> {
     }
 
     fn member_type(&mut self, object_type: &Type, member: &Identifier) -> (Type, bool) {
-        if let Type::List(element) = object_type {
+        if let Some(element) = object_type.list_element() {
             return match member.name.as_str() {
                 "length" => (Type::Int, true),
                 "add" => (
-                    Type::Function(FunctionType::new(vec![(**element).clone()], Type::Void)),
+                    Type::Function(FunctionType::new(vec![element.clone()], Type::Void)),
                     false,
                 ),
                 _ => {
@@ -1417,27 +1859,34 @@ impl<'a> Analyzer<'a> {
                 }
             };
         }
-        let type_name = match object_type {
-            Type::Class(name) | Type::Struct(name) => name,
-            Type::Error => return (Type::Error, false),
-            other => {
-                self.error_with(
-                    DiagnosticCode::InvalidMember,
-                    format!("type {other} has no members"),
-                    member.span,
-                );
+        let Some(type_name) = object_type.nominal_name() else {
+            if matches!(object_type, Type::Error) {
                 return (Type::Error, false);
             }
-        };
-
-        let Some(info) = self.types.get(type_name) else {
+            self.error_with(
+                DiagnosticCode::InvalidMember,
+                format!("type {object_type} has no members"),
+                member.span,
+            );
             return (Type::Error, false);
         };
+        let Some(info) = self.types.get(type_name).cloned() else {
+            return (Type::Error, false);
+        };
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(object_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
         if let Some(ty) = info.fields.get(&member.name) {
-            return (ty.clone(), true);
+            return (substitute_type(ty, &substitutions), true);
         }
         if let Some(signature) = info.methods.get(&member.name) {
-            return (Type::Function(signature.clone()), false);
+            return (
+                Type::Function(substitute_function_type(signature, &substitutions)),
+                false,
+            );
         }
 
         self.error_with(
@@ -1451,10 +1900,10 @@ impl<'a> Analyzer<'a> {
     fn is_struct_list_element_path(&self, expression: &Expression) -> bool {
         match &expression.kind {
             ExpressionKind::Index { object, .. } => {
-                matches!(
-                    self.expression_types.get(&expression.span),
-                    Some(Type::Struct(_))
-                ) || self.is_struct_list_element_path(object)
+                self.expression_types
+                    .get(&expression.span)
+                    .is_some_and(Type::is_struct)
+                    || self.is_struct_list_element_path(object)
             }
             ExpressionKind::Member { object, .. } | ExpressionKind::Group(object) => {
                 self.is_struct_list_element_path(object)
@@ -1618,6 +2067,91 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+fn type_substitutions(
+    parameters: &[GenericTypeParameter],
+    arguments: &[Type],
+) -> HashMap<u32, Type> {
+    parameters
+        .iter()
+        .zip(arguments)
+        .map(|(parameter, argument)| (parameter.id, argument.clone()))
+        .collect()
+}
+
+fn substitute_function_type(
+    signature: &FunctionType,
+    substitutions: &HashMap<u32, Type>,
+) -> FunctionType {
+    FunctionType::generic(
+        signature.type_parameters.clone(),
+        signature
+            .parameters
+            .iter()
+            .map(|ty| substitute_type(ty, substitutions))
+            .collect(),
+        substitute_type(&signature.return_type, substitutions),
+    )
+}
+
+fn substitute_type(ty: &Type, substitutions: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::TypeParameter(parameter) => substitutions
+            .get(&parameter.id)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Type::GenericInstance {
+            constructor,
+            arguments,
+        } => Type::generic_instance(
+            constructor.clone(),
+            arguments
+                .iter()
+                .map(|argument| substitute_type(argument, substitutions))
+                .collect(),
+        ),
+        Type::Function(signature) => {
+            Type::Function(substitute_function_type(signature, substitutions))
+        }
+        Type::Range(element) => Type::Range(Box::new(substitute_type(element, substitutions))),
+        _ => ty.clone(),
+    }
+}
+
+fn infer_type_arguments(
+    pattern: &Type,
+    actual: &Type,
+    parameters: &[GenericTypeParameter],
+    substitutions: &mut HashMap<u32, Type>,
+) {
+    match (pattern, actual) {
+        (Type::TypeParameter(parameter), actual)
+            if parameters.iter().any(|item| item.id == parameter.id) =>
+        {
+            substitutions
+                .entry(parameter.id)
+                .or_insert_with(|| actual.clone());
+        }
+        (
+            Type::GenericInstance {
+                constructor: pattern_constructor,
+                arguments: pattern_arguments,
+            },
+            Type::GenericInstance {
+                constructor: actual_constructor,
+                arguments: actual_arguments,
+            },
+        ) if pattern_constructor == actual_constructor
+            && pattern_arguments.len() == actual_arguments.len() =>
+        {
+            for (pattern, actual) in pattern_arguments.iter().zip(actual_arguments) {
+                infer_type_arguments(pattern, actual, parameters, substitutions);
+            }
+        }
+        (Type::Error, _) | (_, Type::Error) => {}
+        _ => {}
+    }
+}
+
 fn ungroup_kind(mut kind: &ExpressionKind) -> &ExpressionKind {
     while let ExpressionKind::Group(inner) = kind {
         kind = &inner.kind;
@@ -1701,10 +2235,14 @@ mod tests {
     use crate::lexer;
     use crate::parser;
     use crate::source::SourceFile;
-    use crate::types::Type;
+    use crate::types::{GenericTypeConstructor, Type};
 
     fn analyze_text(text: &str) -> super::SemanticResult {
-        let source = SourceFile::from_text("semantic.prnc", text);
+        analyze_source("semantic.prnc", text)
+    }
+
+    fn analyze_source(path: &str, text: &str) -> super::SemanticResult {
+        let source = SourceFile::from_text(path, text);
         let tokens = lexer::lex(&source).expect("semantic test source should lex");
         let parsed = parser::parse(&source, tokens);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -2235,7 +2773,7 @@ fn main() {
                 result
                     .typed_program
                     .variable_type(variable(&result, "main", index)),
-                Some(&Type::List(Box::new(Type::Int)))
+                Some(&Type::list(Type::Int))
             );
         }
     }
@@ -2261,7 +2799,7 @@ fn main() {
             result
                 .typed_program
                 .variable_type(variable(&result, "main", 0)),
-            Some(&Type::List(Box::new(Type::Int)))
+            Some(&Type::list(Type::Int))
         );
         assert_eq!(
             result
@@ -2289,7 +2827,7 @@ fn main() {
         );
         assert!(has_message(
             &result,
-            "List requires exactly one type argument"
+            "type 'List' expects 1 generic argument(s), found 0"
         ));
         assert!(has_message(
             &result,
@@ -2313,18 +2851,181 @@ fn main() {
     }
 
     #[test]
-    fn supports_only_list_as_a_source_generic_and_rejects_void_elements() {
+    fn rejects_wrong_generic_arity_and_void_generic_arguments() {
         let result = analyze_text(
             "struct Box {}\nfn takes(values: Box<Int>) {}\nfn empty() -> List<Void> { return [] }\nfn main() {}",
         );
         assert!(has_message(
             &result,
-            "generic type arguments are only supported for List<T> in v0.1"
+            "type 'Box' expects 0 generic argument(s), found 1"
         ));
         assert!(has_message(
             &result,
             "Void is only valid as a function return type"
         ));
+    }
+
+    #[test]
+    fn resolves_generic_classes_structs_functions_and_nested_instances() {
+        let text = r#"class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+}
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+fn identity<T>(value: T) -> T { return value }
+fn accept(value: Box<List<Int>>) {}
+fn main() {
+    let boxed: Box<Int> = Box<Int>(7)
+    let nested: Box<List<Int>> = Box<List<Int>> { value: [1, 2] }
+    let pair: Pair<String, Float> = Pair<String, Float> { first: "p", second: 2.5 }
+    let inferred = identity(10)
+    let explicit = identity<String>("hello")
+    var writable: Box<Int> = Box<Int>(2)
+    writable.value = 4
+    let boxed_value: Int = boxed.value
+    let nested_value: Int = nested.value[0]
+    let pair_first: String = pair.first
+}"#;
+
+        for extension in ["prnc", "princi"] {
+            let result = analyze_source(&format!("generic.{extension}"), text);
+            assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+            let Some(super::GlobalSymbol::Function(signature)) =
+                result.typed_program.symbols.global("identity")
+            else {
+                panic!("generic function signature was not registered");
+            };
+            assert_eq!(signature.type_parameters.len(), 1);
+            assert_eq!(
+                signature.parameters[0],
+                Type::TypeParameter(signature.type_parameters[0].clone())
+            );
+            assert_eq!(
+                signature.return_type.as_ref(),
+                &Type::TypeParameter(signature.type_parameters[0].clone())
+            );
+
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 0)),
+                Some(&Type::generic_instance(
+                    GenericTypeConstructor::Class("Box".to_owned()),
+                    vec![Type::Int]
+                ))
+            );
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 1)),
+                Some(&Type::generic_instance(
+                    GenericTypeConstructor::Class("Box".to_owned()),
+                    vec![Type::list(Type::Int)]
+                ))
+            );
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 2)),
+                Some(&Type::generic_instance(
+                    GenericTypeConstructor::Struct("Pair".to_owned()),
+                    vec![Type::String, Type::Float]
+                ))
+            );
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 3)),
+                Some(&Type::Int)
+            );
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 4)),
+                Some(&Type::String)
+            );
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 5)),
+                Some(&Type::generic_instance(
+                    GenericTypeConstructor::Class("Box".to_owned()),
+                    vec![Type::Int]
+                ))
+            );
+            for index in 7..=8 {
+                assert_eq!(
+                    result
+                        .typed_program
+                        .variable_type(variable(&result, "main", index)),
+                    Some(&Type::Int)
+                );
+            }
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 9)),
+                Some(&Type::String)
+            );
+        }
+    }
+
+    #[test]
+    fn reports_duplicate_and_out_of_scope_type_parameters() {
+        let result = analyze_text(
+            "fn duplicate<T, T>(value: T) {}\nfn generic<T>(value: T) {}\nfn main() { let value: T = 1 }",
+        );
+        assert!(has_message(&result, "duplicate generic parameter 'T'"));
+        assert!(has_message(
+            &result,
+            "type parameter 'T' is outside its declaration scope"
+        ));
+    }
+
+    #[test]
+    fn reports_generic_arity_unknown_arguments_and_invalid_construction() {
+        let result = analyze_text(
+            r#"class Box<T> { value: T }
+fn identity<T>(value: T) -> T { return value }
+fn use_values(value: Box<Int, String>, unknown: Box<Missing>) {}
+fn main() {
+    let wrong = Box<Int, String>(1)
+    let bad_value = Box<Int>("not an Int")
+    identity<Int, String>(1)
+}"#,
+        );
+        assert!(has_message(
+            &result,
+            "type 'Box' expects 1 generic argument(s), found 2"
+        ));
+        assert!(has_message(&result, "unknown type 'Missing'"));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (expression)"
+        ));
+        assert!(has_message(
+            &result,
+            "'identity' expects 1 generic argument(s), found 2"
+        ));
+    }
+
+    #[test]
+    fn detects_recursive_generic_struct_layouts_but_allows_list_indirection() {
+        let result = analyze_text(
+            "struct Node<T> { next: Node<T> }\nstruct Tree<T> { children: List<Tree<T>> }\nfn main() {}",
+        );
+        assert_eq!(
+            messages(&result)
+                .iter()
+                .filter(|message| message.contains("recursive struct fields"))
+                .count(),
+            1,
+            "{:?}",
+            messages(&result)
+        );
     }
 
     #[test]
