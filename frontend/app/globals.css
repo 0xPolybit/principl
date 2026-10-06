@@ -1590,7 +1590,13 @@ h3 {
   grid-template-columns: minmax(0, 0.93fr) minmax(0, 1.07fr);
   align-items: center;
   gap: clamp(2rem, 5vw, 4.8rem);
-  padding-block: clamp(3.5rem, 7vw, 5.7rem);
+  min-height: calc(100vh - var(--site-header-height));
+  min-height: calc(100dvh - var(--site-header-height));
+  padding-block: clamp(1.5rem, 4.2vh, 3rem);
+}
+
+:root {
+  --site-header-height: 73px;
 }
 
 .landing-hero-copy h1 {
@@ -2103,7 +2109,7 @@ h3 {
   .landing-hero {
     grid-template-columns: 1fr;
     gap: 2rem;
-    padding-block: 2.8rem 3.2rem;
+    padding-block: clamp(1.25rem, 3.5vh, 2.25rem);
   }
 
   .landing-hero-copy h1 {
@@ -2296,7 +2302,7 @@ select:focus-visible,
 }
 
 .site-header-inner {
-  min-height: 72px;
+  min-height: calc(var(--site-header-height) - 1px);
   gap: clamp(0.85rem, 2vw, 1.6rem);
 }
 
@@ -2904,8 +2910,12 @@ select:focus-visible,
 }
 
 @media (max-width: 880px) {
+  :root {
+    --site-header-height: 69px;
+  }
+
   .site-header-inner {
-    min-height: 68px;
+    min-height: calc(var(--site-header-height) - 1px);
   }
 
   .menu-toggle {
@@ -3019,8 +3029,12 @@ select:focus-visible,
 }
 
 @media (max-width: 480px) {
+  :root {
+    --site-header-height: 65px;
+  }
+
   .site-header-inner {
-    min-height: 64px;
+    min-height: calc(var(--site-header-height) - 1px);
   }
 
   .brand {
