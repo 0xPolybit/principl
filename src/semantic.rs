@@ -19,6 +19,14 @@ pub struct TypedProgram {
     pub modules: ResolvedModules,
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
+    generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericFunctionCall {
+    pub name: String,
+    pub type_arguments: Vec<Type>,
+    pub signature: FunctionType,
 }
 
 impl TypedProgram {
@@ -36,6 +44,29 @@ impl TypedProgram {
 
     pub fn binding_type(&self, identifier: &Identifier) -> Option<&Type> {
         self.variable_types.get(&identifier.span)
+    }
+
+    pub fn generic_function_call(&self, span: SourceSpan) -> Option<&GenericFunctionCall> {
+        self.generic_function_calls.get(&span)
+    }
+
+    pub(crate) fn specialized_view(&self, substitutions: &HashMap<u32, Type>) -> Self {
+        let mut specialized = self.clone();
+        for ty in specialized.expression_types.values_mut() {
+            *ty = substitute_type(ty, substitutions);
+        }
+        for ty in specialized.variable_types.values_mut() {
+            *ty = substitute_type(ty, substitutions);
+        }
+        for call in specialized.generic_function_calls.values_mut() {
+            call.type_arguments = call
+                .type_arguments
+                .iter()
+                .map(|ty| substitute_type(ty, substitutions))
+                .collect();
+            call.signature = substitute_function_type(&call.signature, substitutions);
+        }
+        specialized
     }
 }
 
@@ -138,6 +169,7 @@ struct Analyzer<'a> {
     current_type: Option<Type>,
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
+    generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -172,6 +204,7 @@ impl<'a> Analyzer<'a> {
             current_type: None,
             expression_types: HashMap::new(),
             variable_types: HashMap::new(),
+            generic_function_calls: HashMap::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -193,6 +226,7 @@ impl<'a> Analyzer<'a> {
                 modules: self.modules.clone(),
                 expression_types: self.expression_types,
                 variable_types: self.variable_types,
+                generic_function_calls: self.generic_function_calls,
             },
             diagnostics: self.diagnostics,
         }
@@ -1512,13 +1546,23 @@ impl<'a> Analyzer<'a> {
                         }
                     }
                     Some(GlobalSymbol::Function(signature)) => {
-                        let signature = self.instantiate_signature(
+                        let (signature, type_arguments) = self.instantiate_signature(
                             &name.name,
                             &signature,
                             &resolved_arguments,
                             arguments,
                             call_span,
                         );
+                        if let Some(type_arguments) = type_arguments {
+                            self.generic_function_calls.insert(
+                                call_span,
+                                GenericFunctionCall {
+                                    name: name.name.clone(),
+                                    type_arguments,
+                                    signature: signature.clone(),
+                                },
+                            );
+                        }
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(&name.name, &signature, arguments, call_span);
@@ -1589,13 +1633,23 @@ impl<'a> Analyzer<'a> {
                         return ty;
                     }
                     Some(GlobalSymbol::Function(signature)) => {
-                        let signature = self.instantiate_signature(
+                        let (signature, type_arguments) = self.instantiate_signature(
                             &identifier.name,
                             &signature,
                             &[],
                             arguments,
                             call_span,
                         );
+                        if let Some(type_arguments) = type_arguments {
+                            self.generic_function_calls.insert(
+                                call_span,
+                                GenericFunctionCall {
+                                    name: identifier.name.clone(),
+                                    type_arguments,
+                                    signature: signature.clone(),
+                                },
+                            );
+                        }
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(
@@ -1635,7 +1689,7 @@ impl<'a> Analyzer<'a> {
             let callee_type = self.check_expression(callee, None);
             return match callee_type {
                 Type::Function(signature) => {
-                    let signature = self.instantiate_signature(
+                    let (signature, _) = self.instantiate_signature(
                         "function value",
                         &signature,
                         &[],
@@ -1664,7 +1718,7 @@ impl<'a> Analyzer<'a> {
         let callee_type = self.check_expression(callee, None);
         match callee_type {
             Type::Function(signature) => {
-                let signature = self.instantiate_signature(
+                let (signature, _) = self.instantiate_signature(
                     "function value",
                     &signature,
                     &[],
@@ -1755,7 +1809,7 @@ impl<'a> Analyzer<'a> {
         explicit_arguments: &[Type],
         call_arguments: &[Expression],
         call_span: SourceSpan,
-    ) -> FunctionType {
+    ) -> (FunctionType, Option<Vec<Type>>) {
         if signature.type_parameters.is_empty() {
             if !explicit_arguments.is_empty() {
                 self.error(
@@ -1763,7 +1817,7 @@ impl<'a> Analyzer<'a> {
                     call_span,
                 );
             }
-            return signature.clone();
+            return (signature.clone(), None);
         }
 
         let mut substitutions = HashMap::new();
@@ -1786,10 +1840,12 @@ impl<'a> Analyzer<'a> {
                 substitutions.insert(parameter.id, argument.clone());
             }
         } else {
+            let diagnostic_checkpoint = self.diagnostics.len();
             let actuals = call_arguments
                 .iter()
                 .map(|argument| self.check_expression(argument, None))
                 .collect::<Vec<_>>();
+            self.diagnostics.truncate(diagnostic_checkpoint);
             for (pattern, actual) in signature.parameters.iter().zip(actuals.iter()) {
                 infer_type_arguments(
                     pattern,
@@ -1808,12 +1864,21 @@ impl<'a> Analyzer<'a> {
                     ),
                     call_span,
                 );
+                substitutions.insert(parameter.id, Type::Error);
             }
         }
+        let type_arguments = signature
+            .type_parameters
+            .iter()
+            .map(|parameter| substitutions[&parameter.id].clone())
+            .collect();
         let specialized = substitute_function_type(signature, &substitutions);
-        FunctionType::new(
-            specialized.parameters,
-            specialized.return_type.as_ref().clone(),
+        (
+            FunctionType::new(
+                specialized.parameters,
+                specialized.return_type.as_ref().clone(),
+            ),
+            Some(type_arguments),
         )
     }
 
@@ -3009,6 +3074,37 @@ fn main() {
         assert!(has_message(
             &result,
             "'identity' expects 1 generic argument(s), found 2"
+        ));
+    }
+
+    #[test]
+    fn rejects_generic_calls_when_type_arguments_cannot_be_inferred() {
+        let result = analyze_text(
+            "fn empty<T>() -> List<T> { return [] }\nfn main() { let values = empty() }",
+        );
+        assert!(has_message(
+            &result,
+            "cannot infer generic type argument 'T' for 'empty'"
+        ));
+
+        let duplicate_error = analyze_text(
+            "fn identity<T>(value: T) -> T { return value }\nfn main() { let value = identity(missing) }",
+        );
+        assert_eq!(
+            messages(&duplicate_error)
+                .iter()
+                .filter(|message| message.contains("undefined identifier 'missing'"))
+                .count(),
+            1,
+            "inference should not report an argument diagnostic twice"
+        );
+
+        let conflicting_arguments = analyze_text(
+            "fn same<T>(first: T, second: T) -> T { return first }\nfn main() { let value = same(1, \"x\") }",
+        );
+        assert!(has_message(
+            &conflicting_arguments,
+            "expected Int, found String (expression)"
         ));
     }
 

@@ -10,7 +10,14 @@ struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
         let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        let target_dir = std::env::current_exe()
+            .expect("test executable path should be available")
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .expect("test executable should live under the Cargo target directory")
+            .to_path_buf();
+        let path = target_dir.join("princi-cli-tests").join(format!(
             "princi cli integration-{}-{id}",
             std::process::id()
         ));
@@ -22,6 +29,12 @@ impl TestDir {
         let path = self.0.join(name);
         fs::write(&path, "").expect("temporary source should be written");
         path
+    }
+
+    fn compiler(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_princi"));
+        command.env("TMP", &self.0).env("TEMP", &self.0);
+        command
     }
 }
 
@@ -68,7 +81,8 @@ fn both_extensions_build_native_executables() {
         fs::write(&source, "fn main() { println(1 + 2 * 3) }")
             .expect("valid Princi program should be written");
         let output = source.with_extension("exe");
-        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        let result = dir
+            .compiler()
             .arg("build")
             .arg(&source)
             .output()
@@ -107,7 +121,8 @@ fn missing_llvm_compiler_has_an_actionable_diagnostic() {
     let source = dir.0.join("valid.prnc");
     fs::write(&source, "fn main() {}").expect("valid source should be written");
     let missing_clang = dir.0.join("missing clang.exe");
-    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+    let result = dir
+        .compiler()
         .arg("build")
         .arg(&source)
         .env("PRINCI_CLANG", missing_clang)
@@ -139,7 +154,8 @@ fn missing_mingw_linker_has_an_actionable_diagnostic() {
     let source = dir.0.join("valid.princi");
     fs::write(&source, "fn main() {}").expect("valid source should be written");
     let missing_linker = dir.0.join("missing MinGW linker.exe");
-    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+    let result = dir
+        .compiler()
         .arg("build")
         .arg(&source)
         .env("PRINCI_CC", missing_linker)
@@ -160,7 +176,8 @@ fn unsupported_extensions_and_missing_sources_exit_nonzero() {
         (unsupported, "E0002"),
         (dir.0.join("missing.prnc"), "E0003"),
     ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        let result = dir
+            .compiler()
             .arg("build")
             .arg(source)
             .output()
@@ -184,7 +201,8 @@ fn malformed_source_reports_its_file_line_and_column() {
         .expect("malformed source should be written");
         let file_name = source.file_name().unwrap().to_string_lossy();
 
-        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        let result = dir
+            .compiler()
             .arg("build")
             .arg(&source)
             .output()
@@ -217,7 +235,8 @@ fn syntax_errors_have_source_excerpt_for_both_extensions() {
         fs::write(&source, "fn main() {\n    let = 1\n}\n")
             .expect("invalid source should be written");
         let file_name = source.file_name().unwrap().to_string_lossy();
-        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        let result = dir
+            .compiler()
             .arg("build")
             .arg(&source)
             .output()
@@ -246,7 +265,8 @@ fn semantic_errors_are_reported_before_later_pipeline_stages() {
         .expect("source with a type error should be written");
     let file_name = source.file_name().unwrap().to_string_lossy();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+    let result = dir
+        .compiler()
         .arg("build")
         .arg(&source)
         .output()
@@ -278,7 +298,8 @@ fn ffi_rejects_managed_values_before_native_linking() {
     )
     .expect("source with an FFI-unsafe signature should be written");
 
-    let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+    let result = dir
+        .compiler()
         .arg("build")
         .arg(&source)
         .output()
@@ -332,7 +353,8 @@ fn common_user_errors_have_stable_codes_and_no_internal_trace() {
     for (name, program, code) in cases {
         let source = dir.0.join(format!("{name}.prnc"));
         fs::write(&source, program).expect("test program should be written");
-        let result = Command::new(env!("CARGO_BIN_EXE_princi"))
+        let result = dir
+            .compiler()
             .arg("build")
             .arg(&source)
             .output()

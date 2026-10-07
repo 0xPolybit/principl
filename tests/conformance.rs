@@ -12,8 +12,16 @@ struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
         let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("princi conformance-{}-{id}", std::process::id()));
+        let target_dir = std::env::current_exe()
+            .expect("test executable path should be available")
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .expect("test executable should live under the Cargo target directory")
+            .to_path_buf();
+        let path = target_dir
+            .join("princi-conformance-tests")
+            .join(format!("princi conformance-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("temporary conformance directory should be created");
         Self(path)
     }
@@ -27,6 +35,7 @@ impl TestDir {
     fn build(&self, source: &Path, output: Option<&Path>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_princi"));
         command.current_dir(&self.0);
+        command.env("TMP", &self.0).env("TEMP", &self.0);
         command.arg("build").arg(source);
         if let Some(output) = output {
             command.arg("-o").arg(output);

@@ -13,7 +13,14 @@ struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
         let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        let target_dir = std::env::current_exe()
+            .expect("test executable path should be available")
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .expect("test executable should live under the Cargo target directory")
+            .to_path_buf();
+        let path = target_dir.join("princi-native-tests").join(format!(
             "princi native integration-{}-{id}",
             std::process::id()
         ));
@@ -31,6 +38,8 @@ impl TestDir {
             .arg(&source_path)
             .arg("-o")
             .arg(&output_path)
+            .env("TMP", &self.0)
+            .env("TEMP", &self.0)
             .output()
             .expect("compiler should start");
         assert!(
@@ -572,6 +581,68 @@ fn main() {
 }"#,
     );
     assert_eq!(stdout, "42\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn generic_functions_monomorphize_and_run_for_both_source_extensions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn first<A, B>(a: A, b: B) -> A {
+    return a
+}
+
+fn repeat<T>(remaining: Int, value: T) -> T {
+    if remaining == 0 {
+        return value
+    }
+    return repeat<T>(remaining - 1, value)
+}
+
+struct Point {
+    x: Int
+}
+
+class User {
+    name: String
+
+    init(name: String) {
+        self.name = name
+    }
+}
+
+fn main() {
+    let number = identity<Int>(42)
+    let inferred = identity(7)
+    let nested = identity(identity(5))
+    let greeting = identity<String>("hello")
+    let values: List<Int> = identity<List<Int>>([1, 2, 3])
+    let chosen = first<Int, String>(number, greeting)
+    let point = identity(Point(9))
+    let user = identity<User>(User("Ada"))
+
+    println(number)
+    println(inferred)
+    println(nested)
+    println(greeting)
+    println(values.length)
+    println(chosen)
+    println(repeat(3, "recursive"))
+    println(point.x)
+    println(user.name)
+}"#;
+
+    let prnc_stdout = dir.build_and_run("generic functions.prnc", source);
+    let princi_stdout = dir.build_and_run("generic functions.princi", source);
+    let expected = "42\n7\n5\nhello\n3\n42\nrecursive\n9\nAda\n";
+    assert_eq!(prnc_stdout, expected);
+    assert_eq!(princi_stdout, expected);
 }
 
 #[cfg(windows)]

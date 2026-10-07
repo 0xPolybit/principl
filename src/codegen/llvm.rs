@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,28 @@ const INTERNAL_CODEGEN_MESSAGE: &str =
     "compiler invariant failed during native code generation; please report this issue";
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+const MAX_GENERIC_SPECIALIZATIONS: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SpecializationKey {
+    function: String,
+    type_arguments: Vec<Type>,
+}
+
+#[derive(Debug, Clone)]
+struct SpecializationRequest {
+    key: SpecializationKey,
+    call_span: SourceSpan,
+    ancestors: Vec<SpecializationKey>,
+}
+
+#[derive(Debug, Clone)]
+struct GenericCallRequest {
+    function: String,
+    type_arguments: Vec<Type>,
+    call_span: SourceSpan,
+}
 
 /// Lower the semantically checked procedural, class, and struct subsets to LLVM IR.
 pub fn generate_llvm_ir(typed: &TypedProgram, source: &SourceFile) -> Result<String, Diagnostic> {
@@ -316,6 +338,13 @@ impl<'a> IrGenerator<'a> {
                 main.parameters[0].span,
             ));
         }
+        if !main.type_parameters.is_empty() {
+            return Err(self.error_with(
+                DiagnosticCode::MissingMain,
+                "main entry point cannot be generic",
+                main.name.span,
+            ));
+        }
         let main_return = self.function_return_type(main)?;
         if !matches!(main_return, Type::Void | Type::Int) {
             return Err(self.error_with(
@@ -328,13 +357,91 @@ impl<'a> IrGenerator<'a> {
         }
 
         let mut definitions = Vec::with_capacity(functions.len());
+        let mut generic_calls = Vec::new();
         for function in &functions {
-            definitions.push(
-                FunctionEmitter::new(self.typed, self.source, &mut self.strings).emit(function)?,
-            );
+            if function.type_parameters.is_empty() {
+                definitions.push(
+                    FunctionEmitter::new(
+                        self.typed,
+                        self.source,
+                        &mut self.strings,
+                        &mut generic_calls,
+                    )
+                    .emit(function)?,
+                );
+            }
         }
         for class in &classes {
-            definitions.extend(self.emit_class_routines(class)?);
+            definitions.extend(self.emit_class_routines(class, &mut generic_calls)?);
+        }
+
+        let mut pending = VecDeque::new();
+        let mut queued = HashSet::new();
+        for call in generic_calls.drain(..) {
+            self.queue_specialization(call, Vec::new(), &mut pending, &mut queued)?;
+        }
+        while let Some(request) = pending.pop_front() {
+            let function = functions
+                .iter()
+                .find(|function| function.name.name == request.key.function)
+                .copied()
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        request.call_span,
+                    )
+                })?;
+            if function.type_parameters.len() != request.key.type_arguments.len() {
+                return Err(self.error_with(
+                    DiagnosticCode::InternalCompiler,
+                    INTERNAL_CODEGEN_MESSAGE,
+                    request.call_span,
+                ));
+            }
+            let Some(GlobalSymbol::Function(generic_signature)) =
+                self.typed.symbols.global(&function.name.name)
+            else {
+                return Err(self.error_with(
+                    DiagnosticCode::InternalCompiler,
+                    INTERNAL_CODEGEN_MESSAGE,
+                    request.call_span,
+                ));
+            };
+            let substitutions = generic_signature
+                .type_parameters
+                .iter()
+                .zip(&request.key.type_arguments)
+                .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                .collect::<HashMap<_, _>>();
+            let signature = specialize_function_type(generic_signature, &substitutions);
+            let symbol = specialization_symbol(
+                &request.key.function,
+                &request.key.type_arguments,
+            )
+            .ok_or_else(|| {
+                self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "this generic specialization uses a type that the native backend cannot represent yet",
+                    request.call_span,
+                )
+            })?;
+            let specialized_typed = self.typed.specialized_view(&substitutions);
+            let mut nested_calls = Vec::new();
+            definitions.push(
+                FunctionEmitter::new(
+                    &specialized_typed,
+                    self.source,
+                    &mut self.strings,
+                    &mut nested_calls,
+                )
+                .emit_specialization(function, &signature, &symbol)?,
+            );
+            let mut ancestors = request.ancestors;
+            ancestors.push(request.key);
+            for call in nested_calls {
+                self.queue_specialization(call, ancestors.clone(), &mut pending, &mut queued)?;
+            }
         }
 
         let mut ir = format!(
@@ -377,6 +484,65 @@ impl<'a> IrGenerator<'a> {
             main_return == Type::Int,
         ));
         Ok(ir)
+    }
+
+    fn queue_specialization(
+        &self,
+        call: GenericCallRequest,
+        ancestors: Vec<SpecializationKey>,
+        pending: &mut VecDeque<SpecializationRequest>,
+        queued: &mut HashSet<SpecializationKey>,
+    ) -> Result<(), Diagnostic> {
+        let key = SpecializationKey {
+            function: call.function,
+            type_arguments: call.type_arguments,
+        };
+        if key
+            .type_arguments
+            .iter()
+            .any(|ty| contains_type_parameter(ty))
+        {
+            return Err(self.error_with(
+                DiagnosticCode::UnsupportedFeature,
+                "could not resolve a generic call to concrete types for native specialization",
+                call.call_span,
+            ));
+        }
+
+        for ancestor in ancestors.iter().rev() {
+            if ancestor.function == key.function
+                && type_arguments_complexity(&key.type_arguments)
+                    > type_arguments_complexity(&ancestor.type_arguments)
+            {
+                return Err(self.error_with(
+                    DiagnosticCode::InvalidCall,
+                    format!(
+                        "generic specialization of '{}' expands recursively without a finite set of types",
+                        key.function
+                    ),
+                    call.call_span,
+                ));
+            }
+        }
+        if ancestors.contains(&key) || queued.contains(&key) {
+            return Ok(());
+        }
+        if queued.len() >= MAX_GENERIC_SPECIALIZATIONS {
+            return Err(self.error_with(
+                DiagnosticCode::InvalidCall,
+                format!(
+                    "generic program requires more than {MAX_GENERIC_SPECIALIZATIONS} native specializations"
+                ),
+                call.call_span,
+            ));
+        }
+        queued.insert(key.clone());
+        pending.push_back(SpecializationRequest {
+            key,
+            call_span: call.call_span,
+            ancestors,
+        });
+        Ok(())
     }
 
     fn supported_declarations(
@@ -527,7 +693,11 @@ impl<'a> IrGenerator<'a> {
         )
     }
 
-    fn emit_class_routines(&mut self, class: &TypeDeclaration) -> Result<Vec<String>, Diagnostic> {
+    fn emit_class_routines(
+        &mut self,
+        class: &TypeDeclaration,
+        generic_calls: &mut Vec<GenericCallRequest>,
+    ) -> Result<Vec<String>, Diagnostic> {
         let Some(info) = self.typed.symbols.type_symbols(&class.name.name).cloned() else {
             return Err(self.error("missing semantic class symbols", class.name.span));
         };
@@ -539,15 +709,29 @@ impl<'a> IrGenerator<'a> {
                         continue;
                     };
                     output.push(
-                        FunctionEmitter::new(self.typed, self.source, &mut self.strings)
-                            .emit_method(class, method, signature)?,
+                        FunctionEmitter::new(
+                            self.typed,
+                            self.source,
+                            &mut self.strings,
+                            generic_calls,
+                        )
+                        .emit_method(class, method, signature)?,
                     );
                 }
                 ClassMember::Initializer(initializer) => {
                     if let Some(signature) = info.initializer.as_ref() {
                         output.push(
-                            FunctionEmitter::new(self.typed, self.source, &mut self.strings)
-                                .emit_initializer(class, initializer, signature)?,
+                            FunctionEmitter::new(
+                                self.typed,
+                                self.source,
+                                &mut self.strings,
+                                generic_calls,
+                            )
+                            .emit_initializer(
+                                class,
+                                initializer,
+                                signature,
+                            )?,
                         );
                     }
                 }
@@ -689,6 +873,114 @@ fn function_name(name: &str) -> String {
     format!("princi_fn_{}", encode_identifier(name))
 }
 
+fn specialization_symbol(name: &str, arguments: &[Type]) -> Option<String> {
+    let types = arguments
+        .iter()
+        .map(mangled_type)
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!(
+        "princi_generic_{}_{}",
+        encode_identifier(name),
+        types.join("_")
+    ))
+}
+
+fn mangled_type(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Int => Some("i".to_owned()),
+        Type::Float => Some("f".to_owned()),
+        Type::Bool => Some("b".to_owned()),
+        Type::String => Some("s".to_owned()),
+        Type::Void => Some("v".to_owned()),
+        Type::Class(name) => Some(format!("c{}_{}", name.len(), encode_identifier(name))),
+        Type::Struct(name) => Some(format!("u{}_{}", name.len(), encode_identifier(name))),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::List,
+            arguments,
+        } if arguments.len() == 1 => {
+            let element = mangled_type(&arguments[0])?;
+            Some(format!("l{}_{}", element.len(), element))
+        }
+        _ => None,
+    }
+}
+
+fn type_arguments_complexity(arguments: &[Type]) -> usize {
+    arguments.iter().map(type_complexity).sum()
+}
+
+fn type_complexity(ty: &Type) -> usize {
+    match ty {
+        Type::GenericInstance { arguments, .. } => {
+            1 + arguments.iter().map(type_complexity).sum::<usize>()
+        }
+        Type::Range(element) => 1 + type_complexity(element),
+        Type::Function(signature) => {
+            1 + signature
+                .parameters
+                .iter()
+                .map(type_complexity)
+                .sum::<usize>()
+                + type_complexity(&signature.return_type)
+        }
+        _ => 1,
+    }
+}
+
+fn contains_type_parameter(ty: &Type) -> bool {
+    match ty {
+        Type::TypeParameter(_) => true,
+        Type::GenericInstance { arguments, .. } => arguments.iter().any(contains_type_parameter),
+        Type::Range(element) => contains_type_parameter(element),
+        Type::Function(signature) => {
+            !signature.type_parameters.is_empty()
+                || signature.parameters.iter().any(contains_type_parameter)
+                || contains_type_parameter(&signature.return_type)
+        }
+        _ => false,
+    }
+}
+
+fn specialize_function_type(
+    signature: &FunctionType,
+    substitutions: &HashMap<u32, Type>,
+) -> FunctionType {
+    FunctionType::new(
+        signature
+            .parameters
+            .iter()
+            .map(|ty| substitute_codegen_type(ty, substitutions))
+            .collect(),
+        substitute_codegen_type(&signature.return_type, substitutions),
+    )
+}
+
+fn substitute_codegen_type(ty: &Type, substitutions: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::TypeParameter(parameter) => substitutions
+            .get(&parameter.id)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Type::GenericInstance {
+            constructor,
+            arguments,
+        } => Type::generic_instance(
+            constructor.clone(),
+            arguments
+                .iter()
+                .map(|argument| substitute_codegen_type(argument, substitutions))
+                .collect(),
+        ),
+        Type::Function(signature) => {
+            Type::Function(specialize_function_type(signature, substitutions))
+        }
+        Type::Range(element) => {
+            Type::Range(Box::new(substitute_codegen_type(element, substitutions)))
+        }
+        _ => ty.clone(),
+    }
+}
+
 fn class_type_name(name: &str) -> String {
     format!("%princi.class.{}", encode_identifier(name))
 }
@@ -765,6 +1057,7 @@ struct FunctionEmitter<'a, 'pool> {
     typed: &'a TypedProgram,
     source: &'a SourceFile,
     strings: &'pool mut StringPool,
+    generic_calls: &'pool mut Vec<GenericCallRequest>,
     output: String,
     allocas: Vec<String>,
     scopes: Vec<HashMap<String, LocalBinding>>,
@@ -779,11 +1072,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         typed: &'a TypedProgram,
         source: &'a SourceFile,
         strings: &'pool mut StringPool,
+        generic_calls: &'pool mut Vec<GenericCallRequest>,
     ) -> Self {
         Self {
             typed,
             source,
             strings,
+            generic_calls,
             output: String::new(),
             allocas: Vec::new(),
             scopes: Vec::new(),
@@ -804,6 +1099,25 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &function.body,
             &signature,
             None,
+            false,
+        )
+    }
+
+    fn emit_specialization(
+        self,
+        function: &FunctionDeclaration,
+        signature: &FunctionType,
+        symbol: &str,
+    ) -> Result<String, Diagnostic> {
+        self.emit_routine(
+            symbol,
+            &format!("{}<specialization>", function.name.name),
+            function.name.span,
+            &function.parameters,
+            &function.body,
+            signature,
+            None,
+            true,
         )
     }
 
@@ -821,6 +1135,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &method.body,
             signature,
             Some(&class.name.name),
+            false,
         )
     }
 
@@ -838,6 +1153,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &initializer.body,
             signature,
             Some(&class.name.name),
+            false,
         )
     }
 
@@ -850,6 +1166,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         body: &Block,
         signature: &FunctionType,
         owner: Option<&str>,
+        internal: bool,
     ) -> Result<String, Diagnostic> {
         if signature.return_type.as_ref() != &Type::Void && !block_returns(body) {
             return Err(self.error_with(
@@ -920,8 +1237,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
         }
         self.pop_scope();
+        let linkage = if internal { "internal " } else { "" };
         let mut output = format!(
-            "define {return_ty} @{}({}) {{\nentry:\n",
+            "define {linkage}{return_ty} @{}({}) {{\nentry:\n",
             symbol,
             llvm_parameters.join(", ")
         );
@@ -1822,15 +2140,19 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         if let ExpressionKind::Member { object, member } = ungroup_kind(&callee.kind) {
             return self.emit_method_call(callee, object, member, arguments, span);
         }
-        let ExpressionKind::Identifier(identifier) = ungroup_kind(&callee.kind) else {
-            return Err(self.error(
-                "only direct function and instance method calls are supported by the v0.1 LLVM backend",
-                callee.span,
-            ));
+        let name = match ungroup_kind(&callee.kind) {
+            ExpressionKind::Identifier(identifier) => identifier.name.as_str(),
+            ExpressionKind::GenericReference { name, .. } => name.name.as_str(),
+            _ => {
+                return Err(self.error(
+                    "only direct function and instance method calls are supported by the LLVM backend",
+                    callee.span,
+                ));
+            }
         };
-        if self.lookup(&identifier.name).is_some() {
+        if self.lookup(name).is_some() {
             return Err(self.error(
-                "indirect calls through local values are outside the v0.1 LLVM backend",
+                "indirect calls through local values are outside the LLVM backend",
                 callee.span,
             ));
         }
@@ -1839,26 +2161,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .iter()
             .map(|argument| self.emit_expression(argument))
             .collect::<Result<Vec<_>, _>>()?;
-        if identifier.name == "print" || identifier.name == "println" {
+        if name == "print" || name == "println" {
             if values.len() != 1 {
-                return Err(self.error(
-                    format!("{} expects exactly one argument", identifier.name),
-                    span,
-                ));
+                return Err(self.error(format!("{name} expects exactly one argument"), span));
             }
-            let runtime = crate::runtime::windows_x86_64::print_function(
-                &values[0].ty,
-                identifier.name == "println",
-            )
-            .ok_or_else(|| {
-                self.error(
-                    format!(
-                        "{} cannot lower values of type {}",
-                        identifier.name, values[0].ty
-                    ),
-                    span,
-                )
-            })?;
+            let runtime =
+                crate::runtime::windows_x86_64::print_function(&values[0].ty, name == "println")
+                    .ok_or_else(|| {
+                        self.error(
+                            format!("{name} cannot lower values of type {}", values[0].ty),
+                            span,
+                        )
+                    })?;
             let expected = llvm_type(&values[0].ty, span, self.source)?;
             self.instruction(&format!(
                 "call void @{runtime}({expected} {})",
@@ -1870,7 +2184,43 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             });
         }
 
-        let global = self.typed.symbols.global(&identifier.name).cloned();
+        if let Some(generic_call) = self.typed.generic_function_call(span).cloned() {
+            if generic_call.name != name
+                || generic_call
+                    .type_arguments
+                    .iter()
+                    .any(contains_type_parameter)
+            {
+                return Err(self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "could not resolve a generic call to concrete types for native specialization",
+                    span,
+                ));
+            }
+            let symbol = specialization_symbol(name, &generic_call.type_arguments).ok_or_else(|| {
+                self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "this generic specialization uses a type that the native backend cannot represent yet",
+                    span,
+                )
+            })?;
+            self.generic_calls.push(GenericCallRequest {
+                function: name.to_owned(),
+                type_arguments: generic_call.type_arguments,
+                call_span: span,
+            });
+            return self.emit_function_call_symbol(&symbol, &generic_call.signature, &values, span);
+        }
+
+        let ExpressionKind::Identifier(identifier) = ungroup_kind(&callee.kind) else {
+            return Err(self.error_with(
+                DiagnosticCode::UnsupportedFeature,
+                "generic type construction is not implemented in the native backend yet",
+                callee.span,
+            ));
+        };
+
+        let global = self.typed.symbols.global(name).cloned();
         let signature = match global {
             Some(GlobalSymbol::Type(Type::Class(class_name))) => {
                 let signature = self.constructor_signature(&class_name, span)?;
@@ -1881,10 +2231,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.emit_struct_constructor_call(&struct_name, &signature, &values, span)
             }
             Some(GlobalSymbol::Function(signature)) => {
-                self.emit_function_call(&identifier.name, &signature, &values, span)
+                self.emit_function_call(name, &signature, &values, span)
             }
             Some(GlobalSymbol::ExternalFunction(signature)) => {
-                self.emit_external_function_call(&identifier.name, &signature, &values, span)
+                self.emit_external_function_call(name, &signature, &values, span)
             }
             _ => Err(self.error(
                 format!(
@@ -1998,6 +2348,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         values: &[IrValue],
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
+        self.emit_function_call_symbol(&function_name(name), signature, values, span)
+    }
+
+    fn emit_function_call_symbol(
+        &mut self,
+        symbol: &str,
+        signature: &FunctionType,
+        values: &[IrValue],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
         if values.len() != signature.parameters.len() {
             return Err(self.error(
                 "function argument count changed after semantic analysis",
@@ -2017,7 +2377,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             })
             .collect::<Result<Vec<_>, Diagnostic>>()?
             .join(", ");
-        let call = format!("call {return_ty} @{}({arguments})", function_name(name));
+        let call = format!("call {return_ty} @{symbol}({arguments})");
         self.emit_call_result(call, signature.return_type.as_ref().clone())
     }
 
@@ -2541,12 +2901,66 @@ mod tests {
     }
 
     #[test]
-    fn generic_templates_fail_with_a_controlled_not_yet_specialized_diagnostic() {
-        let source = SourceFile::from_text(
-            "generic.prnc",
-            "fn identity<T>(value: T) -> T { return value }\nfn main() { let answer = identity(42) }",
+    fn monomorphizes_only_used_generic_functions_with_stable_symbols() {
+        let ir = lower(
+            r#"fn identity<T>(value: T) -> T { return value }
+fn first<A, B>(a: A, b: B) -> A { return a }
+fn unused<T>(value: T) -> T { return value }
+fn main() {
+    let integer = identity<Int>(42)
+    let inferred = identity(7)
+    let nested = identity(identity(5))
+    let text = identity<String>("hello")
+    let values = identity<List<Int>>([1, 2])
+    let head = first<Int, String>(integer, text)
+    println(values.length)
+    println(head)
+}"#,
+        )
+        .expect("concrete generic function uses should specialize");
+        assert!(ir.contains("define internal i64 @princi_generic_6964656e74697479_i(i64 %arg0)"));
+        assert!(ir.contains("define internal ptr @princi_generic_6964656e74697479_s(ptr %arg0)"));
+        assert!(ir.contains("define internal ptr @princi_generic_6964656e74697479_l1_i(ptr %arg0)"));
+        assert!(
+            ir.contains("define internal i64 @princi_generic_6669727374_i_s(i64 %arg0, ptr %arg1)")
         );
-        let tokens = lexer::lex(&source).expect("generic sample should lex");
+        assert_eq!(
+            ir.matches("define internal i64 @princi_generic_6964656e74697479_i")
+                .count(),
+            1
+        );
+        assert!(!ir.contains("princi_generic_756e75736564"));
+        assert!(ir.contains("call i64 @princi_generic_6964656e74697479_i"));
+    }
+
+    #[test]
+    fn supports_same_type_generic_recursion_and_rejects_expanding_recursion() {
+        let ir = lower(
+            r#"fn repeat<T>(remaining: Int, value: T) -> T {
+    if remaining == 0 { return value }
+    return repeat<T>(remaining - 1, value)
+}
+fn main() {
+    println(repeat(3, "done"))
+}"#,
+        )
+        .expect("same-type generic recursion should reuse its specialization");
+        assert_eq!(
+            ir.matches("define internal ptr @princi_generic_726570656174_s")
+                .count(),
+            1
+        );
+        assert!(ir.contains("call ptr @princi_generic_726570656174_s"));
+
+        let source = SourceFile::from_text(
+            "expanding.prnc",
+            r#"fn expand<T>(value: T) -> Int {
+    let next = expand<List<T>>([value])
+    return next
+}
+fn main() { println(expand(1)) }"#,
+        );
+        let tokens = lexer::lex(&source).expect("expanding sample should lex");
         let parsed = parser::parse(&source, tokens);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let analyzed = semantic::analyze(&source, &parsed.program);
@@ -2555,13 +2969,10 @@ mod tests {
             "{:?}",
             analyzed.diagnostics
         );
-
         let diagnostic = generate_llvm_ir(&analyzed.typed_program, &source)
-            .expect_err("the v0.2 foundation does not specialize generic LLVM code");
-        assert_eq!(diagnostic.code(), DiagnosticCode::UnsupportedFeature);
-        assert!(diagnostic
-            .message()
-            .contains("generic type specialization is not implemented"));
+            .expect_err("expanding recursive specializations must be rejected");
+        assert_eq!(diagnostic.code(), DiagnosticCode::InvalidCall);
+        assert!(diagnostic.message().contains("expands recursively"));
     }
 
     #[test]

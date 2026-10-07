@@ -446,36 +446,48 @@ boundary and details.
 
 ## Roadmap: proposed v0.2
 
-The current release line remains v0.1.0. Work toward v0.2 has started with a
-generic type-system frontend foundation: the parser and semantic analyzer
-recognize generic function, class, and struct declarations, nested generic
-type references, generic function signatures, and basic explicit/inferred type
-arguments. Generic user-defined types and functions are not yet specialized
-for LLVM, so they do not currently compile to native executables. `List<T>`
-continues to use its existing native implementation.
+The release line remains v0.1.0. The repository's v0.2 development work now
+includes native monomorphization for generic functions. Explicit type arguments
+and local inference from function arguments are supported when each type
+parameter has one unambiguous concrete type. A specialization is emitted only
+when used, reused across identical calls, and named with a deterministic
+internal symbol. Same-type generic recursion is supported; recursively
+expanding specialization patterns and programs requiring more than 512
+specializations produce diagnostics. Inference uses call argument types only;
+if those arguments do not determine every type parameter, the call must give
+explicit type arguments. The compiler does not infer generic arguments from the
+expected result type.
 
-The remaining proposed v0.2 scope includes generic specialization and trait
-bounds, interfaces and traits, algebraic enums, exhaustive pattern matching,
-`Result<T, E>`, and `?` error propagation. The compiler is planned to remain
-Windows x86-64 only with the existing `princi build` workflow and
-`.prnc`/`.princi` extension equivalence.
-
-The frontend accepts generic declarations and nested generic type syntax. For
-example, `Box<Int>`, `Pair<String, Float>`, and `List<Box<Int>>` can be
-represented and checked by the current frontend. Generic user-defined code is
-not yet specialized into LLVM IR, so it cannot be built into a native program
-in this stage:
+For example, both calls below use the same `Int` specialization, while the
+`String` call creates a second one:
 
 ```princi
-struct Pair<A, B> {
-    first: A
-    second: B
-}
-
 fn identity<T>(value: T) -> T {
     return value
 }
+
+fn main() {
+    let number = identity<Int>(42)
+    let inferred = identity(7)
+    let text = identity<String>("hello")
+    println(number)
+    println(inferred)
+    println(text)
+}
 ```
+
+Generic function specializations currently accept concrete primitive types,
+class types, struct types, and nested built-in `List<T>` types supported by the
+native backend. Generic class and struct declarations and nested generic type
+references are understood by the frontend, but generic user-defined types are
+not yet laid out or compiled as native code. `List<T>` retains its existing
+native implementation.
+
+The remaining proposed v0.2 scope includes generic class and struct
+specialization, trait bounds, interfaces and traits, algebraic enums,
+exhaustive pattern matching, `Result<T, E>`, and `?` error propagation. The
+compiler is planned to remain Windows x86-64 only with the existing
+`princi build` workflow and `.prnc`/`.princi` extension equivalence.
 
 The canonical boundary, compatibility expectations, and explicit exclusions
 are documented in [the PrinciPL v0.2 scope](docs/v0.2-scope.md). Features listed
