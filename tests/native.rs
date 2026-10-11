@@ -647,6 +647,82 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn generic_classes_and_structs_specialize_and_run_for_both_extensions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T {
+        return self.value
+    }
+
+    fn replace(next: T) {
+        self.value = next
+    }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+fn retain<T>(value: Box<T>) -> Box<T> {
+    return value
+}
+
+fn keepPair<A, B>(value: Pair<A, B>) -> Pair<A, B> {
+    return value
+}
+
+fn main() {
+    let numberBox = Box<Int>(42)
+    let textBox = Box<String>("hello")
+    let inferred = Box(7)
+    let nested = Box<List<Int>>([3, 4])
+    let boxes: List<Box<String>> = [textBox]
+    let nestedPair = Pair<Box<Int>, List<Float>>(numberBox, [1.5])
+    let namedPair: Pair<String, Float> = Pair<String, Float> {
+        first: "named",
+        second: 2.5
+    }
+
+    numberBox.replace(43)
+    var pair = Pair<Int, String>(1, "one")
+    let copied = pair
+    pair.first = 2
+    let copiedPair = keepPair(pair)
+    let retainedBox = retain(numberBox)
+
+    println(numberBox.get())
+    println(retainedBox.get())
+    println(textBox.get())
+    println(inferred.get())
+    println(pair.first)
+    println(copied.first)
+    println(copiedPair.first)
+    println(pair.second)
+    println(nested.get()[1])
+    println(boxes[0].get())
+    println(nestedPair.first.get())
+    println(namedPair.first)
+}"#;
+
+    let prnc = dir.build_and_run("generic types.prnc", source);
+    let princi = dir.build_and_run("generic types.princi", source);
+    let expected = "43\n43\nhello\n7\n2\n1\n2\none\n4\nhello\n43\nnamed\n";
+    assert_eq!(prnc, expected);
+    assert_eq!(princi, expected);
+}
+
+#[cfg(windows)]
+#[test]
 fn rejects_int32_out_of_range_before_crossing_the_c_abi() {
     if skip_without_native_toolchain() {
         return;

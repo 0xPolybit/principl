@@ -26,6 +26,7 @@ const INTERNAL_CODEGEN_MESSAGE: &str =
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 const MAX_GENERIC_SPECIALIZATIONS: usize = 512;
+const MAX_GENERIC_TYPE_SPECIALIZATIONS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpecializationKey {
@@ -372,6 +373,14 @@ impl<'a> IrGenerator<'a> {
             }
         }
         for class in &classes {
+            if self
+                .typed
+                .symbols
+                .type_symbols(&class.name.name)
+                .is_some_and(|info| !info.type_parameters.is_empty())
+            {
+                continue;
+            }
             definitions.extend(self.emit_class_routines(class, &mut generic_calls)?);
         }
 
@@ -380,42 +389,50 @@ impl<'a> IrGenerator<'a> {
         for call in generic_calls.drain(..) {
             self.queue_specialization(call, Vec::new(), &mut pending, &mut queued)?;
         }
-        while let Some(request) = pending.pop_front() {
-            let function = functions
-                .iter()
-                .find(|function| function.name.name == request.key.function)
-                .copied()
-                .ok_or_else(|| {
-                    self.error_with(
+        let mut generic_types = VecDeque::new();
+        let mut queued_types = HashSet::new();
+        self.queue_sorted_generic_types(
+            self.typed.generic_nominal_instances(),
+            &mut generic_types,
+            &mut queued_types,
+        )?;
+        while !pending.is_empty() || !generic_types.is_empty() {
+            if let Some(request) = pending.pop_front() {
+                let function = functions
+                    .iter()
+                    .find(|function| function.name.name == request.key.function)
+                    .copied()
+                    .ok_or_else(|| {
+                        self.error_with(
+                            DiagnosticCode::InternalCompiler,
+                            INTERNAL_CODEGEN_MESSAGE,
+                            request.call_span,
+                        )
+                    })?;
+                if function.type_parameters.len() != request.key.type_arguments.len() {
+                    return Err(self.error_with(
                         DiagnosticCode::InternalCompiler,
                         INTERNAL_CODEGEN_MESSAGE,
                         request.call_span,
-                    )
-                })?;
-            if function.type_parameters.len() != request.key.type_arguments.len() {
-                return Err(self.error_with(
-                    DiagnosticCode::InternalCompiler,
-                    INTERNAL_CODEGEN_MESSAGE,
-                    request.call_span,
-                ));
-            }
-            let Some(GlobalSymbol::Function(generic_signature)) =
-                self.typed.symbols.global(&function.name.name)
-            else {
-                return Err(self.error_with(
-                    DiagnosticCode::InternalCompiler,
-                    INTERNAL_CODEGEN_MESSAGE,
-                    request.call_span,
-                ));
-            };
-            let substitutions = generic_signature
-                .type_parameters
-                .iter()
-                .zip(&request.key.type_arguments)
-                .map(|(parameter, argument)| (parameter.id, argument.clone()))
-                .collect::<HashMap<_, _>>();
-            let signature = specialize_function_type(generic_signature, &substitutions);
-            let symbol = specialization_symbol(
+                    ));
+                }
+                let Some(GlobalSymbol::Function(generic_signature)) =
+                    self.typed.symbols.global(&function.name.name)
+                else {
+                    return Err(self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        request.call_span,
+                    ));
+                };
+                let substitutions = generic_signature
+                    .type_parameters
+                    .iter()
+                    .zip(&request.key.type_arguments)
+                    .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                    .collect::<HashMap<_, _>>();
+                let signature = specialize_function_type(generic_signature, &substitutions);
+                let symbol = specialization_symbol(
                 &request.key.function,
                 &request.key.type_arguments,
             )
@@ -426,21 +443,84 @@ impl<'a> IrGenerator<'a> {
                     request.call_span,
                 )
             })?;
-            let specialized_typed = self.typed.specialized_view(&substitutions);
-            let mut nested_calls = Vec::new();
-            definitions.push(
-                FunctionEmitter::new(
+                let specialized_typed = self.typed.specialized_view(&substitutions);
+                self.queue_sorted_generic_types(
+                    specialized_typed.generic_nominal_instances(),
+                    &mut generic_types,
+                    &mut queued_types,
+                )?;
+                let mut nested_calls = Vec::new();
+                definitions.push(
+                    FunctionEmitter::new(
+                        &specialized_typed,
+                        self.source,
+                        &mut self.strings,
+                        &mut nested_calls,
+                    )
+                    .emit_specialization(function, &signature, &symbol)?,
+                );
+                let mut ancestors = request.ancestors;
+                ancestors.push(request.key);
+                for call in nested_calls {
+                    self.queue_specialization(call, ancestors.clone(), &mut pending, &mut queued)?;
+                }
+            } else if let Some(instance) = generic_types.pop_front() {
+                let Some(type_name) = instance.nominal_name() else {
+                    continue;
+                };
+                let Some(declaration) = classes
+                    .iter()
+                    .chain(structs.iter())
+                    .find(|declaration| declaration.name.name == type_name)
+                    .copied()
+                else {
+                    return Err(self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        SourceSpan::new(0, 0),
+                    ));
+                };
+                let info = self.typed.symbols.type_symbols(type_name).ok_or_else(|| {
+                    self.error(
+                        "missing semantic generic type symbols",
+                        declaration.name.span,
+                    )
+                })?;
+                let substitutions = info
+                    .type_parameters
+                    .iter()
+                    .zip(instance.generic_arguments())
+                    .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                    .collect::<HashMap<_, _>>();
+                let specialized_typed = self.typed.specialized_view(&substitutions);
+                for field_name in &info.field_order {
+                    let Some(field_type) = info.fields.get(field_name) else {
+                        continue;
+                    };
+                    let concrete = substitute_codegen_type(field_type, &substitutions);
+                    // Struct fields are stored inline, so nested struct types
+                    // need layouts. Class, List, String, and other references
+                    // are pointers; their generic arguments do not recursively
+                    // expand the containing layout.
+                    if concrete.is_struct() {
+                        self.queue_generic_type(concrete, &mut generic_types, &mut queued_types)?;
+                    }
+                }
+                self.queue_sorted_generic_types(
+                    specialized_typed.generic_nominal_instances(),
+                    &mut generic_types,
+                    &mut queued_types,
+                )?;
+                let mut type_calls = Vec::new();
+                definitions.extend(self.emit_specialized_type_routines(
+                    declaration,
+                    &instance,
                     &specialized_typed,
-                    self.source,
-                    &mut self.strings,
-                    &mut nested_calls,
-                )
-                .emit_specialization(function, &signature, &symbol)?,
-            );
-            let mut ancestors = request.ancestors;
-            ancestors.push(request.key);
-            for call in nested_calls {
-                self.queue_specialization(call, ancestors.clone(), &mut pending, &mut queued)?;
+                    &mut type_calls,
+                )?);
+                for call in type_calls {
+                    self.queue_specialization(call, Vec::new(), &mut pending, &mut queued)?;
+                }
             }
         }
 
@@ -452,14 +532,70 @@ impl<'a> IrGenerator<'a> {
         ir.push('\n');
         ir.push_str("%princi.typeinfo = type { ptr }\n");
         for structure in &structs {
-            ir.push_str(&self.struct_layout(structure)?);
+            if self
+                .typed
+                .symbols
+                .type_symbols(&structure.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.struct_layout(structure)?);
+            }
+        }
+        let mut concrete_types = queued_types.into_iter().collect::<Vec<_>>();
+        concrete_types.sort_by_key(|ty| mangled_type(ty).unwrap_or_default());
+        for ty in &concrete_types {
+            if matches!(
+                ty,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Struct(_),
+                    ..
+                }
+            ) {
+                ir.push_str(&self.generic_struct_layout(ty)?);
+            }
         }
         for class in &classes {
-            ir.push_str(&self.class_layout(class)?);
+            if self
+                .typed
+                .symbols
+                .type_symbols(&class.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.class_layout(class)?);
+            }
+        }
+        for ty in &concrete_types {
+            if matches!(
+                ty,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Class(_),
+                    ..
+                }
+            ) {
+                ir.push_str(&self.generic_class_layout(ty)?);
+            }
         }
         ir.push('\n');
         for class in &classes {
-            ir.push_str(&self.class_typeinfo(class));
+            if self
+                .typed
+                .symbols
+                .type_symbols(&class.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.class_typeinfo(class));
+            }
+        }
+        for ty in &concrete_types {
+            if matches!(
+                ty,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Class(_),
+                    ..
+                }
+            ) {
+                ir.push_str(&self.generic_class_typeinfo(ty));
+            }
         }
         for function in &external_functions {
             ir.push_str(&self.external_declaration(function)?);
@@ -654,6 +790,355 @@ impl<'a> IrGenerator<'a> {
             struct_type_name(&structure.name.name),
             fields.join(", ")
         ))
+    }
+
+    fn generic_struct_layout(&self, instance: &Type) -> Result<String, Diagnostic> {
+        let Some(name) = instance.nominal_name() else {
+            return Err(self.error("missing generic struct name", SourceSpan::new(0, 0)));
+        };
+        let info = self.typed.symbols.type_symbols(name).ok_or_else(|| {
+            self.error(
+                "missing semantic generic struct layout",
+                SourceSpan::new(0, 0),
+            )
+        })?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(instance.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut fields = Vec::with_capacity(info.field_order.len());
+        for field_name in &info.field_order {
+            let field_type = info.fields.get(field_name).ok_or_else(|| {
+                self.error(
+                    "missing semantic generic struct field type",
+                    SourceSpan::new(0, 0),
+                )
+            })?;
+            let specialized = substitute_codegen_type(field_type, &substitutions);
+            fields.push(llvm_type(&specialized, SourceSpan::new(0, 0), self.source)?);
+        }
+        let layout = specialized_struct_type_name(instance).ok_or_else(|| {
+            self.error(
+                "could not name generic struct layout",
+                SourceSpan::new(0, 0),
+            )
+        })?;
+        Ok(format!("{layout} = type {{ {} }}\n", fields.join(", ")))
+    }
+
+    fn generic_class_layout(&self, instance: &Type) -> Result<String, Diagnostic> {
+        let Some(name) = instance.nominal_name() else {
+            return Err(self.error("missing generic class name", SourceSpan::new(0, 0)));
+        };
+        let info = self.typed.symbols.type_symbols(name).ok_or_else(|| {
+            self.error(
+                "missing semantic generic class layout",
+                SourceSpan::new(0, 0),
+            )
+        })?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(instance.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut fields = vec!["ptr".to_owned()];
+        for field_name in &info.field_order {
+            let field_type = info.fields.get(field_name).ok_or_else(|| {
+                self.error(
+                    "missing semantic generic class field type",
+                    SourceSpan::new(0, 0),
+                )
+            })?;
+            let specialized = substitute_codegen_type(field_type, &substitutions);
+            fields.push(llvm_type(&specialized, SourceSpan::new(0, 0), self.source)?);
+        }
+        let layout = specialized_class_type_name(instance).ok_or_else(|| {
+            self.error("could not name generic class layout", SourceSpan::new(0, 0))
+        })?;
+        Ok(format!("{layout} = type {{ {} }}\n", fields.join(", ")))
+    }
+
+    fn generic_class_typeinfo(&self, instance: &Type) -> String {
+        let Some(suffix) = typeinfo_suffix(instance) else {
+            return String::new();
+        };
+        let name = instance.to_string();
+        format!(
+            "@.princi.typeinfo.name.{suffix} = private unnamed_addr constant [{} x i8] c\"{}\", align 1\n@.princi.typeinfo.{suffix} = private constant %princi.typeinfo {{ ptr @.princi.typeinfo.name.{suffix} }}\n",
+            name.len() + 1,
+            llvm_bytes(name.as_bytes())
+        )
+    }
+
+    fn queue_generic_type(
+        &self,
+        ty: Type,
+        pending: &mut VecDeque<Type>,
+        queued: &mut HashSet<Type>,
+    ) -> Result<(), Diagnostic> {
+        match &ty {
+            Type::GenericInstance {
+                constructor: GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_),
+                ..
+            } => {
+                if contains_type_parameter(&ty) {
+                    return Ok(());
+                }
+                if mangled_type(&ty).is_none() {
+                    return Err(self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "generic type specialization contains a type the native backend cannot represent",
+                        SourceSpan::new(0, 0),
+                    ));
+                }
+                if !queued.contains(&ty) && queued.len() >= MAX_GENERIC_TYPE_SPECIALIZATIONS {
+                    return Err(self.error_with(
+                        DiagnosticCode::InvalidCall,
+                        format!(
+                            "generic type layout requires more than {MAX_GENERIC_TYPE_SPECIALIZATIONS} concrete specializations"
+                        ),
+                        SourceSpan::new(0, 0),
+                    ));
+                }
+                if queued.insert(ty.clone()) {
+                    pending.push_back(ty.clone());
+                }
+                for argument in ty.generic_arguments() {
+                    self.queue_nested_generic_types(argument, pending, queued)?;
+                }
+            }
+            Type::GenericInstance { arguments, .. } => {
+                for argument in arguments {
+                    self.queue_nested_generic_types(argument, pending, queued)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn queue_sorted_generic_types(
+        &self,
+        instances: HashSet<Type>,
+        pending: &mut VecDeque<Type>,
+        queued: &mut HashSet<Type>,
+    ) -> Result<(), Diagnostic> {
+        let mut instances = instances.into_iter().collect::<Vec<_>>();
+        instances.sort_by_key(|ty| mangled_type(ty).unwrap_or_default());
+        for ty in instances {
+            self.queue_generic_type(ty, pending, queued)?;
+        }
+        Ok(())
+    }
+
+    fn queue_nested_generic_types(
+        &self,
+        ty: &Type,
+        pending: &mut VecDeque<Type>,
+        queued: &mut HashSet<Type>,
+    ) -> Result<(), Diagnostic> {
+        match ty {
+            Type::GenericInstance { arguments, .. } => {
+                self.queue_generic_type(ty.clone(), pending, queued)?;
+                for argument in arguments {
+                    self.queue_nested_generic_types(argument, pending, queued)?;
+                }
+            }
+            Type::Function(signature) => {
+                for parameter in &signature.parameters {
+                    self.queue_nested_generic_types(parameter, pending, queued)?;
+                }
+                self.queue_nested_generic_types(&signature.return_type, pending, queued)?;
+            }
+            Type::Range(element) => self.queue_nested_generic_types(element, pending, queued)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn emit_specialized_type_routines(
+        &mut self,
+        declaration: &TypeDeclaration,
+        instance: &Type,
+        specialized_typed: &TypedProgram,
+        generic_calls: &mut Vec<GenericCallRequest>,
+    ) -> Result<Vec<String>, Diagnostic> {
+        if !matches!(
+            instance,
+            Type::GenericInstance {
+                constructor: GenericTypeConstructor::Class(_),
+                ..
+            }
+        ) {
+            return Ok(Vec::new());
+        }
+        let Some(name) = instance.nominal_name() else {
+            return Err(self.error("missing generic class name", declaration.name.span));
+        };
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(name)
+            .cloned()
+            .ok_or_else(|| {
+                self.error(
+                    "missing semantic generic class symbols",
+                    declaration.name.span,
+                )
+            })?;
+        let mut output = Vec::new();
+        for member in &declaration.members {
+            match member {
+                ClassMember::Method(method) => {
+                    if !method.type_parameters.is_empty() {
+                        return Err(self.error_with(
+                            DiagnosticCode::UnsupportedFeature,
+                            "method-level generic parameters are not supported by native code generation yet",
+                            method.name.span,
+                        ));
+                    }
+                    let Some(signature) = info.methods.get(&method.name.name) else {
+                        continue;
+                    };
+                    let substitutions = info
+                        .type_parameters
+                        .iter()
+                        .zip(instance.generic_arguments())
+                        .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                        .collect::<HashMap<_, _>>();
+                    let signature = specialize_function_type(signature, &substitutions);
+                    output.push(
+                        FunctionEmitter::new(
+                            specialized_typed,
+                            self.source,
+                            &mut self.strings,
+                            generic_calls,
+                        )
+                        .emit_method_for_instance(method, instance, &signature)?,
+                    );
+                }
+                ClassMember::Initializer(initializer) => {
+                    if let Some(signature) = info.initializer.as_ref() {
+                        let substitutions = info
+                            .type_parameters
+                            .iter()
+                            .zip(instance.generic_arguments())
+                            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                            .collect::<HashMap<_, _>>();
+                        let signature = specialize_function_type(signature, &substitutions);
+                        output.push(
+                            FunctionEmitter::new(
+                                specialized_typed,
+                                self.source,
+                                &mut self.strings,
+                                generic_calls,
+                            )
+                            .emit_initializer_for_instance(
+                                declaration,
+                                initializer,
+                                instance,
+                                &signature,
+                            )?,
+                        );
+                    }
+                }
+                ClassMember::Field(_) => {}
+            }
+        }
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(instance.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let signature = info
+            .initializer
+            .clone()
+            .map(|signature| specialize_function_type(&signature, &substitutions))
+            .unwrap_or_else(|| {
+                FunctionType::new(
+                    info.field_order
+                        .iter()
+                        .filter_map(|field| info.fields.get(field))
+                        .map(|ty| substitute_codegen_type(ty, &substitutions))
+                        .collect(),
+                    Type::Void,
+                )
+            });
+        output.push(self.emit_generic_constructor(instance, &signature, &info)?);
+        Ok(output)
+    }
+
+    fn emit_generic_constructor(
+        &self,
+        instance: &Type,
+        signature: &FunctionType,
+        info: &crate::semantic::TypeSymbols,
+    ) -> Result<String, Diagnostic> {
+        let name = instance
+            .nominal_name()
+            .ok_or_else(|| self.error("missing generic class name", SourceSpan::new(0, 0)))?;
+        let layout = specialized_class_type_name(instance).ok_or_else(|| {
+            self.error("could not name generic class layout", SourceSpan::new(0, 0))
+        })?;
+        let suffix = typeinfo_suffix(instance).ok_or_else(|| {
+            self.error(
+                "could not name generic class type metadata",
+                SourceSpan::new(0, 0),
+            )
+        })?;
+        let mut parameters = Vec::new();
+        let mut call_arguments = Vec::new();
+        for (index, ty) in signature.parameters.iter().enumerate() {
+            let llvm_ty = llvm_type(ty, SourceSpan::new(0, 0), self.source)?;
+            parameters.push(format!("{llvm_ty} %arg{index}"));
+            call_arguments.push(format!("{llvm_ty} %arg{index}"));
+        }
+        let object = "princi_object";
+        let mut body = format!(
+            "define ptr @{}({}) {{\nentry:\n  %size.end = getelementptr {layout}, ptr null, i32 1\n  %size = ptrtoint ptr %size.end to i64\n  %{object} = call ptr @{}(i64 %size)\n  %metadata.slot = getelementptr inbounds {layout}, ptr %{object}, i32 0, i32 0\n  store ptr @.princi.typeinfo.{suffix}, ptr %metadata.slot\n",
+            constructor_name_for_type(instance).ok_or_else(|| self.error("could not name generic constructor", SourceSpan::new(0, 0)))?,
+            parameters.join(", "),
+            crate::runtime::windows_x86_64::object_allocator_function()
+        );
+        if info.initializer.is_some() {
+            let mut arguments = vec![format!("ptr %{object}")];
+            arguments.extend(call_arguments);
+            body.push_str(&format!(
+                "  call void @{}({})\n",
+                initializer_name_for_type(instance).ok_or_else(
+                    || self.error("could not name generic initializer", SourceSpan::new(0, 0))
+                )?,
+                arguments.join(", ")
+            ));
+        } else {
+            let substitutions = info
+                .type_parameters
+                .iter()
+                .zip(instance.generic_arguments())
+                .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                .collect::<HashMap<_, _>>();
+            for (index, field_name) in info.field_order.iter().enumerate() {
+                let field_type = info.fields.get(field_name).ok_or_else(|| {
+                    self.error(
+                        "missing generic constructor field type",
+                        SourceSpan::new(0, 0),
+                    )
+                })?;
+                let field_type = substitute_codegen_type(field_type, &substitutions);
+                let llvm_ty = llvm_type(&field_type, SourceSpan::new(0, 0), self.source)?;
+                body.push_str(&format!(
+                    "  %field.{index} = getelementptr inbounds {layout}, ptr %{object}, i32 0, i32 {}\n  store {llvm_ty} %arg{index}, ptr %field.{index}\n",
+                    index + 1
+                ));
+            }
+        }
+        body.push_str(&format!("  ret ptr %{object}\n}}\n"));
+        let _ = name;
+        Ok(body)
     }
 
     fn class_layout(&self, class: &TypeDeclaration) -> Result<String, Diagnostic> {
@@ -852,9 +1337,24 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
             constructor: GenericTypeConstructor::List,
             arguments,
         } if arguments.len() == 1 => Ok("ptr".to_owned()),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => Ok("ptr".to_owned()),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Struct(_),
+            ..
+        } => specialized_struct_type_name(ty).ok_or_else(|| {
+            Diagnostic::at_source(
+                DiagnosticCode::UnsupportedFeature,
+                "this generic struct layout contains a type the native backend cannot represent",
+                source,
+                span,
+            )
+        }),
         Type::GenericInstance { .. } | Type::TypeParameter(_) => Err(Diagnostic::at_source(
             DiagnosticCode::UnsupportedFeature,
-            "generic type specialization is not implemented in the native backend yet",
+            "generic type specialization is not implemented for this type in the native backend",
             source,
             span,
         )),
@@ -895,6 +1395,24 @@ fn mangled_type(ty: &Type) -> Option<String> {
         Type::Class(name) => Some(format!("c{}_{}", name.len(), encode_identifier(name))),
         Type::Struct(name) => Some(format!("u{}_{}", name.len(), encode_identifier(name))),
         Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(name),
+            arguments,
+        } => Some(format!(
+            "gc{}_{}_{}",
+            name.len(),
+            encode_identifier(name),
+            mangled_type_arguments(arguments)?
+        )),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Struct(name),
+            arguments,
+        } => Some(format!(
+            "gu{}_{}_{}",
+            name.len(),
+            encode_identifier(name),
+            mangled_type_arguments(arguments)?
+        )),
+        Type::GenericInstance {
             constructor: GenericTypeConstructor::List,
             arguments,
         } if arguments.len() == 1 => {
@@ -903,6 +1421,14 @@ fn mangled_type(ty: &Type) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn mangled_type_arguments(arguments: &[Type]) -> Option<String> {
+    let types = arguments
+        .iter()
+        .map(mangled_type)
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("a{}_{}", types.len(), types.join("_")))
 }
 
 fn type_arguments_complexity(arguments: &[Type]) -> usize {
@@ -985,8 +1511,30 @@ fn class_type_name(name: &str) -> String {
     format!("%princi.class.{}", encode_identifier(name))
 }
 
+fn specialized_class_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Class(name) => Some(class_type_name(name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => Some(format!("%princi.class.{}", mangled_type(ty)?)),
+        _ => None,
+    }
+}
+
 fn struct_type_name(name: &str) -> String {
     format!("%princi.struct.{}", encode_identifier(name))
+}
+
+fn specialized_struct_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Struct(name) => Some(struct_type_name(name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Struct(_),
+            ..
+        } => Some(format!("%princi.struct.{}", mangled_type(ty)?)),
+        _ => None,
+    }
 }
 
 fn method_name(class_name: &str, name: &str) -> String {
@@ -1003,6 +1551,54 @@ fn initializer_name(class_name: &str) -> String {
 
 fn constructor_name(class_name: &str) -> String {
     format!("princi_new_{}", encode_identifier(class_name))
+}
+
+fn method_name_for_type(owner: &Type, name: &str) -> Option<String> {
+    match owner {
+        Type::Class(class_name) => Some(method_name(class_name, name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => Some(format!(
+            "princi_method_{}_{}",
+            mangled_type(owner)?,
+            encode_identifier(name)
+        )),
+        _ => None,
+    }
+}
+
+fn initializer_name_for_type(owner: &Type) -> Option<String> {
+    match owner {
+        Type::Class(class_name) => Some(initializer_name(class_name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => Some(format!("princi_init_{}", mangled_type(owner)?)),
+        _ => None,
+    }
+}
+
+fn constructor_name_for_type(owner: &Type) -> Option<String> {
+    match owner {
+        Type::Class(class_name) => Some(constructor_name(class_name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => Some(format!("princi_new_{}", mangled_type(owner)?)),
+        _ => None,
+    }
+}
+
+fn typeinfo_suffix(owner: &Type) -> Option<String> {
+    match owner {
+        Type::Class(name) => Some(encode_identifier(name)),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Class(_),
+            ..
+        } => mangled_type(owner),
+        _ => None,
+    }
 }
 
 fn encode_identifier(name: &str) -> String {
@@ -1134,8 +1730,29 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &method.parameters,
             &method.body,
             signature,
-            Some(&class.name.name),
+            Some(Type::Class(class.name.name.clone())),
             false,
+        )
+    }
+
+    fn emit_method_for_instance(
+        self,
+        method: &FunctionDeclaration,
+        owner: &Type,
+        signature: &FunctionType,
+    ) -> Result<String, Diagnostic> {
+        let symbol = method_name_for_type(owner, &method.name.name).ok_or_else(|| {
+            self.error("could not name specialized class method", method.name.span)
+        })?;
+        self.emit_routine(
+            &symbol,
+            &format!("{owner}.{}", method.name.name),
+            method.name.span,
+            &method.parameters,
+            &method.body,
+            signature,
+            Some(owner.clone()),
+            true,
         )
     }
 
@@ -1152,8 +1769,33 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &initializer.parameters,
             &initializer.body,
             signature,
-            Some(&class.name.name),
+            Some(Type::Class(class.name.name.clone())),
             false,
+        )
+    }
+
+    fn emit_initializer_for_instance(
+        self,
+        class: &TypeDeclaration,
+        initializer: &InitializerDeclaration,
+        owner: &Type,
+        signature: &FunctionType,
+    ) -> Result<String, Diagnostic> {
+        let symbol = initializer_name_for_type(owner).ok_or_else(|| {
+            self.error(
+                "could not name specialized class initializer",
+                class.name.span,
+            )
+        })?;
+        self.emit_routine(
+            &symbol,
+            &format!("{owner}.init"),
+            initializer.span,
+            &initializer.parameters,
+            &initializer.body,
+            signature,
+            Some(owner.clone()),
+            true,
         )
     }
 
@@ -1165,7 +1807,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         routine_parameters: &[crate::ast::Parameter],
         body: &Block,
         signature: &FunctionType,
-        owner: Option<&str>,
+        owner: Option<Type>,
         internal: bool,
     ) -> Result<String, Diagnostic> {
         if signature.return_type.as_ref() != &Type::Void && !block_returns(body) {
@@ -1197,13 +1839,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         if let Some(owner) = owner {
             let address = self.allocate("ptr");
             self.instruction(&format!("store ptr %self, ptr {address}"));
-            self.bind(
-                "self",
-                LocalBinding {
-                    address,
-                    ty: Type::Class(owner.to_owned()),
-                },
-            );
+            self.bind("self", LocalBinding { address, ty: owner });
         }
         for (index, parameter) in routine_parameters.iter().enumerate() {
             let ty = self
@@ -1573,23 +2209,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ExpressionKind::Construction {
                 type_reference,
                 fields,
-            } => {
-                if !type_reference.arguments.is_empty() {
-                    return Err(self.error_with(
-                        DiagnosticCode::UnsupportedFeature,
-                        "generic type specialization is not implemented in the native backend yet",
-                        expression.span,
-                    ));
-                }
-                self.emit_named_construction(
-                    &crate::ast::Identifier {
-                        name: type_reference.name.clone(),
-                        span: type_reference.span,
-                    },
-                    fields,
-                    expression.span,
-                )
-            }
+            } => self.emit_named_construction(
+                &crate::ast::Identifier {
+                    name: type_reference.name.clone(),
+                    span: type_reference.span,
+                },
+                fields,
+                expression.span,
+                self.typed
+                    .expression_type(expression)
+                    .cloned()
+                    .unwrap_or(Type::Error),
+            ),
             ExpressionKind::GenericReference { .. } => Err(self.error_with(
                 DiagnosticCode::UnsupportedFeature,
                 "generic function specialization is not implemented in the native backend yet",
@@ -1791,9 +2422,29 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .expression_type(object)
             .cloned()
             .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
-        let (name, class_layout) = match &object_type {
-            Type::Class(name) => (name, true),
-            Type::Struct(name) => (name, false),
+        let (name, class_layout, layout) = match &object_type {
+            Type::Class(name) => (name.as_str(), true, class_type_name(name)),
+            Type::Struct(name) => (name.as_str(), false, struct_type_name(name)),
+            Type::GenericInstance {
+                constructor: GenericTypeConstructor::Class(name),
+                ..
+            } => (
+                name.as_str(),
+                true,
+                specialized_class_type_name(&object_type).ok_or_else(|| {
+                    self.error("could not name specialized class layout", object.span)
+                })?,
+            ),
+            Type::GenericInstance {
+                constructor: GenericTypeConstructor::Struct(name),
+                ..
+            } => (
+                name.as_str(),
+                false,
+                specialized_struct_type_name(&object_type).ok_or_else(|| {
+                    self.error("could not name specialized struct layout", object.span)
+                })?,
+            ),
             _ => {
                 return Err(self.error(
                     format!("cannot lower member '{}' on {object_type}", member.name),
@@ -1821,6 +2472,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .get(&member.name)
             .cloned()
             .ok_or_else(|| self.error("missing semantic field type", member.span))?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(object_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let ty = substitute_codegen_type(&ty, &substitutions);
         let receiver = if class_layout {
             self.emit_expression(object)?.operand
         } else {
@@ -1828,9 +2486,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         };
         let address = self.fresh_value();
         let (layout, index) = if class_layout {
-            (class_type_name(name), field_offset + 1)
+            (layout, field_offset + 1)
         } else {
-            (struct_type_name(name), field_offset)
+            (layout, field_offset)
         };
         self.instruction(&format!(
             "{address} = getelementptr inbounds {layout}, ptr {receiver}, i32 0, i32 {index}"
@@ -1892,9 +2550,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 operand: result,
             });
         }
-        if matches!(object_type, Type::Struct(_)) {
+        if object_type.is_struct() {
             let receiver = self.emit_expression(object)?;
-            let Type::Struct(name) = &receiver.ty else {
+            let Some(name) = receiver.ty.nominal_name() else {
                 return Err(self.error(
                     "semantic receiver type changed during struct field lowering",
                     object.span,
@@ -1920,6 +2578,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .get(&member.name)
                 .cloned()
                 .ok_or_else(|| self.error("missing semantic field type", member.span))?;
+            let substitutions = info
+                .type_parameters
+                .iter()
+                .zip(receiver.ty.generic_arguments())
+                .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                .collect::<HashMap<_, _>>();
+            let ty = substitute_codegen_type(&ty, &substitutions);
             let aggregate_type = llvm_type(&receiver.ty, member.span, self.source)?;
             let result = self.fresh_value();
             self.instruction(&format!(
@@ -1946,28 +2611,24 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         type_name: &crate::ast::Identifier,
         fields: &[crate::ast::FieldInitializer],
         span: SourceSpan,
+        constructed_type: Type,
     ) -> Result<IrValue, Diagnostic> {
-        let global_type = match self.typed.symbols.global(&type_name.name) {
-            Some(GlobalSymbol::Type(ty @ (Type::Class(_) | Type::Struct(_)))) => ty.clone(),
-            _ => {
-                return Err(self.error(
-                    format!("unknown constructible type '{}'", type_name.name),
-                    span,
-                ))
-            }
+        let Some(class_or_struct_name) = constructed_type.nominal_name() else {
+            return Err(self.error(
+                format!("unknown constructible type '{}'", type_name.name),
+                span,
+            ));
         };
-        if let Type::Struct(struct_name) = &global_type {
-            return self.emit_named_struct_construction(struct_name, fields, span);
+        if constructed_type.is_struct() {
+            return self.emit_named_struct_construction(&constructed_type, fields, span);
         }
-        let Type::Class(class_name) = global_type else {
-            return Err(self.error("unsupported type in named construction", span));
-        };
-        let object = self.emit_allocate_object(&class_name)?;
-        let layout = class_type_name(&class_name);
+        let object = self.emit_allocate_object(&constructed_type)?;
+        let layout = specialized_class_type_name(&constructed_type)
+            .ok_or_else(|| self.error("could not name class layout", span))?;
         let info = self
             .typed
             .symbols
-            .type_symbols(&class_name)
+            .type_symbols(class_or_struct_name)
             .cloned()
             .ok_or_else(|| self.error("missing semantic class layout", type_name.span))?;
         for field in fields {
@@ -1983,6 +2644,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .get(&field.name.name)
                 .cloned()
                 .ok_or_else(|| self.error("missing semantic field type", field.name.span))?;
+            let substitutions = info
+                .type_parameters
+                .iter()
+                .zip(constructed_type.generic_arguments())
+                .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                .collect::<HashMap<_, _>>();
+            let field_type = substitute_codegen_type(&field_type, &substitutions);
             let value = self.emit_expression(&field.value)?;
             if !field_type.accepts(&value.ty) {
                 return Err(self.error(
@@ -1999,24 +2667,27 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             self.instruction(&format!("store {ty_name} {}, ptr {address}", value.operand));
         }
         Ok(IrValue {
-            ty: Type::Class(class_name),
+            ty: constructed_type,
             operand: object,
         })
     }
 
     fn emit_named_struct_construction(
         &mut self,
-        struct_name: &str,
+        struct_type: &Type,
         fields: &[crate::ast::FieldInitializer],
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
+        let struct_name = struct_type
+            .nominal_name()
+            .ok_or_else(|| self.error("missing constructed struct name", span))?;
         let info = self
             .typed
             .symbols
             .type_symbols(struct_name)
             .cloned()
             .ok_or_else(|| self.error("missing semantic struct layout", span))?;
-        let aggregate_type = struct_type_name(struct_name);
+        let aggregate_type = llvm_type(struct_type, span, self.source)?;
         let mut aggregate = "undef".to_owned();
         for field in fields {
             let field_index = info
@@ -2029,6 +2700,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .get(&field.name.name)
                 .cloned()
                 .ok_or_else(|| self.error("missing semantic field type", field.name.span))?;
+            let substitutions = info
+                .type_parameters
+                .iter()
+                .zip(struct_type.generic_arguments())
+                .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                .collect::<HashMap<_, _>>();
+            let field_type = substitute_codegen_type(&field_type, &substitutions);
             let value = self.emit_expression(&field.value)?;
             if !field_type.accepts(&value.ty) {
                 return Err(self.error(
@@ -2048,14 +2726,24 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             aggregate = "zeroinitializer".to_owned();
         }
         Ok(IrValue {
-            ty: Type::Struct(struct_name.to_owned()),
+            ty: struct_type.clone(),
             operand: aggregate,
         })
     }
 
-    fn emit_allocate_object(&mut self, class_name: &str) -> Result<String, Diagnostic> {
-        let layout = class_type_name(class_name);
-        let encoded = encode_identifier(class_name);
+    fn emit_allocate_object(&mut self, class_type: &Type) -> Result<String, Diagnostic> {
+        let layout = specialized_class_type_name(class_type).ok_or_else(|| {
+            self.error(
+                "could not name allocated class layout",
+                SourceSpan::new(0, 0),
+            )
+        })?;
+        let encoded = typeinfo_suffix(class_type).ok_or_else(|| {
+            self.error(
+                "could not name allocated class metadata",
+                SourceSpan::new(0, 0),
+            )
+        })?;
         let size_end = self.fresh_value();
         let size = self.fresh_value();
         let object = self.fresh_value();
@@ -2212,23 +2900,42 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             return self.emit_function_call_symbol(&symbol, &generic_call.signature, &values, span);
         }
 
-        let ExpressionKind::Identifier(identifier) = ungroup_kind(&callee.kind) else {
-            return Err(self.error_with(
-                DiagnosticCode::UnsupportedFeature,
-                "generic type construction is not implemented in the native backend yet",
-                callee.span,
-            ));
-        };
-
         let global = self.typed.symbols.global(name).cloned();
+        let constructed_type = self
+            .typed
+            .expression_type_at(span)
+            .cloned()
+            .unwrap_or(Type::Error);
         let signature = match global {
-            Some(GlobalSymbol::Type(Type::Class(class_name))) => {
-                let signature = self.constructor_signature(&class_name, span)?;
-                self.emit_constructor_call(&class_name, &signature, &values, span)
-            }
-            Some(GlobalSymbol::Type(Type::Struct(struct_name))) => {
-                let signature = self.constructor_signature(&struct_name, span)?;
-                self.emit_struct_constructor_call(&struct_name, &signature, &values, span)
+            Some(GlobalSymbol::Type(ty @ (Type::Class(_) | Type::Struct(_)))) => {
+                let Some(type_name) = ty.nominal_name() else {
+                    return Err(self.error("missing constructed type name", span));
+                };
+                let signature = match self.typed.expression_type(callee) {
+                    Some(Type::Function(signature)) => signature.clone(),
+                    _ => self.constructor_signature(type_name, span)?,
+                };
+                match &constructed_type {
+                    Type::Class(_)
+                    | Type::GenericInstance {
+                        constructor: GenericTypeConstructor::Class(_),
+                        ..
+                    } => self.emit_constructor_call(&constructed_type, &signature, &values, span),
+                    Type::Struct(_)
+                    | Type::GenericInstance {
+                        constructor: GenericTypeConstructor::Struct(_),
+                        ..
+                    } => self.emit_struct_constructor_call(
+                        &constructed_type,
+                        &signature,
+                        &values,
+                        span,
+                    ),
+                    _ => Err(self.error(
+                        format!("constructor for '{type_name}' did not resolve to a concrete type"),
+                        span,
+                    )),
+                }
             }
             Some(GlobalSymbol::Function(signature)) => {
                 self.emit_function_call(name, &signature, &values, span)
@@ -2237,11 +2944,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.emit_external_function_call(name, &signature, &values, span)
             }
             _ => Err(self.error(
-                format!(
-                    "missing semantic signature for function '{}'",
-                    identifier.name
-                ),
-                identifier.span,
+                format!("missing semantic signature for function '{name}'"),
+                callee.span,
             )),
         };
         signature
@@ -2293,7 +2997,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             );
             return self.emit_call_result(call, Type::Void);
         }
-        let Type::Class(class_name) = &receiver.ty else {
+        let Some(class_name) = receiver.ty.nominal_name() else {
             return Err(self.error(
                 format!(
                     "cannot dispatch method '{}' on {}",
@@ -2335,7 +3039,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
         let call = format!(
             "call {return_ty} @{}({})",
-            method_name(class_name, &member.name),
+            method_name_for_type(&receiver.ty, &member.name).ok_or_else(|| {
+                self.error("could not resolve specialized method symbol", member.span)
+            })?,
             call_arguments.join(", ")
         );
         self.emit_call_result(call, signature.return_type.as_ref().clone())
@@ -2447,7 +3153,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
     fn emit_constructor_call(
         &mut self,
-        class_name: &str,
+        class_type: &Type,
         signature: &FunctionType,
         values: &[IrValue],
         span: SourceSpan,
@@ -2458,6 +3164,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 span,
             ));
         }
+        let symbol = constructor_name_for_type(class_type)
+            .ok_or_else(|| self.error("could not name class constructor", span))?;
         let arguments = values
             .iter()
             .zip(&signature.parameters)
@@ -2471,19 +3179,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .collect::<Result<Vec<_>, Diagnostic>>()?
             .join(", ");
         let result = self.fresh_value();
-        self.instruction(&format!(
-            "{result} = call ptr @{}({arguments})",
-            constructor_name(class_name)
-        ));
+        self.instruction(&format!("{result} = call ptr @{symbol}({arguments})"));
         Ok(IrValue {
-            ty: Type::Class(class_name.to_owned()),
+            ty: class_type.clone(),
             operand: result,
         })
     }
 
     fn emit_struct_constructor_call(
         &mut self,
-        struct_name: &str,
+        struct_type: &Type,
         signature: &FunctionType,
         values: &[IrValue],
         span: SourceSpan,
@@ -2494,13 +3199,22 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 span,
             ));
         }
+        let struct_name = struct_type
+            .nominal_name()
+            .ok_or_else(|| self.error("missing constructed struct name", span))?;
         let info = self
             .typed
             .symbols
             .type_symbols(struct_name)
             .cloned()
             .ok_or_else(|| self.error("missing semantic struct layout", span))?;
-        let aggregate_type = struct_type_name(struct_name);
+        let aggregate_type = llvm_type(struct_type, span, self.source)?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(struct_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
         let mut aggregate = "undef".to_owned();
         for (index, (value, expected_type)) in values.iter().zip(&signature.parameters).enumerate()
         {
@@ -2518,7 +3232,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .fields
                 .get(field_name)
                 .ok_or_else(|| self.error("missing semantic struct field type", span))?;
-            let llvm_field_type = llvm_type(field_type, span, self.source)?;
+            let field_type = substitute_codegen_type(field_type, &substitutions);
+            let llvm_field_type = llvm_type(&field_type, span, self.source)?;
             let next = self.fresh_value();
             self.instruction(&format!(
                 "{next} = insertvalue {aggregate_type} {aggregate}, {llvm_field_type} {}, {index}",
@@ -2530,7 +3245,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             aggregate = "zeroinitializer".to_owned();
         }
         Ok(IrValue {
-            ty: Type::Struct(struct_name.to_owned()),
+            ty: struct_type.clone(),
             operand: aggregate,
         })
     }
@@ -2850,12 +3565,16 @@ fn statement_returns(statement: &Statement) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_llvm_ir, require_success};
+    use super::{
+        generate_llvm_ir, require_success, specialized_class_type_name,
+        specialized_struct_type_name,
+    };
     use crate::diagnostics::DiagnosticCode;
     use crate::lexer;
     use crate::parser;
     use crate::semantic;
     use crate::source::SourceFile;
+    use crate::types::{GenericTypeConstructor, Type};
     use std::process::Command;
 
     fn lower(text: &str) -> Result<String, String> {
@@ -2931,6 +3650,66 @@ fn main() {
         );
         assert!(!ir.contains("princi_generic_756e75736564"));
         assert!(ir.contains("call i64 @princi_generic_6964656e74697479_i"));
+    }
+
+    #[test]
+    fn specializes_generic_class_and_struct_layouts_methods_and_nested_types() {
+        let ir = lower(
+            r#"class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+    fn get() -> T { return self.value }
+}
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+fn main() {
+    let numberBox = Box<Int>(42)
+    let textBox = Box<String>("hello")
+    let inferred = Box(7)
+    let pair = Pair<Int, String>(1, "one")
+    let nested = Box<List<Int>>([3, 4])
+    let boxes: List<Box<String>> = [textBox]
+    let nestedPair = Pair<Box<Int>, List<Float>>(numberBox, [1.5])
+    println(numberBox.get())
+    println(textBox.get())
+    println(inferred.get())
+    println(pair.first)
+    println(nested.get()[1])
+    println(boxes[0].get())
+    println(nestedPair.first.get())
+}"#,
+        )
+        .expect("generic classes and structs should lower to specialized layouts");
+
+        let integer_box = Type::generic_instance(
+            GenericTypeConstructor::Class("Box".to_owned()),
+            vec![Type::Int],
+        );
+        let string_box = Type::generic_instance(
+            GenericTypeConstructor::Class("Box".to_owned()),
+            vec![Type::String],
+        );
+        let pair_type = Type::generic_instance(
+            GenericTypeConstructor::Struct("Pair".to_owned()),
+            vec![Type::Int, Type::String],
+        );
+        let int_box_layout = specialized_class_type_name(&integer_box).unwrap();
+        let string_box_layout = specialized_class_type_name(&string_box).unwrap();
+        let pair_layout = specialized_struct_type_name(&pair_type).unwrap();
+        assert_ne!(int_box_layout, string_box_layout);
+        assert!(ir.contains(&format!("{int_box_layout} = type {{ ptr, i64 }}")));
+        assert!(ir.contains(&format!("{string_box_layout} = type {{ ptr, ptr }}")));
+        assert!(ir.contains(&format!("{pair_layout} = type {{ i64, ptr }}")));
+        assert!(ir.contains("princi_rt_managed_alloc"));
+        assert!(ir.contains("princi_method_gc"));
+        assert!(ir.contains("princi_init_gc"));
+        assert!(ir.contains("princi_new_gc"));
+        assert!(ir.contains("@.princi.typeinfo.name.gc"));
+        assert!(ir.contains("extractvalue %princi.struct.gu"));
+        assert!(ir.contains("call ptr @princi_rt_list_new"));
+        assert!(!ir.contains("generic type specialization is not implemented"));
     }
 
     #[test]

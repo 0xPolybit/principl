@@ -145,11 +145,11 @@ binding's type, and immutable bindings cannot be assigned through.
 single element type, so `[1, 2]` has type `List<Int>`; heterogeneous literals
 are rejected because v0.1 defines no common element type or numeric promotion.
 An empty list needs an expected type, for example `var values: List<Int> = []`.
-Bare `List` is rejected. `List<T>` remains the only generic type with a complete
-v0.1 native implementation. The compiler now has an incomplete v0.2 frontend
-foundation for generic user-defined declarations and type references; that
-foundation is described below. A range expression requires matching numeric
-bounds; native `for` loops require `Int` bounds and use an exclusive end.
+Bare `List` is rejected. At the v0.1 release boundary, `List<T>` is the only
+generic type with native support. Generic user-defined types are part of the
+active v0.2 development work described below. A range expression requires
+matching numeric bounds; native `for` loops require `Int` bounds and use an
+exclusive end.
 
 Lists support `.length`, integer indexing for reads and writes, and
 `.add(value)`. The compiler checks element types at each operation and
@@ -476,18 +476,49 @@ fn main() {
 }
 ```
 
-Generic function specializations currently accept concrete primitive types,
-class types, struct types, and nested built-in `List<T>` types supported by the
-native backend. Generic class and struct declarations and nested generic type
-references are understood by the frontend, but generic user-defined types are
-not yet laid out or compiled as native code. `List<T>` retains its existing
-native implementation.
+Generic function specialization now works with concrete generic class and
+struct values, including nested `List<T>` and user-defined generic types.
+Generic classes and structs are specialized only for concrete instances used
+by the program. Each generic class instance has its own deterministic native
+layout and remains a managed reference; generic structs have specialized inline
+LLVM layouts and retain value-copy behavior. Constructors accept explicit
+arguments such as `Box<Int>(42)`. The compiler also infers class or struct type
+arguments from constructor argument types when every parameter is determined,
+as in `Box(42)`. It does not infer from an expected result type; ambiguous or
+unused type parameters require explicit arguments.
 
-The remaining proposed v0.2 scope includes generic class and struct
-specialization, trait bounds, interfaces and traits, algebraic enums,
-exhaustive pattern matching, `Result<T, E>`, and `?` error propagation. The
-compiler is planned to remain Windows x86-64 only with the existing
+Generic methods may use their enclosing class parameters, as in
+`fn get() -> T`. Method-level generic parameters are not yet lowered in this
+work. Trait bounds, interfaces and traits, algebraic enums, exhaustive pattern
+matching, `Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
+The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
+
+```princi
+class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T {
+        return self.value
+    }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+fn main() {
+    let number = Box(42) // inferred as Box<Int>
+    let pair = Pair<Int, String>(1, "one")
+    println(number.get())
+    println(pair.second)
+}
+```
 
 The canonical boundary, compatibility expectations, and explicit exclusions
 are documented in [the PrinciPL v0.2 scope](docs/v0.2-scope.md). Features listed

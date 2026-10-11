@@ -34,6 +34,10 @@ impl TypedProgram {
         self.expression_types.get(&expression.span)
     }
 
+    pub(crate) fn expression_type_at(&self, span: SourceSpan) -> Option<&Type> {
+        self.expression_types.get(&span)
+    }
+
     pub fn variable_type(&self, variable: &VariableDeclaration) -> Option<&Type> {
         self.variable_types.get(&variable.name.span)
     }
@@ -68,6 +72,72 @@ impl TypedProgram {
         }
         specialized
     }
+
+    pub(crate) fn generic_nominal_instances(&self) -> HashSet<Type> {
+        let mut instances = HashSet::new();
+        for ty in self
+            .expression_types
+            .values()
+            .chain(self.variable_types.values())
+        {
+            collect_generic_nominal_instances(ty, &mut instances);
+        }
+        for symbol in self.symbols.globals.values() {
+            match symbol {
+                GlobalSymbol::Function(signature) => {
+                    collect_function_type_instances(signature, &mut instances)
+                }
+                GlobalSymbol::Type(_) | GlobalSymbol::ExternalFunction(_) => {}
+            }
+        }
+        for info in self.symbols.types.values() {
+            for ty in info.fields.values() {
+                collect_generic_nominal_instances(ty, &mut instances);
+            }
+            for signature in info.methods.values() {
+                collect_function_type_instances(signature, &mut instances);
+            }
+            if let Some(signature) = &info.initializer {
+                collect_function_type_instances(signature, &mut instances);
+            }
+        }
+        for call in self.generic_function_calls.values() {
+            for ty in &call.type_arguments {
+                collect_generic_nominal_instances(ty, &mut instances);
+            }
+            collect_function_type_instances(&call.signature, &mut instances);
+        }
+        instances
+    }
+}
+
+fn collect_generic_nominal_instances(ty: &Type, instances: &mut HashSet<Type>) {
+    match ty {
+        Type::GenericInstance {
+            constructor,
+            arguments,
+        } => {
+            if matches!(
+                constructor,
+                GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_)
+            ) {
+                instances.insert(ty.clone());
+            }
+            for argument in arguments {
+                collect_generic_nominal_instances(argument, instances);
+            }
+        }
+        Type::Function(signature) => collect_function_type_instances(signature, instances),
+        Type::Range(element) => collect_generic_nominal_instances(element, instances),
+        _ => {}
+    }
+}
+
+fn collect_function_type_instances(signature: &FunctionType, instances: &mut HashSet<Type>) {
+    for parameter in &signature.parameters {
+        collect_generic_nominal_instances(parameter, instances);
+    }
+    collect_generic_nominal_instances(&signature.return_type, instances);
 }
 
 #[derive(Debug, Clone)]
@@ -1607,21 +1677,28 @@ impl<'a> Analyzer<'a> {
                         let Some(info) = self.types.get(&identifier.name) else {
                             return Type::Error;
                         };
-                        if !info.type_parameters.is_empty() {
-                            self.error(
-                                format!(
-                                    "type '{}' requires {} generic argument(s) for construction",
-                                    identifier.name,
-                                    info.type_parameters.len()
-                                ),
-                                identifier.span,
-                            );
-                            for argument in arguments {
-                                self.check_expression(argument, None);
-                            }
-                            return Type::Error;
-                        }
-                        let signature = self.constructor_signature(&identifier.name);
+                        let generic_parameters = info.type_parameters.clone();
+                        let constructor = self.constructor_signature(&identifier.name);
+                        let (signature, inferred_arguments) = if generic_parameters.is_empty() {
+                            (constructor, None)
+                        } else {
+                            self.instantiate_signature(
+                                &identifier.name,
+                                &constructor,
+                                &[],
+                                arguments,
+                                call_span,
+                            )
+                        };
+                        let ty = if let Some(type_arguments) = inferred_arguments {
+                            self.instantiate_declared_type(
+                                &identifier.name,
+                                &type_arguments,
+                                call_span,
+                            )
+                        } else {
+                            ty
+                        };
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(
@@ -1859,7 +1936,7 @@ impl<'a> Analyzer<'a> {
             if !substitutions.contains_key(&parameter.id) {
                 self.error(
                     format!(
-                        "cannot infer generic type argument '{}' for '{name}'",
+                        "cannot infer generic type argument '{}' for '{name}'; provide explicit type arguments",
                         parameter.name
                     ),
                     call_span,
@@ -3036,6 +3113,62 @@ fn main() {
                 Some(&Type::String)
             );
         }
+    }
+
+    #[test]
+    fn infers_generic_class_and_struct_construction_from_constructor_arguments() {
+        let result = analyze_text(
+            r#"class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+}
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+fn main() {
+    let box = Box(42)
+    let pair = Pair("one", 1.0)
+    let nested = Box([1, 2, 3])
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 0)),
+            Some(&Type::generic_instance(
+                GenericTypeConstructor::Class("Box".to_owned()),
+                vec![Type::Int]
+            ))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 1)),
+            Some(&Type::generic_instance(
+                GenericTypeConstructor::Struct("Pair".to_owned()),
+                vec![Type::String, Type::Float]
+            ))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 2)),
+            Some(&Type::generic_instance(
+                GenericTypeConstructor::Class("Box".to_owned()),
+                vec![Type::list(Type::Int)]
+            ))
+        );
+    }
+
+    #[test]
+    fn requires_explicit_arguments_when_generic_construction_is_ambiguous() {
+        let result = analyze_text("class Empty<T> {}\nfn main() { let empty = Empty() }");
+        assert!(has_message(
+            &result,
+            "cannot infer generic type argument 'T' for 'Empty'; provide explicit type arguments"
+        ));
     }
 
     #[test]
