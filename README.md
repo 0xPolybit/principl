@@ -487,6 +487,13 @@ arguments from constructor argument types when every parameter is determined,
 as in `Box(42)`. It does not infer from an expected result type; ambiguous or
 unused type parameters require explicit arguments.
 
+The built-in `List<T>` uses this same generic instance type representation and
+can contain concrete generic values such as `List<Box<Int>>` and
+`List<Pair<String, Float>>`. Its runtime remains a homogeneous, size-aware byte
+buffer: class elements are copied as managed references, while struct elements
+are copied by value. List literals and operations retain compile-time element
+checking and runtime bounds checks.
+
 Generic methods may use their enclosing class parameters, as in
 `fn get() -> T`. Method-level generic parameters are not yet lowered in this
 work. Trait bounds, interfaces and traits, algebraic enums, exhaustive pattern

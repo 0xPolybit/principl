@@ -143,14 +143,21 @@ impl Type {
             (_, Type::Any) => false,
             (
                 Type::GenericInstance {
-                    constructor: GenericTypeConstructor::List,
-                    arguments: expected,
+                    constructor: expected_constructor,
+                    arguments: expected_arguments,
                 },
                 Type::GenericInstance {
-                    constructor: GenericTypeConstructor::List,
-                    arguments: actual,
+                    constructor: actual_constructor,
+                    arguments: actual_arguments,
                 },
-            ) if expected.len() == 1 && actual.len() == 1 => expected[0].accepts(&actual[0]),
+            ) if expected_constructor == actual_constructor
+                && expected_arguments.len() == actual_arguments.len() =>
+            {
+                expected_arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(expected, actual)| expected.accepts(actual))
+            }
             _ => self == actual,
         }
     }
@@ -257,10 +264,40 @@ mod tests {
     }
 
     #[test]
-    fn list_any_is_a_compatible_internal_annotation() {
+    fn generic_any_arguments_follow_one_shared_compatibility_rule() {
         let any_list = Type::list(Type::Any);
         let int_list = Type::list(Type::Int);
         assert!(any_list.accepts(&int_list));
+        assert!(!int_list.accepts(&any_list));
+
+        let any_box = Type::generic_instance(
+            GenericTypeConstructor::Class("Box".to_owned()),
+            vec![Type::Any],
+        );
+        let int_box = Type::generic_instance(
+            GenericTypeConstructor::Class("Box".to_owned()),
+            vec![Type::Int],
+        );
+        assert!(any_box.accepts(&int_box));
+        assert!(!int_box.accepts(&any_box));
+
+        let any_pair = Type::generic_instance(
+            GenericTypeConstructor::Struct("Pair".to_owned()),
+            vec![Type::Any, Type::String],
+        );
+        let pair = Type::generic_instance(
+            GenericTypeConstructor::Struct("Pair".to_owned()),
+            vec![Type::Int, Type::String],
+        );
+        assert!(any_pair.accepts(&pair));
+        assert!(!any_pair.accepts(&Type::generic_instance(
+            GenericTypeConstructor::Struct("Pair".to_owned()),
+            vec![Type::Int, Type::Float],
+        )));
+        assert!(!any_pair.accepts(&Type::generic_instance(
+            GenericTypeConstructor::Struct("OtherPair".to_owned()),
+            vec![Type::Int, Type::String],
+        )));
         assert!(!Type::Int.accepts(&Type::String));
         assert!(!Type::Int.accepts(&Type::Any));
         assert!(!Type::Any.accepts(&Type::Void));

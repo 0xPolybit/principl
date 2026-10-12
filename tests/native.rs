@@ -489,6 +489,72 @@ fn nested_lists_and_string_elements_execute() {
 
 #[cfg(windows)]
 #[test]
+fn lists_store_generic_class_references_and_generic_struct_values() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T {
+        return self.value
+    }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+fn main() {
+    var boxes: List<Box<Int>> = [Box<Int>(10)]
+    boxes.add(Box<Int>(11))
+    boxes[0] = Box<Int>(12)
+    var shared = boxes[0]
+    shared.value = 13
+    boxes[1].value = 14
+
+    var emptyBoxes: List<Box<Int>> = []
+    emptyBoxes.add(Box<Int>(19))
+    let inferredBoxes = [Box<Int>(20)]
+    let inferredPairs = [Pair<String, Float>("inferred", 3.5)]
+
+    var pairs: List<Pair<String, Float>> = [Pair<String, Float>("one", 1.5)]
+    pairs.add(Pair<String, Float>("two", 2.5))
+    pairs[0] = Pair<String, Float>("zero", 0.5)
+    var copy = pairs[1]
+    copy.first = "copy"
+    println(pairs[1].first)
+    pairs[1] = copy
+
+    println(boxes.length)
+    println(boxes[0].get())
+    println(boxes[1].get())
+    println(emptyBoxes[0].get())
+    println(inferredBoxes[0].get())
+    println(pairs.length)
+    println(pairs[0].first)
+    println(pairs[0].second)
+    println(pairs[1].first)
+    println(pairs[1].second)
+    println(inferredPairs[0].first)
+    println(inferredPairs[0].second)
+}"#;
+
+    let prnc_stdout = dir.build_and_run("generic lists.prnc", source);
+    let princi_stdout = dir.build_and_run("generic lists.princi", source);
+    let expected = "two\n2\n13\n14\n19\n20\n2\nzero\n0.5\ncopy\n2.5\ninferred\n3.5\n";
+    assert_eq!(prnc_stdout, expected);
+    assert_eq!(princi_stdout, expected);
+}
+
+#[cfg(windows)]
+#[test]
 fn list_indexing_reports_negative_and_past_end_bounds_errors() {
     if skip_without_native_toolchain() {
         return;
