@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
     ExpressionKind, ExternBlockDeclaration, FieldDeclaration, FunctionDeclaration, Identifier,
-    InitializerDeclaration, Literal, Program, Statement, StatementKind, TypeDeclaration,
-    TypeDeclarationKind, TypeParameterDeclaration, UnaryOperator, VariableDeclaration,
+    InitializerDeclaration, InterfaceDeclaration, Literal, Program, Statement, StatementKind,
+    TypeDeclaration, TypeDeclarationKind, TypeParameterDeclaration, UnaryOperator,
+    VariableDeclaration,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
@@ -20,6 +21,7 @@ pub struct TypedProgram {
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
+    interface_conversions: HashMap<SourceSpan, Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,10 @@ impl TypedProgram {
 
     pub fn generic_function_call(&self, span: SourceSpan) -> Option<&GenericFunctionCall> {
         self.generic_function_calls.get(&span)
+    }
+
+    pub(crate) fn interface_conversion(&self, span: SourceSpan) -> Option<&Type> {
+        self.interface_conversions.get(&span)
     }
 
     pub(crate) fn specialized_view(&self, substitutions: &HashMap<u32, Type>) -> Self {
@@ -181,11 +187,13 @@ pub struct TypeSymbols {
     pub field_order: Vec<String>,
     pub methods: HashMap<String, FunctionType>,
     pub initializer: Option<FunctionType>,
+    pub is_interface: bool,
+    pub implemented_interfaces: Vec<String>,
     member_names: HashSet<String>,
 }
 
 impl TypeSymbols {
-    fn new(ty: Type, type_parameters: Vec<GenericTypeParameter>) -> Self {
+    fn new(ty: Type, type_parameters: Vec<GenericTypeParameter>, is_interface: bool) -> Self {
         Self {
             ty,
             type_parameters,
@@ -194,6 +202,8 @@ impl TypeSymbols {
             field_order: Vec::new(),
             methods: HashMap::new(),
             initializer: None,
+            is_interface,
+            implemented_interfaces: Vec::new(),
             member_names: HashSet::new(),
         }
     }
@@ -240,6 +250,7 @@ struct Analyzer<'a> {
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
+    interface_conversions: HashMap<SourceSpan, Type>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -275,6 +286,7 @@ impl<'a> Analyzer<'a> {
             expression_types: HashMap::new(),
             variable_types: HashMap::new(),
             generic_function_calls: HashMap::new(),
+            interface_conversions: HashMap::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -283,6 +295,7 @@ impl<'a> Analyzer<'a> {
         self.register_global_names(program);
         self.resolve_global_functions(program);
         self.register_type_members(program);
+        self.validate_interface_implementations(program);
         self.validate_struct_value_layouts(program);
         self.check_declaration_bodies(program);
 
@@ -297,6 +310,7 @@ impl<'a> Analyzer<'a> {
                 expression_types: self.expression_types,
                 variable_types: self.variable_types,
                 generic_function_calls: self.generic_function_calls,
+                interface_conversions: self.interface_conversions,
             },
             diagnostics: self.diagnostics,
         }
@@ -325,9 +339,25 @@ impl<'a> Analyzer<'a> {
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
                     self.types
-                        .insert(name.clone(), TypeSymbols::new(ty, type_parameters));
+                        .insert(name.clone(), TypeSymbols::new(ty, type_parameters, false));
                     self.accepted_type_declarations
                         .insert(type_declaration.span);
+                }
+                Declaration::Interface(interface) => {
+                    let name = &interface.name.name;
+                    if is_reserved_type_name(name) || self.globals.contains_key(name) {
+                        self.error_with(
+                            DiagnosticCode::DuplicateDeclaration,
+                            format!("duplicate or reserved declaration '{name}'"),
+                            interface.name.span,
+                        );
+                        continue;
+                    }
+                    let ty = Type::Interface(name.clone());
+                    self.globals
+                        .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
+                    self.types
+                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), true));
                 }
                 Declaration::Function(function) => {
                     let name = &function.name.name;
@@ -478,6 +508,10 @@ impl<'a> Analyzer<'a> {
 
     fn register_type_members(&mut self, program: &Program) {
         for declaration in &program.declarations {
+            if let Declaration::Interface(interface) = declaration {
+                self.register_interface_methods(interface);
+                continue;
+            }
             let (Declaration::Class(type_declaration) | Declaration::Struct(type_declaration)) =
                 declaration
             else {
@@ -520,6 +554,186 @@ impl<'a> Analyzer<'a> {
                 }
             }
             self.pop_type_parameters();
+        }
+    }
+
+    fn register_interface_methods(&mut self, interface: &InterfaceDeclaration) {
+        let Some(info) = self.types.get(&interface.name.name) else {
+            return;
+        };
+        if !info.is_interface {
+            return;
+        }
+        for method in &interface.methods {
+            let name = &method.name;
+            let inserted = self
+                .types
+                .get_mut(&interface.name.name)
+                .is_some_and(|info| info.member_names.insert(name.name.clone()));
+            if !inserted {
+                self.error_with(
+                    DiagnosticCode::DuplicateDeclaration,
+                    format!(
+                        "duplicate method '{}' in interface '{}'",
+                        name.name, interface.name.name
+                    ),
+                    name.span,
+                );
+                continue;
+            }
+            let parameters = method
+                .parameters
+                .iter()
+                .map(|parameter| self.resolve_type_reference(&parameter.type_reference, false))
+                .collect::<Vec<_>>();
+            let return_type = method
+                .return_type
+                .as_ref()
+                .map(|ty| self.resolve_type_reference(ty, true))
+                .unwrap_or(Type::Void);
+            let signature = FunctionType::new(parameters, return_type);
+            if let Some(info) = self.types.get_mut(&interface.name.name) {
+                info.methods.insert(name.name.clone(), signature);
+            }
+        }
+    }
+
+    fn validate_interface_implementations(&mut self, program: &Program) {
+        for declaration in &program.declarations {
+            let (Declaration::Class(class) | Declaration::Struct(class)) = declaration else {
+                continue;
+            };
+            if class.interfaces.is_empty() {
+                continue;
+            }
+            if class.kind == TypeDeclarationKind::Struct {
+                for interface in &class.interfaces {
+                    self.error_with(
+                        DiagnosticCode::InvalidInterface,
+                        "only classes can implement interfaces in v0.2",
+                        interface.span,
+                    );
+                }
+                continue;
+            }
+
+            let type_parameters = self
+                .types
+                .get(&class.name.name)
+                .map(|info| info.type_parameters.clone())
+                .unwrap_or_default();
+            self.push_type_parameters(&type_parameters);
+            let mut seen = HashSet::new();
+            let mut implemented = Vec::new();
+            for reference in &class.interfaces {
+                if !seen.insert(reference.name.clone()) {
+                    self.error_with(
+                        DiagnosticCode::InvalidInterface,
+                        format!("interface '{}' is listed more than once", reference.name),
+                        reference.span,
+                    );
+                    continue;
+                }
+                if !self.types.contains_key(&reference.name)
+                    && self.lookup_type_parameter(&reference.name).is_none()
+                {
+                    self.error_with(
+                        DiagnosticCode::UnknownType,
+                        format!("unknown interface '{}'", reference.name),
+                        reference.span,
+                    );
+                    continue;
+                }
+                let interface_type = self.resolve_type_reference(reference, false);
+                let Type::Interface(interface_name) = interface_type else {
+                    if !interface_type.is_error() {
+                        self.error_with(
+                            DiagnosticCode::InvalidInterface,
+                            format!("'{}' is not an interface", reference.name),
+                            reference.span,
+                        );
+                    }
+                    continue;
+                };
+                let Some(interface_info) = self.types.get(&interface_name).cloned() else {
+                    continue;
+                };
+                if !interface_info.is_interface {
+                    self.error_with(
+                        DiagnosticCode::InvalidInterface,
+                        format!("'{}' is not an interface", interface_name),
+                        reference.span,
+                    );
+                    continue;
+                }
+                let Some(class_info) = self.types.get(&class.name.name).cloned() else {
+                    continue;
+                };
+                let Some(interface_declaration) =
+                    program
+                        .declarations
+                        .iter()
+                        .find_map(|declaration| match declaration {
+                            Declaration::Interface(candidate)
+                                if candidate.name.name == interface_name =>
+                            {
+                                Some(candidate)
+                            }
+                            _ => None,
+                        })
+                else {
+                    continue;
+                };
+                let mut conforms = true;
+                for required_method in &interface_declaration.methods {
+                    let required_name = &required_method.name.name;
+                    let Some(required_signature) = interface_info.methods.get(required_name) else {
+                        continue;
+                    };
+                    let Some(implementation) = class_info.methods.get(required_name) else {
+                        self.error_with(
+                            DiagnosticCode::InvalidInterface,
+                            format!(
+                                "class '{}' does not implement required method '{}.{}'",
+                                class.name.name, interface_name, required_name
+                            ),
+                            reference.span,
+                        );
+                        conforms = false;
+                        continue;
+                    };
+                    if implementation != required_signature {
+                        let method_span = class
+                            .members
+                            .iter()
+                            .find_map(|member| match member {
+                                ClassMember::Method(method)
+                                    if method.name.name == *required_name =>
+                                {
+                                    Some(method.name.span)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(reference.span);
+                        self.error_with(
+                            DiagnosticCode::InvalidInterface,
+                            format!(
+                                "method '{}.{}' has an incompatible signature for interface '{}'",
+                                class.name.name, required_name, interface_name
+                            ),
+                            method_span,
+                        );
+                        conforms = false;
+                    }
+                }
+                if conforms {
+                    implemented.push(interface_name);
+                }
+            }
+            self.pop_type_parameters();
+            if let Some(info) = self.types.get_mut(&class.name.name) {
+                info.implemented_interfaces = implemented;
+            }
         }
     }
 
@@ -1162,7 +1376,9 @@ impl<'a> Analyzer<'a> {
             }
         };
 
-        if !target_type.accepts(&value_type) {
+        if !self.record_interface_conversion(&target_type, &value_type, assignment.value.span)
+            && !target_type.accepts(&value_type)
+        {
             self.error_with(
                 DiagnosticCode::TypeMismatch,
                 format!("expected {target_type}, found {value_type}"),
@@ -1521,6 +1737,17 @@ impl<'a> Analyzer<'a> {
             );
             return Type::Error;
         };
+        if info.is_interface {
+            self.error_with(
+                DiagnosticCode::InvalidInterface,
+                format!("interface '{type_name}' cannot be instantiated"),
+                type_reference.span,
+            );
+            for initializer in fields {
+                self.check_expression(&initializer.value, None);
+            }
+            return Type::Error;
+        }
         let substitutions =
             type_substitutions(&info.type_parameters, instantiated_type.generic_arguments());
 
@@ -1597,6 +1824,17 @@ impl<'a> Analyzer<'a> {
                         let Some(info) = self.types.get(&name.name).cloned() else {
                             return Type::Error;
                         };
+                        if info.is_interface {
+                            self.error_with(
+                                DiagnosticCode::InvalidInterface,
+                                format!("interface '{}' cannot be instantiated", name.name),
+                                call_span,
+                            );
+                            for argument in arguments {
+                                self.check_expression(argument, None);
+                            }
+                            return Type::Error;
+                        }
                         let ty = self.instantiate_declared_type(
                             &name.name,
                             &resolved_arguments,
@@ -1677,6 +1915,17 @@ impl<'a> Analyzer<'a> {
                         let Some(info) = self.types.get(&identifier.name) else {
                             return Type::Error;
                         };
+                        if info.is_interface {
+                            self.error_with(
+                                DiagnosticCode::InvalidInterface,
+                                format!("interface '{}' cannot be instantiated", identifier.name),
+                                call_span,
+                            );
+                            for argument in arguments {
+                                self.check_expression(argument, None);
+                            }
+                            return Type::Error;
+                        }
                         let generic_parameters = info.type_parameters.clone();
                         let constructor = self.constructor_signature(&identifier.name);
                         let (signature, inferred_arguments) = if generic_parameters.is_empty() {
@@ -2134,13 +2383,47 @@ impl<'a> Analyzer<'a> {
     }
 
     fn require_type(&mut self, expected: &Type, actual: &Type, span: SourceSpan, context: &str) {
-        if !expected.accepts(actual) {
-            self.error_with(
-                DiagnosticCode::TypeMismatch,
-                format!("expected {expected}, found {actual} ({context})"),
-                span,
-            );
+        if self.record_interface_conversion(expected, actual, span) || expected.accepts(actual) {
+            return;
         }
+        self.error_with(
+            DiagnosticCode::TypeMismatch,
+            format!("expected {expected}, found {actual} ({context})"),
+            span,
+        );
+    }
+
+    fn record_interface_conversion(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        span: SourceSpan,
+    ) -> bool {
+        let Type::Interface(interface_name) = expected else {
+            return false;
+        };
+        let Some(class_name) = actual.nominal_name() else {
+            return false;
+        };
+        if !matches!(
+            actual,
+            Type::Class(_)
+                | Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Class(_),
+                    ..
+                }
+        ) {
+            return false;
+        }
+        let conforms = self.types.get(class_name).is_some_and(|info| {
+            info.implemented_interfaces
+                .iter()
+                .any(|name| name == interface_name)
+        });
+        if conforms {
+            self.interface_conversions.insert(span, expected.clone());
+        }
+        conforms
     }
 
     fn declare_local(
@@ -2572,6 +2855,107 @@ fn main() {
             .expect("Point symbols should be retained for later stages");
         assert_eq!(point_symbols.fields.get("x"), Some(&Type::Int));
         assert_eq!(point_symbols.fields.get("y"), Some(&Type::Int));
+    }
+
+    #[test]
+    fn checks_interface_conformance_and_class_to_interface_value_conversions() {
+        let result = analyze_text(
+            r#"interface Drawable {
+    fn draw(prefix: String) -> String
+}
+interface Clickable {
+    fn click() -> Bool
+}
+class Widget implements Drawable, Clickable {
+    name: String
+    init(name: String) { self.name = name }
+    fn draw(prefix: String) -> String { return prefix + self.name }
+    fn click() -> Bool { return true }
+}
+class Holder {
+    value: Drawable
+    init(value: Drawable) { self.value = value }
+    fn get() -> Drawable { return self.value }
+}
+fn render(value: Drawable) -> Drawable {
+    println(value.draw("item: "))
+    return value
+}
+fn main() {
+    let widget = Widget("button")
+    let drawable: Drawable = widget
+    let result = render(widget)
+    let holder = Holder(widget)
+    let values: List<Drawable> = [widget, result, holder.get()]
+    values.add(drawable)
+    values[0] = holder.get()
+    println(values[0].draw("list: "))
+}"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        let widget = result
+            .typed_program
+            .symbols
+            .type_symbols("Widget")
+            .expect("class symbols should be registered");
+        assert_eq!(widget.implemented_interfaces, ["Drawable", "Clickable"]);
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 1)),
+            Some(&Type::Interface("Drawable".to_owned()))
+        );
+        let main = function(&result, "main");
+        let StatementKind::Variable(view) = &main.body.statements[1].kind else {
+            panic!("expected interface-typed local");
+        };
+        let value = view.initializer.as_ref().expect("interface initializer");
+        assert!(result
+            .typed_program
+            .interface_conversion(value.span)
+            .is_some_and(|ty| ty == &Type::Interface("Drawable".to_owned())));
+    }
+
+    #[test]
+    fn diagnoses_invalid_interface_implementations_and_instantiation() {
+        let result = analyze_text(
+            r#"interface Named { fn name() -> String }
+class Missing implements Named {}
+class Wrong implements Named { fn name() -> Int { return 1 } }
+class Repeated implements Named, Named { fn name() -> String { return "x" } }
+class Unknown implements Absent {}
+class NotAnInterface {}
+class Invalid implements NotAnInterface {}
+fn main() {
+    let value = Named()
+}"#,
+        );
+        assert!(has_message(
+            &result,
+            "does not implement required method 'Named.name'"
+        ));
+        assert!(has_message(&result, "incompatible signature"));
+        assert!(has_message(&result, "listed more than once"));
+        assert!(has_message(&result, "unknown interface 'Absent'"));
+        assert!(has_message(&result, "is not an interface"));
+        assert!(has_message(
+            &result,
+            "interface 'Named' cannot be instantiated"
+        ));
+    }
+
+    #[test]
+    fn rejects_struct_interface_implementation() {
+        let result = analyze_text(
+            r#"interface Named { fn name() -> String }
+struct Point implements Named { x: Int }
+fn main() {}"#,
+        );
+        assert!(has_message(
+            &result,
+            "only classes can implement interfaces in v0.2"
+        ));
     }
 
     #[test]

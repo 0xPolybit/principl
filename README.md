@@ -410,8 +410,10 @@ continuing with letters, digits, or `_`; decimal integer and floating-point
 literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
 `\r`, and `\t` escapes; and `true`/`false` boolean literals. NUL bytes and
 `\0` escapes are rejected because v0.1 Strings use NUL-terminated storage.
-The lexer recognizes the keywords `fn`, `return`, `let`, `var`, `if`, `else`,
-`while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and `extern`.
+The lexer recognizes the v0.1 keywords `fn`, `return`, `let`, `var`, `if`,
+`else`, `while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and
+`extern`. v0.2 adds `interface` and `implements` for interface declarations and
+class conformance.
 
 Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
 `>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
@@ -496,10 +498,47 @@ checking and runtime bounds checks.
 
 Generic methods may use their enclosing class parameters, as in
 `fn get() -> T`. Method-level generic parameters are not yet lowered in this
-work. Trait bounds, interfaces and traits, algebraic enums, exhaustive pattern
-matching, `Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
+work. Trait bounds, traits, algebraic enums, exhaustive pattern matching,
+`Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
+
+### Interfaces (v0.2)
+
+Interfaces declare instance method signatures. They cannot declare fields,
+constructors, method bodies, or generic methods. A class may implement multiple
+interfaces and must provide each required method with the same parameter and
+return types. Structs cannot implement interfaces, and interfaces are not a
+class inheritance mechanism.
+
+```princi
+interface Drawable {
+    fn draw(prefix: String) -> String
+}
+
+class Button implements Drawable {
+    fn draw(prefix: String) -> String {
+        return prefix + "button"
+    }
+}
+
+fn render(value: Drawable) {
+    println(value.draw("drawing: "))
+}
+
+fn main() {
+    let button = Button()
+    let drawable: Drawable = button
+    render(drawable)
+}
+```
+
+Conforming class instances convert to interface values in locals, function
+arguments and returns, class or struct fields, and `List<Interface>` values.
+The generated value is a pair containing the managed object reference and a
+compiler-generated table pointer. Calls through the interface use that table
+for runtime dispatch; calls through a concrete class retain static dispatch.
+The representation is internal and does not expose pointers in Princi syntax.
 
 ```princi
 class Box<T> {

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
     ExpressionKind, ExternalFunctionDeclaration, FunctionDeclaration, InitializerDeclaration,
-    Literal, Statement, StatementKind, TypeDeclaration, UnaryOperator,
+    InterfaceDeclaration, Literal, Statement, StatementKind, TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
@@ -320,7 +320,8 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let (functions, classes, structs, external_functions) = self.supported_declarations()?;
+        let (functions, classes, structs, interfaces, external_functions) =
+            self.supported_declarations()?;
         let main = functions
             .iter()
             .find(|function| function.name.name == "main")
@@ -531,6 +532,12 @@ impl<'a> IrGenerator<'a> {
         ir.push_str(crate::runtime::windows_x86_64::LIST_RUNTIME);
         ir.push('\n');
         ir.push_str("%princi.typeinfo = type { ptr }\n");
+        for interface in &interfaces {
+            ir.push_str(&format!(
+                "{} = type {{ ptr, ptr }}\n",
+                interface_type_name(&interface.name.name)
+            ));
+        }
         for structure in &structs {
             if self
                 .typed
@@ -573,6 +580,34 @@ impl<'a> IrGenerator<'a> {
                 }
             ) {
                 ir.push_str(&self.generic_class_layout(ty)?);
+            }
+        }
+        for class in &classes {
+            if self
+                .typed
+                .symbols
+                .type_symbols(&class.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.interface_vtables(
+                    class,
+                    &Type::Class(class.name.name.clone()),
+                    &interfaces,
+                )?);
+            }
+        }
+        for ty in &concrete_types {
+            if let Type::GenericInstance {
+                constructor: GenericTypeConstructor::Class(_),
+                ..
+            } = ty
+            {
+                let Some(name) = ty.nominal_name() else {
+                    continue;
+                };
+                if let Some(class) = classes.iter().find(|class| class.name.name == name) {
+                    ir.push_str(&self.interface_vtables(class, ty, &interfaces)?);
+                }
             }
         }
         ir.push('\n');
@@ -688,6 +723,7 @@ impl<'a> IrGenerator<'a> {
             Vec<&'a FunctionDeclaration>,
             Vec<&'a TypeDeclaration>,
             Vec<&'a TypeDeclaration>,
+            Vec<&'a InterfaceDeclaration>,
             Vec<&'a ExternalFunctionDeclaration>,
         ),
         Diagnostic,
@@ -695,6 +731,7 @@ impl<'a> IrGenerator<'a> {
         let mut functions = Vec::new();
         let mut classes = Vec::new();
         let mut structs = Vec::new();
+        let mut interfaces = Vec::new();
         let mut external_functions = Vec::new();
         for declaration in &self.typed.program.declarations {
             match declaration {
@@ -711,6 +748,7 @@ impl<'a> IrGenerator<'a> {
                     }
                     structs.push(item);
                 }
+                Declaration::Interface(item) => interfaces.push(item),
                 Declaration::Import(item) => {
                     let span = item.path.first().map_or(item.span, |name| name.span);
                     let resolved_module = match item.path.as_slice() {
@@ -732,7 +770,7 @@ impl<'a> IrGenerator<'a> {
                 }
             }
         }
-        Ok((functions, classes, structs, external_functions))
+        Ok((functions, classes, structs, interfaces, external_functions))
     }
 
     fn external_declaration(
@@ -1178,6 +1216,62 @@ impl<'a> IrGenerator<'a> {
         )
     }
 
+    fn interface_vtables(
+        &self,
+        class: &TypeDeclaration,
+        class_type: &Type,
+        interfaces: &[&InterfaceDeclaration],
+    ) -> Result<String, Diagnostic> {
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(&class.name.name)
+            .ok_or_else(|| self.error("missing semantic class symbols", class.name.span))?;
+        let mut output = String::new();
+        for interface_name in &info.implemented_interfaces {
+            let interface = interfaces
+                .iter()
+                .find(|interface| interface.name.name == *interface_name)
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        class.name.span,
+                    )
+                })?;
+            let symbol = interface_vtable_name(class_type, interface_name).ok_or_else(|| {
+                self.error("could not name interface dispatch table", class.name.span)
+            })?;
+            let mut entries = Vec::with_capacity(interface.methods.len());
+            for method in &interface.methods {
+                let method_exists = class.members.iter().any(|member| {
+                    matches!(member, ClassMember::Method(implementation) if implementation.name.name == method.name.name)
+                });
+                if !method_exists {
+                    return Err(self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        method.name.span,
+                    ));
+                }
+                let implementation = method_name_for_type(class_type, &method.name.name)
+                    .ok_or_else(|| {
+                        self.error(
+                            "could not resolve interface implementation symbol",
+                            method.name.span,
+                        )
+                    })?;
+                entries.push(format!("ptr @{implementation}"));
+            }
+            output.push_str(&format!(
+                "@{symbol} = private constant [{} x ptr] [{}]\n",
+                entries.len(),
+                entries.join(", ")
+            ));
+        }
+        Ok(output)
+    }
+
     fn emit_class_routines(
         &mut self,
         class: &TypeDeclaration,
@@ -1333,6 +1427,7 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::Bool => Ok("i1".to_owned()),
         Type::String => Ok("ptr".to_owned()),
         Type::Class(_) => Ok("ptr".to_owned()),
+        Type::Interface(name) => Ok(interface_type_name(name)),
         Type::GenericInstance {
             constructor: GenericTypeConstructor::List,
             arguments,
@@ -1394,6 +1489,7 @@ fn mangled_type(ty: &Type) -> Option<String> {
         Type::Void => Some("v".to_owned()),
         Type::Class(name) => Some(format!("c{}_{}", name.len(), encode_identifier(name))),
         Type::Struct(name) => Some(format!("u{}_{}", name.len(), encode_identifier(name))),
+        Type::Interface(name) => Some(format!("n{}_{}", name.len(), encode_identifier(name))),
         Type::GenericInstance {
             constructor: GenericTypeConstructor::Class(name),
             arguments,
@@ -1509,6 +1605,19 @@ fn substitute_codegen_type(ty: &Type, substitutions: &HashMap<u32, Type>) -> Typ
 
 fn class_type_name(name: &str) -> String {
     format!("%princi.class.{}", encode_identifier(name))
+}
+
+fn interface_type_name(name: &str) -> String {
+    format!("%princi.interface.{}", encode_identifier(name))
+}
+
+fn interface_vtable_name(class_type: &Type, interface_name: &str) -> Option<String> {
+    Some(format!(
+        "princi_vtable_{}_i{}_{}",
+        mangled_type(class_type)?,
+        interface_name.len(),
+        encode_identifier(interface_name)
+    ))
 }
 
 fn specialized_class_type_name(ty: &Type) -> Option<String> {
@@ -2124,6 +2233,45 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
     }
 
     fn emit_expression(&mut self, expression: &Expression) -> Result<IrValue, Diagnostic> {
+        let value = self.emit_expression_raw(expression)?;
+        let Some(target) = self.typed.interface_conversion(expression.span).cloned() else {
+            return Ok(value);
+        };
+        self.emit_interface_conversion(value, target, expression.span)
+    }
+
+    fn emit_interface_conversion(
+        &mut self,
+        value: IrValue,
+        target: Type,
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let Type::Interface(interface_name) = &target else {
+            return Err(self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                span,
+            ));
+        };
+        let symbol = interface_vtable_name(&value.ty, interface_name)
+            .ok_or_else(|| self.error("could not resolve interface dispatch table", span))?;
+        let interface_ty = llvm_type(&target, span, self.source)?;
+        let with_object = self.fresh_value();
+        let interface_value = self.fresh_value();
+        self.instruction(&format!(
+            "{with_object} = insertvalue {interface_ty} zeroinitializer, ptr {}, 0",
+            value.operand
+        ));
+        self.instruction(&format!(
+            "{interface_value} = insertvalue {interface_ty} {with_object}, ptr @{symbol}, 1"
+        ));
+        Ok(IrValue {
+            ty: target,
+            operand: interface_value,
+        })
+    }
+
+    fn emit_expression_raw(&mut self, expression: &Expression) -> Result<IrValue, Diagnostic> {
         match &expression.kind {
             ExpressionKind::Identifier(identifier) => {
                 let binding = self.lookup(&identifier.name).ok_or_else(|| {
@@ -2996,6 +3144,73 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 receiver.operand
             );
             return self.emit_call_result(call, Type::Void);
+        }
+        if let Type::Interface(interface_name) = &receiver.ty {
+            let signature = match self.typed.expression_type(callee) {
+                Some(Type::Function(signature)) => signature.clone(),
+                _ => {
+                    return Err(self.error(
+                        "missing semantic signature for interface method",
+                        member.span,
+                    ));
+                }
+            };
+            let interface = self
+                .typed
+                .program
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Interface(interface) if interface.name.name == *interface_name => {
+                        Some(interface)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| self.error("missing interface declaration", member.span))?;
+            let method_index = interface
+                .methods
+                .iter()
+                .position(|method| method.name.name == member.name)
+                .ok_or_else(|| self.error("missing interface dispatch slot", member.span))?;
+            let values = arguments
+                .iter()
+                .map(|argument| self.emit_expression(argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.len() != signature.parameters.len() {
+                return Err(self.error(
+                    "interface method argument count changed after semantic analysis",
+                    span,
+                ));
+            }
+            let interface_ty = llvm_type(&receiver.ty, member.span, self.source)?;
+            let object = self.fresh_value();
+            let table = self.fresh_value();
+            self.instruction(&format!(
+                "{object} = extractvalue {interface_ty} {}, 0",
+                receiver.operand
+            ));
+            self.instruction(&format!(
+                "{table} = extractvalue {interface_ty} {}, 1",
+                receiver.operand
+            ));
+            let method_count = interface.methods.len();
+            let slot = self.fresh_value();
+            let target = self.fresh_value();
+            self.instruction(&format!(
+                "{slot} = getelementptr inbounds [{method_count} x ptr], ptr {table}, i32 0, i32 {method_index}"
+            ));
+            self.instruction(&format!("{target} = load ptr, ptr {slot}"));
+            let return_ty = llvm_type(&signature.return_type, span, self.source)?;
+            let mut call_arguments = vec![format!("ptr {object}")];
+            for (value, ty) in values.iter().zip(&signature.parameters) {
+                call_arguments.push(format!(
+                    "{} {}",
+                    llvm_type(ty, span, self.source)?,
+                    value.operand
+                ));
+            }
+            let call = format!("call {return_ty} {target}({})", call_arguments.join(", "));
+            return self.emit_call_result(call, signature.return_type.as_ref().clone());
         }
         let Some(class_name) = receiver.ty.nominal_name() else {
             return Err(self.error(
@@ -3977,6 +4192,33 @@ fn main() {
         assert!(ir.contains("call void @princi_method_55736572_6269727468646179(ptr"));
         assert!(ir.contains("call i64 @princi_method_55736572_676574416765(ptr"));
         assert!(ir.contains("@.princi.typeinfo.55736572 = private constant %princi.typeinfo"));
+    }
+
+    #[test]
+    fn lowers_interface_views_to_vtables_and_indirect_method_calls() {
+        let ir = lower(
+            r#"interface Drawable { fn draw(prefix: String) -> String }
+class Button implements Drawable {
+    name: String
+    init(name: String) { self.name = name }
+    fn draw(prefix: String) -> String { return prefix + self.name }
+}
+fn render(value: Drawable) -> String { return value.draw("draw:") }
+fn main() {
+    let button = Button("button")
+    let drawable: Drawable = button
+    println(render(drawable))
+}"#,
+        )
+        .expect("interface value and dispatch should lower");
+
+        assert!(ir.contains("%princi.interface.4472617761626c65 = type { ptr, ptr }"));
+        assert!(ir.contains("@princi_vtable_c6_427574746f6e_i8_4472617761626c65 = private constant [1 x ptr] [ptr @princi_method_427574746f6e_64726177]"));
+        assert!(ir.contains("insertvalue %princi.interface.4472617761626c65"));
+        assert!(ir.contains("extractvalue %princi.interface.4472617761626c65"));
+        assert!(ir.contains("getelementptr inbounds [1 x ptr]"));
+        assert!(ir.contains("call ptr %v"));
+        assert!(!ir.contains("call ptr @princi_method_427574746f6e_64726177(ptr %v"));
     }
 
     #[test]

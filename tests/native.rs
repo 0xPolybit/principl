@@ -310,6 +310,67 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn interfaces_dispatch_by_concrete_class_across_values_fields_lists_and_generic_classes() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"interface Drawable {
+    fn draw(prefix: String) -> String
+}
+interface Clickable {
+    fn click() -> Bool
+}
+class Button implements Drawable, Clickable {
+    label: String
+    init(label: String) { self.label = label }
+    fn draw(prefix: String) -> String { return prefix + self.label }
+    fn click() -> Bool { return true }
+}
+class Circle implements Drawable {
+    radius: Int
+    init(radius: Int) { self.radius = radius }
+    fn draw(prefix: String) -> String { return prefix + "circle" }
+}
+class Box<T> implements Drawable {
+    value: T
+    init(value: T) { self.value = value }
+    fn draw(prefix: String) -> String { return prefix + "box" }
+}
+class Holder {
+    item: Drawable
+    init(item: Drawable) { self.item = item }
+    fn get() -> Drawable { return self.item }
+}
+fn pass(value: Drawable) -> Drawable { return value }
+fn render(value: Drawable) { println(value.draw("shape:")) }
+fn main() {
+    let button = Button("button")
+    let circle = Circle(3)
+    let box = Box<Int>(4)
+    let values: List<Drawable> = [button, circle, box]
+    values.add(pass(button))
+    let holder = Holder(circle)
+    let fromField = holder.get()
+    render(fromField)
+    println(values[0].draw("draw:"))
+    println(values[1].draw("draw:"))
+    println(values[2].draw("draw:"))
+    values[0] = holder.get()
+    println(values[0].draw("updated:"))
+    let clickable: Clickable = button
+    println(clickable.click())
+}"#;
+
+    let prnc_stdout = dir.build_and_run("interfaces.prnc", source);
+    let princi_stdout = dir.build_and_run("interfaces.princi", source);
+    let expected = "shape:circle\ndraw:button\ndraw:circle\ndraw:box\nupdated:circle\ntrue\n";
+    assert_eq!(prnc_stdout, expected);
+    assert_eq!(princi_stdout, expected);
+}
+
+#[cfg(windows)]
+#[test]
 fn classes_support_default_and_named_field_construction() {
     if skip_without_native_toolchain() {
         return;

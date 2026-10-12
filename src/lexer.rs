@@ -33,6 +33,8 @@ pub enum Keyword {
     In,
     Class,
     Struct,
+    Interface,
+    Implements,
     Init,
     SelfValue,
     Import,
@@ -137,6 +139,8 @@ impl<'a> Lexer<'a> {
             "in" => TokenKind::Keyword(Keyword::In),
             "class" => TokenKind::Keyword(Keyword::Class),
             "struct" => TokenKind::Keyword(Keyword::Struct),
+            "interface" => TokenKind::Keyword(Keyword::Interface),
+            "implements" => TokenKind::Keyword(Keyword::Implements),
             "init" => TokenKind::Keyword(Keyword::Init),
             "self" => TokenKind::Keyword(Keyword::SelfValue),
             "import" => TokenKind::Keyword(Keyword::Import),
@@ -433,7 +437,7 @@ mod tests {
     #[test]
     fn recognizes_keywords_and_keeps_other_words_as_identifiers() {
         let tokens = kinds(
-            "fn return let var if else while for in class struct init self import extern true false function",
+            "fn return let var if else while for in class struct interface implements init self import extern true false function",
         );
 
         assert_eq!(
@@ -450,6 +454,8 @@ mod tests {
                 TokenKind::Keyword(Keyword::In),
                 TokenKind::Keyword(Keyword::Class),
                 TokenKind::Keyword(Keyword::Struct),
+                TokenKind::Keyword(Keyword::Interface),
+                TokenKind::Keyword(Keyword::Implements),
                 TokenKind::Keyword(Keyword::Init),
                 TokenKind::Keyword(Keyword::SelfValue),
                 TokenKind::Keyword(Keyword::Import),

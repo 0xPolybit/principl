@@ -11,6 +11,7 @@ pub enum Declaration {
     Function(FunctionDeclaration),
     Class(TypeDeclaration),
     Struct(TypeDeclaration),
+    Interface(InterfaceDeclaration),
     Import(ImportDeclaration),
     ExternBlock(ExternBlockDeclaration),
 }
@@ -83,7 +84,23 @@ pub struct TypeDeclaration {
     pub kind: TypeDeclarationKind,
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameterDeclaration>,
+    pub interfaces: Vec<TypeReference>,
     pub members: Vec<ClassMember>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDeclaration {
+    pub name: Identifier,
+    pub methods: Vec<InterfaceMethodDeclaration>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceMethodDeclaration {
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<TypeReference>,
     pub span: SourceSpan,
 }
 

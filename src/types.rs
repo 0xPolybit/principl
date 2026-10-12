@@ -1,10 +1,12 @@
 use std::fmt;
 
 /// A resolved Princi type. `String`, `Class`, and `List` are managed-reference
-/// types; they are distinct from inline values such as structs. Princi has no
-/// raw-pointer type. `Any`, `Error`, function, range, generic-parameter, and
-/// generic-instance types are compiler representations; generic declarations
-/// and instances are checked before the native backend specializes them.
+/// types; they are distinct from inline values such as structs. An `Interface`
+/// value is an inline pair containing a managed class reference and a dispatch
+/// table reference. Princi has no raw-pointer type. `Any`, `Error`, function,
+/// range, generic-parameter, and generic-instance types are compiler
+/// representations; generic declarations and instances are checked before the
+/// native backend specializes them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
@@ -14,6 +16,7 @@ pub enum Type {
     Void,
     Class(String),
     Struct(String),
+    Interface(String),
     TypeParameter(GenericTypeParameter),
     GenericInstance {
         constructor: GenericTypeConstructor,
@@ -116,7 +119,7 @@ impl Type {
 
     pub fn nominal_name(&self) -> Option<&str> {
         match self {
-            Type::Class(name) | Type::Struct(name) => Some(name),
+            Type::Class(name) | Type::Struct(name) | Type::Interface(name) => Some(name),
             Type::GenericInstance {
                 constructor:
                     GenericTypeConstructor::Class(name) | GenericTypeConstructor::Struct(name),
@@ -192,7 +195,9 @@ impl fmt::Display for Type {
             Type::Bool => formatter.write_str("Bool"),
             Type::String => formatter.write_str("String"),
             Type::Void => formatter.write_str("Void"),
-            Type::Class(name) | Type::Struct(name) => formatter.write_str(name),
+            Type::Class(name) | Type::Struct(name) | Type::Interface(name) => {
+                formatter.write_str(name)
+            }
             Type::TypeParameter(parameter) => formatter.write_str(&parameter.name),
             Type::GenericInstance {
                 constructor,
@@ -310,6 +315,7 @@ mod tests {
         assert!(Type::list(Type::Int).is_managed_reference());
         assert!(!Type::Int.is_managed_reference());
         assert!(!Type::Struct("Point".to_owned()).is_managed_reference());
+        assert!(!Type::Interface("Drawable".to_owned()).is_managed_reference());
     }
 
     #[test]

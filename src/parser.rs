@@ -80,12 +80,16 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Struct) => self
                 .parse_type_declaration(TypeDeclarationKind::Struct)
                 .map(Declaration::Struct),
+            TokenKind::Keyword(Keyword::Interface) => {
+                self.parse_interface().map(Declaration::Interface)
+            }
             TokenKind::Keyword(Keyword::Import) => self.parse_import().map(Declaration::Import),
             TokenKind::Keyword(Keyword::Extern) => {
                 self.parse_extern_block().map(Declaration::ExternBlock)
             }
-            _ => Err(self
-                .error_here("expected a function, class, struct, import, or extern declaration")),
+            _ => Err(self.error_here(
+                "expected a function, class, struct, interface, import, or extern declaration",
+            )),
         }
     }
 
@@ -312,6 +316,16 @@ impl Parser<'_> {
         let start = self.advance().location.span.start;
         let name = self.expect_identifier("expected class or struct name")?;
         let type_parameters = self.parse_type_parameters()?;
+        let mut interfaces = Vec::new();
+        if self.eat_keyword(Keyword::Implements) {
+            loop {
+                interfaces
+                    .push(self.parse_type_reference("expected interface name after 'implements'")?);
+                if !self.eat_punctuation(Punctuation::Comma) {
+                    break;
+                }
+            }
+        }
         self.expect_punctuation(Punctuation::LeftBrace, "expected '{' after type name")?;
         let mut members = Vec::new();
 
@@ -336,8 +350,70 @@ impl Parser<'_> {
             kind,
             name,
             type_parameters,
+            interfaces,
             members,
             span: SourceSpan::new(start, close.location.span.end),
+        })
+    }
+
+    fn parse_interface(&mut self) -> Result<InterfaceDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let name = self.expect_identifier("expected interface name")?;
+        self.expect_punctuation(Punctuation::LeftBrace, "expected '{' after interface name")?;
+        let mut methods = Vec::new();
+        while !self.check_punctuation(Punctuation::RightBrace) && !self.at_eof() {
+            let before = self.cursor;
+            match self.parse_interface_method() {
+                Ok(method) => methods.push(method),
+                Err(diagnostic) => {
+                    self.diagnostics.push(diagnostic);
+                    self.recover_interface_member(before);
+                }
+            }
+            if self.cursor == before && !self.at_eof() {
+                self.advance();
+            }
+        }
+        let close =
+            self.expect_punctuation(Punctuation::RightBrace, "expected '}' to close interface")?;
+        Ok(InterfaceDeclaration {
+            name,
+            methods,
+            span: SourceSpan::new(start, close.location.span.end),
+        })
+    }
+
+    fn parse_interface_method(&mut self) -> Result<InterfaceMethodDeclaration, Diagnostic> {
+        let start = self
+            .expect_keyword(Keyword::Fn, "interfaces may contain only method signatures")?
+            .location
+            .span
+            .start;
+        let name = self.expect_identifier("expected interface method name")?;
+        if self.check_operator(Operator::Less) {
+            return Err(
+                self.error_here("interface methods cannot declare generic parameters in v0.2")
+            );
+        }
+        let parameters = self.parse_parameters()?;
+        let return_type = if self.eat_punctuation(Punctuation::Arrow) {
+            Some(self.parse_type_reference("expected return type after '->'")?)
+        } else {
+            None
+        };
+        if self.check_punctuation(Punctuation::LeftBrace) {
+            return Err(self.error_here("interface method declarations cannot have bodies in v0.2"));
+        }
+        self.finish_member()?;
+        let end = return_type.as_ref().map_or_else(
+            || self.tokens[self.cursor.saturating_sub(1)].location.span.end,
+            |return_type| return_type.span.end,
+        );
+        Ok(InterfaceMethodDeclaration {
+            name,
+            parameters,
+            return_type,
+            span: SourceSpan::new(start, end),
         })
     }
 
@@ -1036,11 +1112,53 @@ impl Parser<'_> {
         }
     }
 
+    fn recover_interface_member(&mut self, before: usize) {
+        let mut advanced = self.cursor > before;
+        let mut body_depth = 0usize;
+        if !advanced && !self.at_eof() && !self.check_punctuation(Punctuation::RightBrace) {
+            self.advance();
+            advanced = true;
+        }
+
+        while !self.at_eof() {
+            if body_depth == 0 && self.check_punctuation(Punctuation::RightBrace) {
+                return;
+            }
+            if body_depth == 0
+                && advanced
+                && self.line_break_before_current()
+                && self.can_start_class_member()
+            {
+                return;
+            }
+            if body_depth == 0
+                && (self.eat_punctuation(Punctuation::Semicolon)
+                    || self.eat_punctuation(Punctuation::Comma))
+            {
+                return;
+            }
+            match self.current().kind {
+                TokenKind::Punctuation(Punctuation::LeftBrace) => body_depth += 1,
+                TokenKind::Punctuation(Punctuation::RightBrace) if body_depth > 0 => {
+                    body_depth -= 1;
+                }
+                _ => {}
+            }
+            self.advance();
+            advanced = true;
+        }
+    }
+
     fn is_declaration_start(&self) -> bool {
         matches!(
             self.current().kind,
             TokenKind::Keyword(
-                Keyword::Fn | Keyword::Class | Keyword::Struct | Keyword::Import | Keyword::Extern
+                Keyword::Fn
+                    | Keyword::Class
+                    | Keyword::Struct
+                    | Keyword::Interface
+                    | Keyword::Import
+                    | Keyword::Extern
             )
         )
     }
@@ -1450,6 +1568,7 @@ mod tests {
         self.name = name
         self.age = age
     }
+
     fn greet() { print("Hello") }
 }
 struct Point {
@@ -1485,6 +1604,75 @@ struct Point {
             variable.initializer.as_ref().map(|value| &value.kind),
             Some(ExpressionKind::Construction { .. })
         ));
+    }
+
+    #[test]
+    fn parses_interfaces_and_multiple_class_implementations() {
+        let result = parse_text(
+            "interfaces.prnc",
+            r#"interface Drawable {
+    fn draw(style: String) -> String
+    fn visible() -> Bool;
+}
+interface Clickable { fn click() }
+class Widget implements Drawable, Clickable {
+    fn draw(style: String) -> String { return style }
+    fn visible() -> Bool { return true }
+    fn click() {}
+}
+fn main() {}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Interface(drawable) = &result.program.declarations[0] else {
+            panic!("expected interface declaration");
+        };
+        assert_eq!(drawable.methods.len(), 2);
+        assert_eq!(drawable.methods[0].name.name, "draw");
+        assert_eq!(
+            drawable.methods[0].parameters[0].type_reference.name,
+            "String"
+        );
+        assert_eq!(
+            drawable.methods[0].return_type.as_ref().unwrap().name,
+            "String"
+        );
+        let Declaration::Class(widget) = &result.program.declarations[2] else {
+            panic!("expected class declaration");
+        };
+        assert_eq!(widget.interfaces.len(), 2);
+        assert_eq!(widget.interfaces[0].name, "Drawable");
+        assert_eq!(widget.interfaces[1].name, "Clickable");
+    }
+
+    #[test]
+    fn rejects_interface_fields_constructors_bodies_and_generic_methods() {
+        let result = parse_text(
+            "invalid-interface.prnc",
+            r#"interface Bad {
+    value: Int
+    init() {}
+    fn body() {}
+}
+fn main() {}"#,
+        );
+        assert!(!result.diagnostics.is_empty());
+        assert!(result.diagnostics.iter().all(|diagnostic| {
+            diagnostic
+                .location()
+                .is_some_and(|location| location.line > 1)
+        }));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("cannot have bodies")));
+        let generic = parse_text(
+            "generic-interface-method.prnc",
+            "interface Bad { fn generic<T>(value: T) }\nfn main() {}",
+        );
+        assert!(generic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("generic parameters")));
     }
 
     #[test]
