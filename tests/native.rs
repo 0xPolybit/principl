@@ -371,6 +371,77 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn traits_dispatch_defaults_overrides_multiple_traits_and_box_struct_copies() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"trait Named {
+    fn name() -> String
+    fn describe() { println("Hello, " + self.name()) }
+}
+trait Tagged {
+    fn tag() -> String
+    fn showTag() { println(self.tag()) }
+}
+class User implements Named, Tagged {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn tag() -> String { return "member" }
+    fn describe() { println("User: " + self.name()) }
+}
+class GenericUser<T> implements Named {
+    value: T
+    init(value: T) { self.value = value }
+    fn name() -> String { return "generic" }
+}
+struct Point implements Named {
+    value: String
+    fn name() -> String { return self.value }
+}
+struct GenericPoint<T> implements Named {
+    value: T
+    fn name() -> String { return "generic point" }
+}
+fn show(value: Named) { value.describe() }
+fn pass(value: Named) -> Named { return value }
+class Holder {
+    value: Named
+    init(value: Named) { self.value = value }
+    fn get() -> Named { return self.value }
+}
+fn main() {
+    var user = User("Ada")
+    let named: Named = user
+    user.value = "Grace"
+    show(pass(named))
+    let tagged: Tagged = user
+    tagged.showTag()
+    show(GenericUser<Int>(1))
+
+    var point = Point("origin")
+    let pointView: Named = point
+    point.value = "moved"
+    show(pointView)
+    let holder = Holder(user)
+    show(holder.get())
+    let values: List<Named> = [user, point]
+    values.add(pointView)
+    show(values[1])
+    show(values[2])
+    show(GenericPoint<Int>(3))
+}"#;
+
+    let prnc_stdout = dir.build_and_run("traits.prnc", source);
+    let princi_stdout = dir.build_and_run("traits.princi", source);
+    let expected = "User: Grace\nmember\nHello, generic\nHello, origin\nUser: Grace\nHello, moved\nHello, origin\nHello, generic point\n";
+    assert_eq!(prnc_stdout, expected);
+    assert_eq!(princi_stdout, expected);
+}
+
+#[cfg(windows)]
+#[test]
 fn classes_support_default_and_named_field_construction() {
     if skip_without_native_toolchain() {
         return;

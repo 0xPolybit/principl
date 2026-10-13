@@ -4,8 +4,8 @@ use crate::ast::{
     Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
     ExpressionKind, ExternBlockDeclaration, FieldDeclaration, FunctionDeclaration, Identifier,
     InitializerDeclaration, InterfaceDeclaration, Literal, Program, Statement, StatementKind,
-    TypeDeclaration, TypeDeclarationKind, TypeParameterDeclaration, UnaryOperator,
-    VariableDeclaration,
+    TraitDeclaration, TypeDeclaration, TypeDeclarationKind, TypeParameterDeclaration,
+    UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
@@ -21,7 +21,7 @@ pub struct TypedProgram {
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
-    interface_conversions: HashMap<SourceSpan, Type>,
+    contract_conversions: HashMap<SourceSpan, Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,8 +56,8 @@ impl TypedProgram {
         self.generic_function_calls.get(&span)
     }
 
-    pub(crate) fn interface_conversion(&self, span: SourceSpan) -> Option<&Type> {
-        self.interface_conversions.get(&span)
+    pub(crate) fn contract_conversion(&self, span: SourceSpan) -> Option<&Type> {
+        self.contract_conversions.get(&span)
     }
 
     pub(crate) fn specialized_view(&self, substitutions: &HashMap<u32, Type>) -> Self {
@@ -188,12 +188,22 @@ pub struct TypeSymbols {
     pub methods: HashMap<String, FunctionType>,
     pub initializer: Option<FunctionType>,
     pub is_interface: bool,
+    pub is_trait: bool,
     pub implemented_interfaces: Vec<String>,
+    pub implemented_traits: Vec<String>,
+    /// The unique default provider selected for methods not implemented by
+    /// this concrete type. Ambiguous providers are rejected semantically.
+    pub default_trait_methods: HashMap<String, String>,
     member_names: HashSet<String>,
 }
 
 impl TypeSymbols {
-    fn new(ty: Type, type_parameters: Vec<GenericTypeParameter>, is_interface: bool) -> Self {
+    fn new(
+        ty: Type,
+        type_parameters: Vec<GenericTypeParameter>,
+        is_interface: bool,
+        is_trait: bool,
+    ) -> Self {
         Self {
             ty,
             type_parameters,
@@ -203,7 +213,10 @@ impl TypeSymbols {
             methods: HashMap::new(),
             initializer: None,
             is_interface,
+            is_trait,
             implemented_interfaces: Vec::new(),
+            implemented_traits: Vec::new(),
+            default_trait_methods: HashMap::new(),
             member_names: HashSet::new(),
         }
     }
@@ -243,6 +256,7 @@ struct Analyzer<'a> {
     accepted_functions: HashSet<SourceSpan>,
     accepted_methods: HashSet<SourceSpan>,
     accepted_initializers: HashSet<SourceSpan>,
+    accepted_trait_methods: HashSet<SourceSpan>,
     function_signatures: HashMap<SourceSpan, FunctionType>,
     initializer_signatures: HashMap<SourceSpan, FunctionType>,
     current_return_type: Option<Type>,
@@ -250,7 +264,7 @@ struct Analyzer<'a> {
     expression_types: HashMap<SourceSpan, Type>,
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
-    interface_conversions: HashMap<SourceSpan, Type>,
+    contract_conversions: HashMap<SourceSpan, Type>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -279,6 +293,7 @@ impl<'a> Analyzer<'a> {
             accepted_functions: HashSet::new(),
             accepted_methods: HashSet::new(),
             accepted_initializers: HashSet::new(),
+            accepted_trait_methods: HashSet::new(),
             function_signatures: HashMap::new(),
             initializer_signatures: HashMap::new(),
             current_return_type: None,
@@ -286,7 +301,7 @@ impl<'a> Analyzer<'a> {
             expression_types: HashMap::new(),
             variable_types: HashMap::new(),
             generic_function_calls: HashMap::new(),
-            interface_conversions: HashMap::new(),
+            contract_conversions: HashMap::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -295,7 +310,7 @@ impl<'a> Analyzer<'a> {
         self.register_global_names(program);
         self.resolve_global_functions(program);
         self.register_type_members(program);
-        self.validate_interface_implementations(program);
+        self.validate_contract_implementations(program);
         self.validate_struct_value_layouts(program);
         self.check_declaration_bodies(program);
 
@@ -310,7 +325,7 @@ impl<'a> Analyzer<'a> {
                 expression_types: self.expression_types,
                 variable_types: self.variable_types,
                 generic_function_calls: self.generic_function_calls,
-                interface_conversions: self.interface_conversions,
+                contract_conversions: self.contract_conversions,
             },
             diagnostics: self.diagnostics,
         }
@@ -338,8 +353,10 @@ impl<'a> Analyzer<'a> {
                         self.declare_type_parameters(&type_declaration.type_parameters);
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
-                    self.types
-                        .insert(name.clone(), TypeSymbols::new(ty, type_parameters, false));
+                    self.types.insert(
+                        name.clone(),
+                        TypeSymbols::new(ty, type_parameters, false, false),
+                    );
                     self.accepted_type_declarations
                         .insert(type_declaration.span);
                 }
@@ -357,7 +374,23 @@ impl<'a> Analyzer<'a> {
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
                     self.types
-                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), true));
+                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), true, false));
+                }
+                Declaration::Trait(trait_declaration) => {
+                    let name = &trait_declaration.name.name;
+                    if is_reserved_type_name(name) || self.globals.contains_key(name) {
+                        self.error_with(
+                            DiagnosticCode::DuplicateDeclaration,
+                            format!("duplicate or reserved declaration '{name}'"),
+                            trait_declaration.name.span,
+                        );
+                        continue;
+                    }
+                    let ty = Type::Trait(name.clone());
+                    self.globals
+                        .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
+                    self.types
+                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), false, true));
                 }
                 Declaration::Function(function) => {
                     let name = &function.name.name;
@@ -512,6 +545,10 @@ impl<'a> Analyzer<'a> {
                 self.register_interface_methods(interface);
                 continue;
             }
+            if let Declaration::Trait(trait_declaration) = declaration {
+                self.register_trait_methods(trait_declaration);
+                continue;
+            }
             let (Declaration::Class(type_declaration) | Declaration::Struct(type_declaration)) =
                 declaration
             else {
@@ -535,9 +572,18 @@ impl<'a> Analyzer<'a> {
                 match member {
                     ClassMember::Field(field) => self.register_field(type_declaration, field),
                     ClassMember::Method(method)
-                        if type_declaration.kind == TypeDeclarationKind::Struct =>
+                        if type_declaration.kind == TypeDeclarationKind::Struct
+                            && !type_declaration.interfaces.iter().any(|reference| {
+                                self.types
+                                    .get(&reference.name)
+                                    .is_some_and(|info| info.is_trait)
+                            }) =>
                     {
-                        self.error("methods on structs are not supported in v0.1", method.name.span)
+                        self.error_with(
+                            DiagnosticCode::InvalidTrait,
+                            "methods on structs are not supported in v0.1 unless they implement a trait",
+                            method.name.span,
+                        )
                     }
                     ClassMember::Method(method) => self.register_method(type_declaration, method),
                     ClassMember::Initializer(initializer)
@@ -598,84 +644,174 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn validate_interface_implementations(&mut self, program: &Program) {
+    fn register_trait_methods(&mut self, trait_declaration: &TraitDeclaration) {
+        let Some(info) = self.types.get(&trait_declaration.name.name) else {
+            return;
+        };
+        if !info.is_trait {
+            return;
+        }
+        for method in &trait_declaration.methods {
+            if !self
+                .types
+                .get_mut(&trait_declaration.name.name)
+                .is_some_and(|info| info.member_names.insert(method.name.name.clone()))
+            {
+                self.error_with(
+                    DiagnosticCode::DuplicateDeclaration,
+                    format!(
+                        "duplicate method '{}' in trait '{}'",
+                        method.name.name, trait_declaration.name.name
+                    ),
+                    method.name.span,
+                );
+                continue;
+            }
+            self.accepted_trait_methods.insert(method.span);
+            let parameters = method
+                .parameters
+                .iter()
+                .map(|parameter| self.resolve_type_reference(&parameter.type_reference, false))
+                .collect::<Vec<_>>();
+            let return_type = method
+                .return_type
+                .as_ref()
+                .map(|ty| self.resolve_type_reference(ty, true))
+                .unwrap_or(Type::Void);
+            let signature = FunctionType::new(parameters, return_type);
+            if let Some(info) = self.types.get_mut(&trait_declaration.name.name) {
+                info.methods.insert(method.name.name.clone(), signature);
+            }
+        }
+    }
+
+    fn validate_contract_implementations(&mut self, program: &Program) {
         for declaration in &program.declarations {
-            let (Declaration::Class(class) | Declaration::Struct(class)) = declaration else {
+            let (Declaration::Class(owner) | Declaration::Struct(owner)) = declaration else {
                 continue;
             };
-            if class.interfaces.is_empty() {
+            if owner.interfaces.is_empty() {
                 continue;
             }
-            if class.kind == TypeDeclarationKind::Struct {
-                for interface in &class.interfaces {
-                    self.error_with(
-                        DiagnosticCode::InvalidInterface,
-                        "only classes can implement interfaces in v0.2",
-                        interface.span,
-                    );
-                }
-                continue;
-            }
-
-            let type_parameters = self
+            let parameters = self
                 .types
-                .get(&class.name.name)
+                .get(&owner.name.name)
                 .map(|info| info.type_parameters.clone())
                 .unwrap_or_default();
-            self.push_type_parameters(&type_parameters);
+            self.push_type_parameters(&parameters);
+            let Some(owner_info) = self.types.get(&owner.name.name).cloned() else {
+                self.pop_type_parameters();
+                continue;
+            };
             let mut seen = HashSet::new();
-            let mut implemented = Vec::new();
-            for reference in &class.interfaces {
+            let mut interfaces = Vec::new();
+            let mut traits = Vec::new();
+            for reference in &owner.interfaces {
                 if !seen.insert(reference.name.clone()) {
                     self.error_with(
-                        DiagnosticCode::InvalidInterface,
-                        format!("interface '{}' is listed more than once", reference.name),
+                        DiagnosticCode::DuplicateDeclaration,
+                        format!(
+                            "'{}' is listed more than once in implements",
+                            reference.name
+                        ),
                         reference.span,
                     );
                     continue;
                 }
-                if !self.types.contains_key(&reference.name)
-                    && self.lookup_type_parameter(&reference.name).is_none()
-                {
+                let Some(contract) = self.types.get(&reference.name).cloned() else {
                     self.error_with(
                         DiagnosticCode::UnknownType,
-                        format!("unknown interface '{}'", reference.name),
+                        format!("unknown interface '{}' or trait", reference.name),
                         reference.span,
                     );
                     continue;
-                }
-                let interface_type = self.resolve_type_reference(reference, false);
-                let Type::Interface(interface_name) = interface_type else {
-                    if !interface_type.is_error() {
+                };
+                if contract.is_interface {
+                    if owner.kind == TypeDeclarationKind::Struct {
                         self.error_with(
                             DiagnosticCode::InvalidInterface,
-                            format!("'{}' is not an interface", reference.name),
+                            "only classes can implement interfaces in v0.2",
                             reference.span,
                         );
+                        continue;
                     }
-                    continue;
-                };
-                let Some(interface_info) = self.types.get(&interface_name).cloned() else {
-                    continue;
-                };
-                if !interface_info.is_interface {
+                    self.resolve_type_reference(reference, false);
+                    interfaces.push((reference, contract));
+                } else if contract.is_trait {
+                    self.resolve_type_reference(reference, false);
+                    traits.push((reference, contract));
+                } else {
                     self.error_with(
-                        DiagnosticCode::InvalidInterface,
-                        format!("'{}' is not an interface", interface_name),
+                        DiagnosticCode::InvalidTrait,
+                        format!("'{}' is not an interface or trait", reference.name),
                         reference.span,
                     );
-                    continue;
                 }
-                let Some(class_info) = self.types.get(&class.name.name).cloned() else {
-                    continue;
-                };
-                let Some(interface_declaration) =
+            }
+            self.pop_type_parameters();
+
+            let mut implemented_interfaces = Vec::new();
+            for (reference, interface_info) in interfaces {
+                let mut conforms = true;
+                let interface =
                     program
                         .declarations
                         .iter()
                         .find_map(|declaration| match declaration {
                             Declaration::Interface(candidate)
-                                if candidate.name.name == interface_name =>
+                                if candidate.name.name == reference.name =>
+                            {
+                                Some(candidate)
+                            }
+                            _ => None,
+                        });
+                if let Some(interface) = interface {
+                    for required in &interface.methods {
+                        let name = &required.name.name;
+                        let required_signature = interface_info.methods.get(name);
+                        match (required_signature, owner_info.methods.get(name)) {
+                            (Some(expected), Some(actual)) if expected == actual => {}
+                            (Some(_), Some(_)) => {
+                                self.error_with(
+                                    DiagnosticCode::InvalidInterface,
+                                    format!(
+                                        "method '{}.{}' has an incompatible signature for interface '{}'",
+                                        owner.name.name, name, reference.name
+                                    ),
+                                    self.method_span(owner, name).unwrap_or(reference.span),
+                                );
+                                conforms = false;
+                            }
+                            (Some(_), None) => {
+                                self.error_with(
+                                    DiagnosticCode::InvalidInterface,
+                                    format!(
+                                        "type '{}' does not implement required method '{}.{}'",
+                                        owner.name.name, reference.name, name
+                                    ),
+                                    reference.span,
+                                );
+                                conforms = false;
+                            }
+                            (None, _) => {}
+                        }
+                    }
+                }
+                if conforms {
+                    implemented_interfaces.push(reference.name.clone());
+                }
+            }
+
+            let mut requirements: HashMap<String, Vec<(String, FunctionType, bool, SourceSpan)>> =
+                HashMap::new();
+            for (reference, trait_info) in &traits {
+                let Some(trait_declaration) =
+                    program
+                        .declarations
+                        .iter()
+                        .find_map(|declaration| match declaration {
+                            Declaration::Trait(candidate)
+                                if candidate.name.name == reference.name =>
                             {
                                 Some(candidate)
                             }
@@ -684,57 +820,142 @@ impl<'a> Analyzer<'a> {
                 else {
                     continue;
                 };
+                for method in &trait_declaration.methods {
+                    if let Some(signature) = trait_info.methods.get(&method.name.name) {
+                        requirements
+                            .entry(method.name.name.clone())
+                            .or_default()
+                            .push((
+                                reference.name.clone(),
+                                signature.clone(),
+                                method.body.is_some(),
+                                method.name.span,
+                            ));
+                    }
+                }
+            }
+
+            let mut default_trait_methods = HashMap::new();
+            for (method_name, methods) in &requirements {
+                let explicit = owner_info.methods.get(method_name);
+                let defaults = methods
+                    .iter()
+                    .filter(|(_, _, has_body, _)| *has_body)
+                    .collect::<Vec<_>>();
+                let selected_signature = if let Some(explicit) = explicit {
+                    for (trait_name, expected, _, _) in methods {
+                        if explicit != expected {
+                            self.error_with(
+                                DiagnosticCode::InvalidTrait,
+                                format!(
+                                    "method '{}.{}' has an incompatible signature for trait '{}'",
+                                    owner.name.name, method_name, trait_name
+                                ),
+                                self.method_span(owner, method_name)
+                                    .unwrap_or(owner.name.span),
+                            );
+                        }
+                    }
+                    Some(explicit.clone())
+                } else if defaults.len() > 1 {
+                    let providers = defaults
+                        .iter()
+                        .map(|(name, _, _, _)| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("', '");
+                    self.error_with(
+                        DiagnosticCode::InvalidTrait,
+                        format!(
+                            "ambiguous default method '{}': traits '{}' provide it; implement the method explicitly",
+                            method_name, providers
+                        ),
+                        defaults[1].3,
+                    );
+                    None
+                } else if let Some((trait_name, signature, _, _)) = defaults.first() {
+                    for (required_trait, expected, _, _) in methods {
+                        if signature != expected {
+                            self.error_with(
+                                DiagnosticCode::InvalidTrait,
+                                format!(
+                                    "default method '{}.{}' has an incompatible signature for trait '{}'",
+                                    trait_name, method_name, required_trait
+                                ),
+                                self.method_span(owner, method_name).unwrap_or(owner.name.span),
+                            );
+                        }
+                    }
+                    default_trait_methods.insert(method_name.clone(), trait_name.clone());
+                    Some(signature.clone())
+                } else {
+                    None
+                };
+
+                if selected_signature.is_none() && defaults.is_empty() && explicit.is_none() {
+                    for (trait_name, _, _, span) in methods {
+                        self.error_with(
+                            DiagnosticCode::InvalidTrait,
+                            format!(
+                                "type '{}' does not implement required method '{}.{}'",
+                                owner.name.name, trait_name, method_name
+                            ),
+                            *span,
+                        );
+                    }
+                }
+            }
+
+            let mut implemented_traits = Vec::new();
+            for (reference, trait_info) in traits {
                 let mut conforms = true;
-                for required_method in &interface_declaration.methods {
-                    let required_name = &required_method.name.name;
-                    let Some(required_signature) = interface_info.methods.get(required_name) else {
-                        continue;
-                    };
-                    let Some(implementation) = class_info.methods.get(required_name) else {
-                        self.error_with(
-                            DiagnosticCode::InvalidInterface,
-                            format!(
-                                "class '{}' does not implement required method '{}.{}'",
-                                class.name.name, interface_name, required_name
-                            ),
-                            reference.span,
-                        );
-                        conforms = false;
-                        continue;
-                    };
-                    if implementation != required_signature {
-                        let method_span = class
-                            .members
-                            .iter()
-                            .find_map(|member| match member {
-                                ClassMember::Method(method)
-                                    if method.name.name == *required_name =>
-                                {
-                                    Some(method.name.span)
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(reference.span);
-                        self.error_with(
-                            DiagnosticCode::InvalidInterface,
-                            format!(
-                                "method '{}.{}' has an incompatible signature for interface '{}'",
-                                class.name.name, required_name, interface_name
-                            ),
-                            method_span,
-                        );
-                        conforms = false;
+                let trait_declaration =
+                    program
+                        .declarations
+                        .iter()
+                        .find_map(|declaration| match declaration {
+                            Declaration::Trait(candidate)
+                                if candidate.name.name == reference.name =>
+                            {
+                                Some(candidate)
+                            }
+                            _ => None,
+                        });
+                if let Some(trait_declaration) = trait_declaration {
+                    for method in &trait_declaration.methods {
+                        let Some(required) = trait_info.methods.get(&method.name.name) else {
+                            continue;
+                        };
+                        let effective = owner_info.methods.get(&method.name.name).or_else(|| {
+                            default_trait_methods
+                                .get(&method.name.name)
+                                .and_then(|provider| {
+                                    self.types
+                                        .get(provider)
+                                        .and_then(|info| info.methods.get(&method.name.name))
+                                })
+                        });
+                        if effective != Some(required) {
+                            conforms = false;
+                        }
                     }
                 }
                 if conforms {
-                    implemented.push(interface_name);
+                    implemented_traits.push(reference.name.clone());
                 }
             }
-            self.pop_type_parameters();
-            if let Some(info) = self.types.get_mut(&class.name.name) {
-                info.implemented_interfaces = implemented;
+            if let Some(info) = self.types.get_mut(&owner.name.name) {
+                info.implemented_interfaces = implemented_interfaces;
+                info.implemented_traits = implemented_traits;
+                info.default_trait_methods = default_trait_methods;
             }
         }
+    }
+
+    fn method_span(&self, owner: &TypeDeclaration, name: &str) -> Option<SourceSpan> {
+        owner.members.iter().find_map(|member| match member {
+            ClassMember::Method(method) if method.name.name == name => Some(method.name.span),
+            _ => None,
+        })
     }
 
     fn declare_type_parameters(
@@ -1078,6 +1299,9 @@ impl<'a> Analyzer<'a> {
                 {
                     self.check_type_bodies(type_declaration);
                 }
+                Declaration::Trait(trait_declaration) => {
+                    self.check_trait_bodies(trait_declaration);
+                }
                 _ => {}
             }
         }
@@ -1135,6 +1359,28 @@ impl<'a> Analyzer<'a> {
         self.pop_type_parameters();
     }
 
+    fn check_trait_bodies(&mut self, trait_declaration: &TraitDeclaration) {
+        let Some(info) = self.types.get(&trait_declaration.name.name).cloned() else {
+            return;
+        };
+        for method in &trait_declaration.methods {
+            if !self.accepted_trait_methods.contains(&method.span) {
+                continue;
+            }
+            let (Some(body), Some(signature)) =
+                (method.body.as_ref(), info.methods.get(&method.name.name))
+            else {
+                continue;
+            };
+            self.check_routine(
+                &method.parameters,
+                body,
+                signature,
+                Some(Type::Trait(trait_declaration.name.name.clone())),
+            );
+        }
+    }
+
     fn check_routine(
         &mut self,
         parameters: &[crate::ast::Parameter],
@@ -1150,6 +1396,7 @@ impl<'a> Analyzer<'a> {
         self.push_scope();
 
         if let Some(owner_type) = owner {
+            let mutable_self = !owner_type.is_struct() && !matches!(owner_type, Type::Trait(_));
             self.declare_local(
                 "self",
                 &Identifier {
@@ -1157,7 +1404,7 @@ impl<'a> Analyzer<'a> {
                     span: body.span,
                 },
                 owner_type,
-                true,
+                mutable_self,
                 true,
             );
         }
@@ -1376,7 +1623,7 @@ impl<'a> Analyzer<'a> {
             }
         };
 
-        if !self.record_interface_conversion(&target_type, &value_type, assignment.value.span)
+        if !self.record_contract_conversion(&target_type, &value_type, assignment.value.span)
             && !target_type.accepts(&value_type)
         {
             self.error_with(
@@ -1471,7 +1718,9 @@ impl<'a> Analyzer<'a> {
             ExpressionKind::Identifier(identifier) => self
                 .lookup_variable(&identifier.name)
                 .is_some_and(|symbol| symbol.mutable),
-            ExpressionKind::SelfValue => self.current_type.is_some(),
+            ExpressionKind::SelfValue => self
+                .lookup_variable("self")
+                .is_some_and(|symbol| symbol.mutable),
             ExpressionKind::Member { object, .. } => self.is_mutable_base(object),
             ExpressionKind::Index { object, .. } => {
                 matches!(
@@ -1526,7 +1775,7 @@ impl<'a> Analyzer<'a> {
             ExpressionKind::Identifier(identifier) => self.check_identifier(identifier),
             ExpressionKind::SelfValue => self.current_type.clone().unwrap_or_else(|| {
                 self.error(
-                    "self is only available inside a class or struct method",
+                    "self is only available inside a class, struct, or trait default method",
                     expression.span,
                 );
                 Type::Error
@@ -1737,10 +1986,21 @@ impl<'a> Analyzer<'a> {
             );
             return Type::Error;
         };
-        if info.is_interface {
+        if info.is_interface || info.is_trait {
             self.error_with(
-                DiagnosticCode::InvalidInterface,
-                format!("interface '{type_name}' cannot be instantiated"),
+                if info.is_interface {
+                    DiagnosticCode::InvalidInterface
+                } else {
+                    DiagnosticCode::InvalidTrait
+                },
+                format!(
+                    "{} '{type_name}' cannot be instantiated",
+                    if info.is_interface {
+                        "interface"
+                    } else {
+                        "trait"
+                    }
+                ),
                 type_reference.span,
             );
             for initializer in fields {
@@ -1824,10 +2084,22 @@ impl<'a> Analyzer<'a> {
                         let Some(info) = self.types.get(&name.name).cloned() else {
                             return Type::Error;
                         };
-                        if info.is_interface {
+                        if info.is_interface || info.is_trait {
                             self.error_with(
-                                DiagnosticCode::InvalidInterface,
-                                format!("interface '{}' cannot be instantiated", name.name),
+                                if info.is_interface {
+                                    DiagnosticCode::InvalidInterface
+                                } else {
+                                    DiagnosticCode::InvalidTrait
+                                },
+                                format!(
+                                    "{} '{}' cannot be instantiated",
+                                    if info.is_interface {
+                                        "interface"
+                                    } else {
+                                        "trait"
+                                    },
+                                    name.name
+                                ),
                                 call_span,
                             );
                             for argument in arguments {
@@ -1915,10 +2187,22 @@ impl<'a> Analyzer<'a> {
                         let Some(info) = self.types.get(&identifier.name) else {
                             return Type::Error;
                         };
-                        if info.is_interface {
+                        if info.is_interface || info.is_trait {
                             self.error_with(
-                                DiagnosticCode::InvalidInterface,
-                                format!("interface '{}' cannot be instantiated", identifier.name),
+                                if info.is_interface {
+                                    DiagnosticCode::InvalidInterface
+                                } else {
+                                    DiagnosticCode::InvalidTrait
+                                },
+                                format!(
+                                    "{} '{}' cannot be instantiated",
+                                    if info.is_interface {
+                                        "interface"
+                                    } else {
+                                        "trait"
+                                    },
+                                    identifier.name
+                                ),
                                 call_span,
                             );
                             for argument in arguments {
@@ -2383,7 +2667,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn require_type(&mut self, expected: &Type, actual: &Type, span: SourceSpan, context: &str) {
-        if self.record_interface_conversion(expected, actual, span) || expected.accepts(actual) {
+        if self.record_contract_conversion(expected, actual, span) || expected.accepts(actual) {
             return;
         }
         self.error_with(
@@ -2393,35 +2677,44 @@ impl<'a> Analyzer<'a> {
         );
     }
 
-    fn record_interface_conversion(
+    fn record_contract_conversion(
         &mut self,
         expected: &Type,
         actual: &Type,
         span: SourceSpan,
     ) -> bool {
-        let Type::Interface(interface_name) = expected else {
-            return false;
+        let (contract_name, is_interface) = match expected {
+            Type::Interface(name) => (name.as_str(), true),
+            Type::Trait(name) => (name.as_str(), false),
+            _ => return false,
         };
         let Some(class_name) = actual.nominal_name() else {
             return false;
         };
-        if !matches!(
+        let source_is_class = matches!(
             actual,
             Type::Class(_)
                 | Type::GenericInstance {
                     constructor: GenericTypeConstructor::Class(_),
                     ..
                 }
-        ) {
+        );
+        let source_is_struct = actual.is_struct();
+        if (is_interface && !source_is_class)
+            || (!is_interface && !source_is_class && !source_is_struct)
+        {
             return false;
         }
         let conforms = self.types.get(class_name).is_some_and(|info| {
-            info.implemented_interfaces
-                .iter()
-                .any(|name| name == interface_name)
+            let implementations = if is_interface {
+                &info.implemented_interfaces
+            } else {
+                &info.implemented_traits
+            };
+            implementations.iter().any(|name| name == contract_name)
         });
         if conforms {
-            self.interface_conversions.insert(span, expected.clone());
+            self.contract_conversions.insert(span, expected.clone());
         }
         conforms
     }
@@ -2913,7 +3206,7 @@ fn main() {
         let value = view.initializer.as_ref().expect("interface initializer");
         assert!(result
             .typed_program
-            .interface_conversion(value.span)
+            .contract_conversion(value.span)
             .is_some_and(|ty| ty == &Type::Interface("Drawable".to_owned())));
     }
 
@@ -2956,6 +3249,117 @@ fn main() {}"#,
             &result,
             "only classes can implement interfaces in v0.2"
         ));
+    }
+
+    #[test]
+    fn checks_trait_defaults_overrides_multiple_traits_and_trait_values() {
+        let result = analyze_text(
+            r#"trait Named {
+    fn name() -> String
+    fn describe() { println(self.name()) }
+}
+trait Tagged {
+    fn tag() -> String
+    fn label() { println(self.tag()) }
+}
+class User implements Named, Tagged {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn tag() -> String { return "user" }
+    fn describe() { println("custom: " + self.name()) }
+}
+struct Point implements Named {
+    value: String
+    fn name() -> String { return self.value }
+}
+fn show(value: Named) { value.describe() }
+fn main() {
+    let user = User("Ada")
+    let named: Named = user
+    show(user)
+    named.describe()
+    let point = Point("origin")
+    let pointName: Named = point
+    pointName.describe()
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        let user = result
+            .typed_program
+            .symbols
+            .type_symbols("User")
+            .expect("class symbols");
+        assert_eq!(user.implemented_traits, ["Named", "Tagged"]);
+        assert_eq!(
+            user.default_trait_methods.get("label"),
+            Some(&"Tagged".to_owned())
+        );
+        let point = result
+            .typed_program
+            .symbols
+            .type_symbols("Point")
+            .expect("struct symbols");
+        assert_eq!(point.implemented_traits, ["Named"]);
+        assert_eq!(
+            point.default_trait_methods.get("describe"),
+            Some(&"Named".to_owned())
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 1)),
+            Some(&Type::Trait("Named".to_owned()))
+        );
+    }
+
+    #[test]
+    fn diagnoses_trait_conflicts_missing_methods_and_invalid_declarations() {
+        let result = analyze_text(
+            r#"trait First { fn speak() { println("first") } }
+trait Second { fn speak() { println("second") } }
+trait Required { fn run(value: Int) -> Int }
+class Ambiguous implements First, Second {}
+class Missing implements Required {}
+class Invalid implements Absent {}
+class NotATrait {}
+class InvalidTarget implements NotATrait {}
+class Repeated implements Required, Required { fn run(value: Int) -> Int { return value } }
+class WrongSignature implements Required { fn run(value: String) -> Int { return 1 } }
+struct AlsoMissing implements Required { value: Int }
+fn main() {
+    let value = Required()
+}"#,
+        );
+        assert!(has_message(&result, "ambiguous default method 'speak'"));
+        assert!(has_message(
+            &result,
+            "does not implement required method 'Required.run'"
+        ));
+        assert!(has_message(&result, "unknown interface 'Absent' or trait"));
+        assert!(has_message(&result, "is not an interface or trait"));
+        assert!(has_message(&result, "listed more than once in implements"));
+        assert!(has_message(
+            &result,
+            "incompatible signature for trait 'Required'"
+        ));
+        assert!(has_message(
+            &result,
+            "trait 'Required' cannot be instantiated"
+        ));
+    }
+
+    #[test]
+    fn explicit_trait_method_resolves_conflicting_defaults() {
+        let result = analyze_text(
+            r#"trait First { fn speak() { println("first") } }
+trait Second { fn speak() { println("second") } }
+class Combined implements First, Second {
+    fn speak() { println("combined") }
+}
+fn main() { let value: First = Combined(); value.speak() }"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
     }
 
     #[test]

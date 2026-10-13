@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ast::{
     AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
     ExpressionKind, ExternalFunctionDeclaration, FunctionDeclaration, InitializerDeclaration,
-    InterfaceDeclaration, Literal, Statement, StatementKind, TypeDeclaration, UnaryOperator,
+    InterfaceDeclaration, Literal, Statement, StatementKind, TraitDeclaration,
+    TraitMethodDeclaration, TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
@@ -320,7 +321,7 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let (functions, classes, structs, interfaces, external_functions) =
+        let (functions, classes, structs, interfaces, traits, external_functions) =
             self.supported_declarations()?;
         let main = functions
             .iter()
@@ -383,6 +384,28 @@ impl<'a> IrGenerator<'a> {
                 continue;
             }
             definitions.extend(self.emit_class_routines(class, &mut generic_calls)?);
+            definitions.extend(self.emit_trait_defaults(
+                class,
+                &Type::Class(class.name.name.clone()),
+                self.typed,
+                &mut generic_calls,
+            )?);
+        }
+        for structure in &structs {
+            if self
+                .typed
+                .symbols
+                .type_symbols(&structure.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                definitions.extend(self.emit_struct_routines(structure, &mut generic_calls)?);
+                definitions.extend(self.emit_trait_defaults(
+                    structure,
+                    &Type::Struct(structure.name.name.clone()),
+                    self.typed,
+                    &mut generic_calls,
+                )?);
+            }
         }
 
         let mut pending = VecDeque::new();
@@ -538,6 +561,12 @@ impl<'a> IrGenerator<'a> {
                 interface_type_name(&interface.name.name)
             ));
         }
+        for trait_declaration in &traits {
+            ir.push_str(&format!(
+                "{} = type {{ ptr, ptr }}\n",
+                trait_type_name(&trait_declaration.name.name)
+            ));
+        }
         for structure in &structs {
             if self
                 .typed
@@ -593,6 +622,22 @@ impl<'a> IrGenerator<'a> {
                     class,
                     &Type::Class(class.name.name.clone()),
                     &interfaces,
+                    &traits,
+                )?);
+            }
+        }
+        for structure in &structs {
+            if self
+                .typed
+                .symbols
+                .type_symbols(&structure.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.interface_vtables(
+                    structure,
+                    &Type::Struct(structure.name.name.clone()),
+                    &interfaces,
+                    &traits,
                 )?);
             }
         }
@@ -606,7 +651,21 @@ impl<'a> IrGenerator<'a> {
                     continue;
                 };
                 if let Some(class) = classes.iter().find(|class| class.name.name == name) {
-                    ir.push_str(&self.interface_vtables(class, ty, &interfaces)?);
+                    ir.push_str(&self.interface_vtables(class, ty, &interfaces, &traits)?);
+                }
+            }
+        }
+        for ty in &concrete_types {
+            if let Type::GenericInstance {
+                constructor: GenericTypeConstructor::Struct(_),
+                ..
+            } = ty
+            {
+                let Some(name) = ty.nominal_name() else {
+                    continue;
+                };
+                if let Some(structure) = structs.iter().find(|item| item.name.name == name) {
+                    ir.push_str(&self.interface_vtables(structure, ty, &interfaces, &traits)?);
                 }
             }
         }
@@ -724,6 +783,7 @@ impl<'a> IrGenerator<'a> {
             Vec<&'a TypeDeclaration>,
             Vec<&'a TypeDeclaration>,
             Vec<&'a InterfaceDeclaration>,
+            Vec<&'a TraitDeclaration>,
             Vec<&'a ExternalFunctionDeclaration>,
         ),
         Diagnostic,
@@ -732,23 +792,27 @@ impl<'a> IrGenerator<'a> {
         let mut classes = Vec::new();
         let mut structs = Vec::new();
         let mut interfaces = Vec::new();
+        let mut traits = Vec::new();
         let mut external_functions = Vec::new();
         for declaration in &self.typed.program.declarations {
             match declaration {
                 Declaration::Function(function) => functions.push(function),
                 Declaration::Class(item) => classes.push(item),
                 Declaration::Struct(item) => {
-                    if item.members.iter().any(|member| {
-                        matches!(member, ClassMember::Method(_) | ClassMember::Initializer(_))
-                    }) {
+                    if item
+                        .members
+                        .iter()
+                        .any(|member| matches!(member, ClassMember::Initializer(_)))
+                    {
                         return Err(self.error(
-                            "struct methods and init constructors are not supported in v0.1",
+                            "struct init constructors are not supported in v0.2",
                             item.name.span,
                         ));
                     }
                     structs.push(item);
                 }
                 Declaration::Interface(item) => interfaces.push(item),
+                Declaration::Trait(item) => traits.push(item),
                 Declaration::Import(item) => {
                     let span = item.path.first().map_or(item.span, |name| name.span);
                     let resolved_module = match item.path.as_slice() {
@@ -770,7 +834,14 @@ impl<'a> IrGenerator<'a> {
                 }
             }
         }
-        Ok((functions, classes, structs, interfaces, external_functions))
+        Ok((
+            functions,
+            classes,
+            structs,
+            interfaces,
+            traits,
+            external_functions,
+        ))
     }
 
     fn external_declaration(
@@ -1007,7 +1078,7 @@ impl<'a> IrGenerator<'a> {
         if !matches!(
             instance,
             Type::GenericInstance {
-                constructor: GenericTypeConstructor::Class(_),
+                constructor: GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_),
                 ..
             }
         ) {
@@ -1059,6 +1130,15 @@ impl<'a> IrGenerator<'a> {
                     );
                 }
                 ClassMember::Initializer(initializer) => {
+                    if !matches!(
+                        instance,
+                        Type::GenericInstance {
+                            constructor: GenericTypeConstructor::Class(_),
+                            ..
+                        }
+                    ) {
+                        continue;
+                    }
                     if let Some(signature) = info.initializer.as_ref() {
                         let substitutions = info
                             .type_parameters
@@ -1106,7 +1186,21 @@ impl<'a> IrGenerator<'a> {
                     Type::Void,
                 )
             });
-        output.push(self.emit_generic_constructor(instance, &signature, &info)?);
+        if matches!(
+            instance,
+            Type::GenericInstance {
+                constructor: GenericTypeConstructor::Class(_),
+                ..
+            }
+        ) {
+            output.push(self.emit_generic_constructor(instance, &signature, &info)?);
+        }
+        output.extend(self.emit_trait_defaults(
+            declaration,
+            instance,
+            specialized_typed,
+            generic_calls,
+        )?);
         Ok(output)
     }
 
@@ -1218,15 +1312,16 @@ impl<'a> IrGenerator<'a> {
 
     fn interface_vtables(
         &self,
-        class: &TypeDeclaration,
-        class_type: &Type,
+        owner: &TypeDeclaration,
+        owner_type: &Type,
         interfaces: &[&InterfaceDeclaration],
+        traits: &[&TraitDeclaration],
     ) -> Result<String, Diagnostic> {
         let info = self
             .typed
             .symbols
-            .type_symbols(&class.name.name)
-            .ok_or_else(|| self.error("missing semantic class symbols", class.name.span))?;
+            .type_symbols(&owner.name.name)
+            .ok_or_else(|| self.error("missing semantic type symbols", owner.name.span))?;
         let mut output = String::new();
         for interface_name in &info.implemented_interfaces {
             let interface = interfaces
@@ -1236,15 +1331,15 @@ impl<'a> IrGenerator<'a> {
                     self.error_with(
                         DiagnosticCode::InternalCompiler,
                         INTERNAL_CODEGEN_MESSAGE,
-                        class.name.span,
+                        owner.name.span,
                     )
                 })?;
-            let symbol = interface_vtable_name(class_type, interface_name).ok_or_else(|| {
-                self.error("could not name interface dispatch table", class.name.span)
+            let symbol = interface_vtable_name(owner_type, interface_name).ok_or_else(|| {
+                self.error("could not name interface dispatch table", owner.name.span)
             })?;
             let mut entries = Vec::with_capacity(interface.methods.len());
             for method in &interface.methods {
-                let method_exists = class.members.iter().any(|member| {
+                let method_exists = owner.members.iter().any(|member| {
                     matches!(member, ClassMember::Method(implementation) if implementation.name.name == method.name.name)
                 });
                 if !method_exists {
@@ -1254,7 +1349,7 @@ impl<'a> IrGenerator<'a> {
                         method.name.span,
                     ));
                 }
-                let implementation = method_name_for_type(class_type, &method.name.name)
+                let implementation = method_name_for_type(owner_type, &method.name.name)
                     .ok_or_else(|| {
                         self.error(
                             "could not resolve interface implementation symbol",
@@ -1269,7 +1364,118 @@ impl<'a> IrGenerator<'a> {
                 entries.join(", ")
             ));
         }
+        for trait_name in &info.implemented_traits {
+            let trait_declaration = traits
+                .iter()
+                .find(|candidate| candidate.name.name == *trait_name)
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        owner.name.span,
+                    )
+                })?;
+            let symbol = trait_vtable_name(owner_type, trait_name).ok_or_else(|| {
+                self.error("could not name trait dispatch table", owner.name.span)
+            })?;
+            let mut entries = Vec::with_capacity(trait_declaration.methods.len());
+            for method in &trait_declaration.methods {
+                let implementation = if info.methods.contains_key(&method.name.name) {
+                    method_name_for_type(owner_type, &method.name.name)
+                } else {
+                    info.default_trait_methods
+                        .get(&method.name.name)
+                        .and_then(|provider| {
+                            trait_default_method_name(owner_type, provider, &method.name.name)
+                        })
+                }
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        method.name.span,
+                    )
+                })?;
+                if owner.kind == crate::ast::TypeDeclarationKind::Struct {
+                    let signature = self
+                        .typed
+                        .symbols
+                        .type_symbols(trait_name)
+                        .and_then(|trait_info| trait_info.methods.get(&method.name.name))
+                        .ok_or_else(|| {
+                            self.error_with(
+                                DiagnosticCode::InternalCompiler,
+                                INTERNAL_CODEGEN_MESSAGE,
+                                method.name.span,
+                            )
+                        })?;
+                    let thunk = trait_struct_thunk_name(owner_type, trait_name, &method.name.name)
+                        .ok_or_else(|| {
+                            self.error("could not name struct trait adapter", method.name.span)
+                        })?;
+                    output.push_str(&self.emit_struct_trait_thunk(
+                        owner_type,
+                        trait_name,
+                        &method.name.name,
+                        signature,
+                        &implementation,
+                        method.name.span,
+                    )?);
+                    entries.push(format!("ptr @{thunk}"));
+                } else {
+                    entries.push(format!("ptr @{implementation}"));
+                }
+            }
+            output.push_str(&format!(
+                "@{symbol} = private constant [{} x ptr] [{}]\n",
+                entries.len(),
+                entries.join(", ")
+            ));
+        }
         Ok(output)
+    }
+
+    fn emit_struct_trait_thunk(
+        &self,
+        owner_type: &Type,
+        trait_name: &str,
+        method_name: &str,
+        signature: &FunctionType,
+        implementation: &str,
+        span: SourceSpan,
+    ) -> Result<String, Diagnostic> {
+        let self_type = llvm_type(owner_type, span, self.source)?;
+        let return_type = llvm_type(&signature.return_type, span, self.source)?;
+        let thunk = trait_struct_thunk_name(owner_type, trait_name, method_name)
+            .ok_or_else(|| self.error("could not name struct trait adapter", span))?;
+        let mut parameters = vec!["ptr %data".to_owned()];
+        let mut call_arguments = Vec::new();
+        for (index, parameter_type) in signature.parameters.iter().enumerate() {
+            let llvm_parameter_type = llvm_type(parameter_type, span, self.source)?;
+            parameters.push(format!("{llvm_parameter_type} %arg{index}"));
+            call_arguments.push(format!("{llvm_parameter_type} %arg{index}"));
+        }
+        let call_value = if return_type == "void" {
+            String::new()
+        } else {
+            "%result = ".to_owned()
+        };
+        let call = format!(
+            "{call_value}call {return_type} @{implementation}({})",
+            std::iter::once(format!("{self_type} %self"))
+                .chain(call_arguments)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let ret = if return_type == "void" {
+            "ret void".to_owned()
+        } else {
+            format!("ret {return_type} %result")
+        };
+        Ok(format!(
+            "define internal {return_type} @{thunk}({}) {{\nentry:\n  %self = load {self_type}, ptr %data\n  {call}\n  {ret}\n}}\n",
+            parameters.join(", ")
+        ))
     }
 
     fn emit_class_routines(
@@ -1318,6 +1524,102 @@ impl<'a> IrGenerator<'a> {
             }
         }
         output.push(self.emit_constructor(class)?);
+        Ok(output)
+    }
+
+    fn emit_struct_routines(
+        &mut self,
+        structure: &TypeDeclaration,
+        generic_calls: &mut Vec<GenericCallRequest>,
+    ) -> Result<Vec<String>, Diagnostic> {
+        let Some(info) = self
+            .typed
+            .symbols
+            .type_symbols(&structure.name.name)
+            .cloned()
+        else {
+            return Err(self.error("missing semantic struct symbols", structure.name.span));
+        };
+        let owner = Type::Struct(structure.name.name.clone());
+        let mut output = Vec::new();
+        for member in &structure.members {
+            if let ClassMember::Method(method) = member {
+                let Some(signature) = info.methods.get(&method.name.name) else {
+                    continue;
+                };
+                output.push(
+                    FunctionEmitter::new(self.typed, self.source, &mut self.strings, generic_calls)
+                        .emit_method_for_instance(method, &owner, signature)?,
+                );
+            }
+        }
+        Ok(output)
+    }
+
+    fn emit_trait_defaults(
+        &mut self,
+        owner_declaration: &TypeDeclaration,
+        owner_type: &Type,
+        typed: &TypedProgram,
+        generic_calls: &mut Vec<GenericCallRequest>,
+    ) -> Result<Vec<String>, Diagnostic> {
+        let Some(owner_info) = self
+            .typed
+            .symbols
+            .type_symbols(&owner_declaration.name.name)
+            .cloned()
+        else {
+            return Err(self.error(
+                "missing semantic trait implementation symbols",
+                owner_declaration.name.span,
+            ));
+        };
+        let mut output = Vec::new();
+        for (method_name, trait_name) in &owner_info.default_trait_methods {
+            let trait_declaration = self
+                .typed
+                .program
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Trait(item) if item.name.name == *trait_name => Some(item),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        owner_declaration.name.span,
+                    )
+                })?;
+            let method = trait_declaration
+                .methods
+                .iter()
+                .find(|method| method.name.name == *method_name && method.body.is_some())
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        owner_declaration.name.span,
+                    )
+                })?;
+            let signature = self
+                .typed
+                .symbols
+                .type_symbols(trait_name)
+                .and_then(|info| info.methods.get(method_name))
+                .ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        method.name.span,
+                    )
+                })?;
+            output.push(
+                FunctionEmitter::new(typed, self.source, &mut self.strings, generic_calls)
+                    .emit_trait_default(method, owner_type, trait_name, signature)?,
+            );
+        }
         Ok(output)
     }
 
@@ -1428,6 +1730,7 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::String => Ok("ptr".to_owned()),
         Type::Class(_) => Ok("ptr".to_owned()),
         Type::Interface(name) => Ok(interface_type_name(name)),
+        Type::Trait(name) => Ok(trait_type_name(name)),
         Type::GenericInstance {
             constructor: GenericTypeConstructor::List,
             arguments,
@@ -1490,6 +1793,7 @@ fn mangled_type(ty: &Type) -> Option<String> {
         Type::Class(name) => Some(format!("c{}_{}", name.len(), encode_identifier(name))),
         Type::Struct(name) => Some(format!("u{}_{}", name.len(), encode_identifier(name))),
         Type::Interface(name) => Some(format!("n{}_{}", name.len(), encode_identifier(name))),
+        Type::Trait(name) => Some(format!("t{}_{}", name.len(), encode_identifier(name))),
         Type::GenericInstance {
             constructor: GenericTypeConstructor::Class(name),
             arguments,
@@ -1611,12 +1915,47 @@ fn interface_type_name(name: &str) -> String {
     format!("%princi.interface.{}", encode_identifier(name))
 }
 
+fn trait_type_name(name: &str) -> String {
+    format!("%princi.trait.{}", encode_identifier(name))
+}
+
 fn interface_vtable_name(class_type: &Type, interface_name: &str) -> Option<String> {
     Some(format!(
         "princi_vtable_{}_i{}_{}",
         mangled_type(class_type)?,
         interface_name.len(),
         encode_identifier(interface_name)
+    ))
+}
+
+fn trait_vtable_name(owner_type: &Type, trait_name: &str) -> Option<String> {
+    Some(format!(
+        "princi_vtable_{}_t{}_{}",
+        mangled_type(owner_type)?,
+        trait_name.len(),
+        encode_identifier(trait_name)
+    ))
+}
+
+fn trait_default_method_name(owner_type: &Type, trait_name: &str, method: &str) -> Option<String> {
+    Some(format!(
+        "princi_trait_default_{}_t{}_{}_m{}_{}",
+        mangled_type(owner_type)?,
+        trait_name.len(),
+        encode_identifier(trait_name),
+        method.len(),
+        encode_identifier(method)
+    ))
+}
+
+fn trait_struct_thunk_name(owner_type: &Type, trait_name: &str, method: &str) -> Option<String> {
+    Some(format!(
+        "princi_trait_struct_thunk_{}_t{}_{}_m{}_{}",
+        mangled_type(owner_type)?,
+        trait_name.len(),
+        encode_identifier(trait_name),
+        method.len(),
+        encode_identifier(method)
     ))
 }
 
@@ -1664,9 +2003,9 @@ fn constructor_name(class_name: &str) -> String {
 
 fn method_name_for_type(owner: &Type, name: &str) -> Option<String> {
     match owner {
-        Type::Class(class_name) => Some(method_name(class_name, name)),
+        Type::Class(class_name) | Type::Struct(class_name) => Some(method_name(class_name, name)),
         Type::GenericInstance {
-            constructor: GenericTypeConstructor::Class(_),
+            constructor: GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_),
             ..
         } => Some(format!(
             "princi_method_{}_{}",
@@ -1674,6 +2013,18 @@ fn method_name_for_type(owner: &Type, name: &str) -> Option<String> {
             encode_identifier(name)
         )),
         _ => None,
+    }
+}
+
+fn effective_method_symbol(typed: &TypedProgram, owner: &Type, name: &str) -> Option<String> {
+    let type_name = owner.nominal_name()?;
+    let info = typed.symbols.type_symbols(type_name)?;
+    if info.methods.contains_key(name) {
+        method_name_for_type(owner, name)
+    } else {
+        info.default_trait_methods
+            .get(name)
+            .and_then(|trait_name| trait_default_method_name(owner, trait_name, name))
     }
 }
 
@@ -1853,15 +2204,56 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let symbol = method_name_for_type(owner, &method.name.name).ok_or_else(|| {
             self.error("could not name specialized class method", method.name.span)
         })?;
+        self.emit_method_with_symbol(method, owner, signature, &symbol, true)
+    }
+
+    fn emit_trait_default(
+        self,
+        method: &TraitMethodDeclaration,
+        owner: &Type,
+        trait_name: &str,
+        signature: &FunctionType,
+    ) -> Result<String, Diagnostic> {
+        let Some(body) = method.body.as_ref() else {
+            return Err(self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                method.name.span,
+            ));
+        };
+        let symbol =
+            trait_default_method_name(owner, trait_name, &method.name.name).ok_or_else(|| {
+                self.error("could not name specialized trait default", method.name.span)
+            })?;
         self.emit_routine(
             &symbol,
+            &format!("{owner}.{trait_name}.{}", method.name.name),
+            method.name.span,
+            &method.parameters,
+            body,
+            signature,
+            Some(owner.clone()),
+            true,
+        )
+    }
+
+    fn emit_method_with_symbol(
+        self,
+        method: &FunctionDeclaration,
+        owner: &Type,
+        signature: &FunctionType,
+        symbol: &str,
+        internal: bool,
+    ) -> Result<String, Diagnostic> {
+        self.emit_routine(
+            symbol,
             &format!("{owner}.{}", method.name.name),
             method.name.span,
             &method.parameters,
             &method.body,
             signature,
             Some(owner.clone()),
-            true,
+            internal,
         )
     }
 
@@ -1932,8 +2324,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
         let return_ty = llvm_type(&signature.return_type, name_span, self.source)?;
         let mut llvm_parameters = Vec::new();
-        if owner.is_some() {
-            llvm_parameters.push("ptr %self".to_owned());
+        if let Some(owner) = owner.as_ref() {
+            let self_type = if owner.is_struct() {
+                llvm_type(owner, name_span, self.source)?
+            } else {
+                "ptr".to_owned()
+            };
+            llvm_parameters.push(format!("{self_type} %self"));
         }
         for (index, (parameter, ty)) in routine_parameters
             .iter()
@@ -1946,8 +2343,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
         self.push_scope();
         if let Some(owner) = owner {
-            let address = self.allocate("ptr");
-            self.instruction(&format!("store ptr %self, ptr {address}"));
+            let self_type = if owner.is_struct() {
+                llvm_type(&owner, name_span, self.source)?
+            } else {
+                "ptr".to_owned()
+            };
+            let address = self.allocate(&self_type);
+            self.instruction(&format!("store {self_type} %self, ptr {address}"));
             self.bind("self", LocalBinding { address, ty: owner });
         }
         for (index, parameter) in routine_parameters.iter().enumerate() {
@@ -2234,40 +2636,61 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
     fn emit_expression(&mut self, expression: &Expression) -> Result<IrValue, Diagnostic> {
         let value = self.emit_expression_raw(expression)?;
-        let Some(target) = self.typed.interface_conversion(expression.span).cloned() else {
+        let Some(target) = self.typed.contract_conversion(expression.span).cloned() else {
             return Ok(value);
         };
-        self.emit_interface_conversion(value, target, expression.span)
+        self.emit_contract_conversion(value, target, expression.span)
     }
 
-    fn emit_interface_conversion(
+    fn emit_contract_conversion(
         &mut self,
         value: IrValue,
         target: Type,
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
-        let Type::Interface(interface_name) = &target else {
-            return Err(self.error_with(
-                DiagnosticCode::InternalCompiler,
-                INTERNAL_CODEGEN_MESSAGE,
-                span,
-            ));
+        let vtable = match &target {
+            Type::Interface(name) => interface_vtable_name(&value.ty, name),
+            Type::Trait(name) => trait_vtable_name(&value.ty, name),
+            _ => {
+                return Err(self.error_with(
+                    DiagnosticCode::InternalCompiler,
+                    INTERNAL_CODEGEN_MESSAGE,
+                    span,
+                ));
+            }
         };
-        let symbol = interface_vtable_name(&value.ty, interface_name)
-            .ok_or_else(|| self.error("could not resolve interface dispatch table", span))?;
-        let interface_ty = llvm_type(&target, span, self.source)?;
-        let with_object = self.fresh_value();
-        let interface_value = self.fresh_value();
-        self.instruction(&format!(
-            "{with_object} = insertvalue {interface_ty} zeroinitializer, ptr {}, 0",
+        let symbol =
+            vtable.ok_or_else(|| self.error("could not resolve contract dispatch table", span))?;
+        let contract_ty = llvm_type(&target, span, self.source)?;
+        let data = if value.ty.is_struct() {
+            let struct_ty = llvm_type(&value.ty, span, self.source)?;
+            let size_end = self.fresh_value();
+            let size = self.fresh_value();
+            let boxed = self.fresh_value();
+            self.instruction(&format!(
+                "{size_end} = getelementptr {struct_ty}, ptr null, i32 1"
+            ));
+            self.instruction(&format!("{size} = ptrtoint ptr {size_end} to i64"));
+            self.instruction(&format!(
+                "{boxed} = call ptr @{}(i64 {size})",
+                crate::runtime::windows_x86_64::object_allocator_function()
+            ));
+            self.instruction(&format!("store {struct_ty} {}, ptr {boxed}", value.operand));
+            boxed
+        } else {
             value.operand
+        };
+        let with_object = self.fresh_value();
+        let contract_value = self.fresh_value();
+        self.instruction(&format!(
+            "{with_object} = insertvalue {contract_ty} zeroinitializer, ptr {data}, 0"
         ));
         self.instruction(&format!(
-            "{interface_value} = insertvalue {interface_ty} {with_object}, ptr @{symbol}, 1"
+            "{contract_value} = insertvalue {contract_ty} {with_object}, ptr @{symbol}, 1"
         ));
         Ok(IrValue {
             ty: target,
-            operand: interface_value,
+            operand: contract_value,
         })
     }
 
@@ -2298,8 +2721,12 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 let binding = self.lookup("self").ok_or_else(|| {
                     self.error("self is unavailable in this routine", expression.span)
                 })?;
+                let ty_name = llvm_type(&binding.ty, expression.span, self.source)?;
                 let result = self.fresh_value();
-                self.instruction(&format!("{result} = load ptr, ptr {}", binding.address));
+                self.instruction(&format!(
+                    "{result} = load {ty_name}, ptr {}",
+                    binding.address
+                ));
                 Ok(IrValue {
                     ty: binding.ty,
                     operand: result,
@@ -3145,7 +3572,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             );
             return self.emit_call_result(call, Type::Void);
         }
-        if let Type::Interface(interface_name) = &receiver.ty {
+        if matches!(receiver.ty, Type::Interface(_) | Type::Trait(_)) {
             let signature = match self.typed.expression_type(callee) {
                 Some(Type::Function(signature)) => signature.clone(),
                 _ => {
@@ -3155,23 +3582,57 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     ));
                 }
             };
-            let interface = self
-                .typed
-                .program
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    Declaration::Interface(interface) if interface.name.name == *interface_name => {
-                        Some(interface)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| self.error("missing interface declaration", member.span))?;
-            let method_index = interface
-                .methods
-                .iter()
-                .position(|method| method.name.name == member.name)
-                .ok_or_else(|| self.error("missing interface dispatch slot", member.span))?;
+            let (method_index, method_count) = match &receiver.ty {
+                Type::Interface(interface_name) => {
+                    let interface = self
+                        .typed
+                        .program
+                        .declarations
+                        .iter()
+                        .find_map(|declaration| match declaration {
+                            Declaration::Interface(interface)
+                                if interface.name.name == *interface_name =>
+                            {
+                                Some(interface)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| self.error("missing interface declaration", member.span))?;
+                    let index = interface
+                        .methods
+                        .iter()
+                        .position(|method| method.name.name == member.name)
+                        .ok_or_else(|| {
+                            self.error("missing interface dispatch slot", member.span)
+                        })?;
+                    (index, interface.methods.len())
+                }
+                Type::Trait(trait_name) => {
+                    let trait_declaration = self
+                        .typed
+                        .program
+                        .declarations
+                        .iter()
+                        .find_map(|declaration| match declaration {
+                            Declaration::Trait(item) if item.name.name == *trait_name => Some(item),
+                            _ => None,
+                        })
+                        .ok_or_else(|| self.error("missing trait declaration", member.span))?;
+                    let index = trait_declaration
+                        .methods
+                        .iter()
+                        .position(|method| method.name.name == member.name)
+                        .ok_or_else(|| self.error("missing trait dispatch slot", member.span))?;
+                    (index, trait_declaration.methods.len())
+                }
+                _ => {
+                    return Err(self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        member.span,
+                    ));
+                }
+            };
             let values = arguments
                 .iter()
                 .map(|argument| self.emit_expression(argument))
@@ -3182,18 +3643,17 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     span,
                 ));
             }
-            let interface_ty = llvm_type(&receiver.ty, member.span, self.source)?;
+            let contract_ty = llvm_type(&receiver.ty, member.span, self.source)?;
             let object = self.fresh_value();
             let table = self.fresh_value();
             self.instruction(&format!(
-                "{object} = extractvalue {interface_ty} {}, 0",
+                "{object} = extractvalue {contract_ty} {}, 0",
                 receiver.operand
             ));
             self.instruction(&format!(
-                "{table} = extractvalue {interface_ty} {}, 1",
+                "{table} = extractvalue {contract_ty} {}, 1",
                 receiver.operand
             ));
-            let method_count = interface.methods.len();
             let slot = self.fresh_value();
             let target = self.fresh_value();
             self.instruction(&format!(
@@ -3244,7 +3704,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         }
         let return_ty = llvm_type(&signature.return_type, span, self.source)?;
-        let mut call_arguments = vec![format!("ptr {}", receiver.operand)];
+        let receiver_argument = if receiver.ty.is_struct() {
+            format!(
+                "{} {}",
+                llvm_type(&receiver.ty, member.span, self.source)?,
+                receiver.operand
+            )
+        } else {
+            format!("ptr {}", receiver.operand)
+        };
+        let mut call_arguments = vec![receiver_argument];
         for (value, ty) in values.iter().zip(&signature.parameters) {
             call_arguments.push(format!(
                 "{} {}",
@@ -3254,8 +3723,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
         let call = format!(
             "call {return_ty} @{}({})",
-            method_name_for_type(&receiver.ty, &member.name).ok_or_else(|| {
-                self.error("could not resolve specialized method symbol", member.span)
+            effective_method_symbol(self.typed, &receiver.ty, &member.name).ok_or_else(|| {
+                self.error(
+                    "could not resolve method implementation symbol",
+                    member.span,
+                )
             })?,
             call_arguments.join(", ")
         );
@@ -4219,6 +4691,46 @@ fn main() {
         assert!(ir.contains("getelementptr inbounds [1 x ptr]"));
         assert!(ir.contains("call ptr %v"));
         assert!(!ir.contains("call ptr @princi_method_427574746f6e_64726177(ptr %v"));
+    }
+
+    #[test]
+    fn lowers_trait_defaults_class_overrides_and_struct_trait_views() {
+        let ir = lower(
+            r#"trait Named {
+    fn name() -> String
+    fn describe() { println("Hello, " + self.name()) }
+}
+class User implements Named {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn describe() { println("User: " + self.name()) }
+}
+struct Point implements Named {
+    value: String
+    fn name() -> String { return self.value }
+}
+fn show(value: Named) { value.describe() }
+fn main() {
+    let user = User("Ada")
+    show(user)
+    let point = Point("origin")
+    let named: Named = point
+    show(point)
+    named.describe()
+}"#,
+        )
+        .expect("trait dispatch should lower");
+
+        assert!(ir.contains("%princi.trait.4e616d6564 = type { ptr, ptr }"));
+        assert!(ir.contains("@princi_vtable_c4_55736572_t5_4e616d6564 = private constant"));
+        assert!(ir.contains("@princi_vtable_u5_506f696e74_t5_4e616d6564 = private constant"));
+        assert!(!ir.contains("princi_trait_default_c4_55736572_t5_4e616d6564_m8_6465736372696265"));
+        assert!(ir.contains("princi_trait_default_u5_506f696e74_t5_4e616d6564_m8_6465736372696265"));
+        assert!(ir.contains("princi_trait_struct_thunk_u5_506f696e74_t5_4e616d6564_m4_6e616d65"));
+        assert!(ir.contains("extractvalue %princi.trait.4e616d6564"));
+        assert!(ir.contains("call ptr @princi_rt_alloc_object(i64"));
+        assert!(ir.contains("store %princi.struct.506f696e74"));
     }
 
     #[test]

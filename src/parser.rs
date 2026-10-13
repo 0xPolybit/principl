@@ -83,12 +83,15 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Interface) => {
                 self.parse_interface().map(Declaration::Interface)
             }
+            TokenKind::Keyword(Keyword::Trait) => {
+                self.parse_trait().map(Declaration::Trait)
+            }
             TokenKind::Keyword(Keyword::Import) => self.parse_import().map(Declaration::Import),
             TokenKind::Keyword(Keyword::Extern) => {
                 self.parse_extern_block().map(Declaration::ExternBlock)
             }
             _ => Err(self.error_here(
-                "expected a function, class, struct, interface, import, or extern declaration",
+                "expected a function, class, struct, interface, trait, import, or extern declaration",
             )),
         }
     }
@@ -413,6 +416,73 @@ impl Parser<'_> {
             name,
             parameters,
             return_type,
+            span: SourceSpan::new(start, end),
+        })
+    }
+
+    fn parse_trait(&mut self) -> Result<TraitDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let name = self.expect_identifier("expected trait name")?;
+        self.expect_punctuation(Punctuation::LeftBrace, "expected '{' after trait name")?;
+        let mut methods = Vec::new();
+        while !self.check_punctuation(Punctuation::RightBrace) && !self.at_eof() {
+            let before = self.cursor;
+            match self.parse_trait_method() {
+                Ok(method) => methods.push(method),
+                Err(diagnostic) => {
+                    self.diagnostics.push(diagnostic);
+                    self.recover_interface_member(before);
+                }
+            }
+            if self.cursor == before && !self.at_eof() {
+                self.advance();
+            }
+        }
+        let close =
+            self.expect_punctuation(Punctuation::RightBrace, "expected '}' to close trait")?;
+        Ok(TraitDeclaration {
+            name,
+            methods,
+            span: SourceSpan::new(start, close.location.span.end),
+        })
+    }
+
+    fn parse_trait_method(&mut self) -> Result<TraitMethodDeclaration, Diagnostic> {
+        let start = self
+            .expect_keyword(Keyword::Fn, "traits may contain only method declarations")?
+            .location
+            .span
+            .start;
+        let name = self.expect_identifier("expected trait method name")?;
+        if self.check_operator(Operator::Less) {
+            return Err(self.error_here("trait methods cannot declare generic parameters in v0.2"));
+        }
+        let parameters = self.parse_parameters()?;
+        let return_type = if self.eat_punctuation(Punctuation::Arrow) {
+            Some(self.parse_type_reference("expected return type after '->'")?)
+        } else {
+            None
+        };
+        let body = if self.check_punctuation(Punctuation::LeftBrace) {
+            Some(self.parse_block()?)
+        } else {
+            self.finish_member()?;
+            None
+        };
+        let end = body.as_ref().map_or_else(
+            || {
+                return_type.as_ref().map_or_else(
+                    || self.tokens[self.cursor.saturating_sub(1)].location.span.end,
+                    |ty| ty.span.end,
+                )
+            },
+            |body| body.span.end,
+        );
+        Ok(TraitMethodDeclaration {
+            name,
+            parameters,
+            return_type,
+            body,
             span: SourceSpan::new(start, end),
         })
     }
@@ -1157,6 +1227,7 @@ impl Parser<'_> {
                     | Keyword::Class
                     | Keyword::Struct
                     | Keyword::Interface
+                    | Keyword::Trait
                     | Keyword::Import
                     | Keyword::Extern
             )
@@ -1642,6 +1713,57 @@ fn main() {}"#,
         assert_eq!(widget.interfaces.len(), 2);
         assert_eq!(widget.interfaces[0].name, "Drawable");
         assert_eq!(widget.interfaces[1].name, "Clickable");
+    }
+
+    #[test]
+    fn parses_traits_with_required_and_default_methods() {
+        let result = parse_text(
+            "traits.prnc",
+            r#"trait Named {
+    fn name() -> String
+
+    fn describe() {
+        println(self.name())
+    }
+}
+struct Label implements Named {
+    value: String
+    fn name() -> String { return self.value }
+}
+fn main() {}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Trait(named) = &result.program.declarations[0] else {
+            panic!("expected trait declaration");
+        };
+        assert_eq!(named.methods.len(), 2);
+        assert!(named.methods[0].body.is_none());
+        assert!(named.methods[1].body.is_some());
+        let Declaration::Struct(label) = &result.program.declarations[1] else {
+            panic!("expected struct declaration");
+        };
+        assert_eq!(label.interfaces[0].name, "Named");
+    }
+
+    #[test]
+    fn trait_declarations_reject_fields_constructors_and_generic_methods() {
+        let result = parse_text(
+            "invalid-trait.prnc",
+            "trait Bad { value: Int; init() {}; fn generic<T>(value: T) }\nfn main() {}",
+        );
+        assert!(!result.diagnostics.is_empty());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("only method declarations")));
+        let generic = parse_text(
+            "generic-trait-method.prnc",
+            "trait Bad { fn generic<T>(value: T) }\nfn main() {}",
+        );
+        assert!(generic
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("generic parameters")));
     }
 
     #[test]

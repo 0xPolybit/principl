@@ -412,8 +412,8 @@ literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
 `\0` escapes are rejected because v0.1 Strings use NUL-terminated storage.
 The lexer recognizes the v0.1 keywords `fn`, `return`, `let`, `var`, `if`,
 `else`, `while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and
-`extern`. v0.2 adds `interface` and `implements` for interface declarations and
-class conformance.
+`extern`. v0.2 development adds `interface`, `trait`, and `implements` for
+behavioral contracts and their implementations.
 
 Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
 `>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
@@ -498,8 +498,9 @@ checking and runtime bounds checks.
 
 Generic methods may use their enclosing class parameters, as in
 `fn get() -> T`. Method-level generic parameters are not yet lowered in this
-work. Trait bounds, traits, algebraic enums, exhaustive pattern matching,
-`Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
+work. Traits and runtime trait values are now implemented in the v0.2 branch
+work described below. Generic trait bounds, algebraic enums, exhaustive pattern
+matching, `Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
 
@@ -539,6 +540,50 @@ The generated value is a pair containing the managed object reference and a
 compiler-generated table pointer. Calls through the interface use that table
 for runtime dispatch; calls through a concrete class retain static dispatch.
 The representation is internal and does not expose pointers in Princi syntax.
+
+### Traits and interfaces (v0.2 development)
+
+An `interface` is a pure behavioral contract: every declared method is
+required, and interfaces cannot contain method bodies. A `trait` is also a
+behavioral contract, but a trait method may have a default body. Traits cannot
+contain fields or constructors. Both use `implements` on a class; traits may
+also be implemented by structs.
+
+```princi
+trait Named {
+    fn name() -> String
+
+    fn describe() {
+        println(self.name())
+    }
+}
+
+class User implements Named {
+    value: String
+
+    init(value: String) {
+        self.value = value
+    }
+
+    fn name() -> String {
+        return self.value
+    }
+}
+```
+
+An explicit method overrides a default. A type must implement every abstract
+trait method with a matching signature. If multiple implemented traits provide
+the same default method, the type must declare that method explicitly or the
+compiler reports an ambiguity. There are no automatic conflict-precedence
+rules.
+
+Trait-typed values reuse the interface runtime pair and dispatch methods through
+a generated table. A class trait view keeps the class reference. Converting a
+struct to a trait view boxes a copy in process-lifetime managed storage, so
+later changes to the original struct are not visible through that view. Struct
+methods are currently supported only on structs that implement a trait, and
+have read-only `self`. Traits are non-generic, and generic trait bounds are not
+implemented.
 
 ```princi
 class Box<T> {
@@ -720,7 +765,9 @@ file errors, `E0100` for lexical errors, and `E0101` for syntax errors,
 invalid member access, `E0206` for duplicate declarations, `E0207` for a
 missing or invalid `main`, `E0208` for invalid returns, and `E0209` for
 unsupported imports. `E0210` reports a local read before definite
-initialization.
+initialization. In the v0.2 work, `E0211` identifies invalid interface
+conformance and `E0212` identifies invalid trait implementations, missing
+methods, and default-method ambiguities.
 
 Toolchain errors are separate from source errors: `E0401` means LLVM/Clang is
 missing, `E0403` means the Windows MinGW linker is missing or targets the wrong

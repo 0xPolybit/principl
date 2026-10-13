@@ -12,6 +12,7 @@ pub enum Declaration {
     Class(TypeDeclaration),
     Struct(TypeDeclaration),
     Interface(InterfaceDeclaration),
+    Trait(TraitDeclaration),
     Import(ImportDeclaration),
     ExternBlock(ExternBlockDeclaration),
 }
@@ -101,6 +102,23 @@ pub struct InterfaceMethodDeclaration {
     pub name: Identifier,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeReference>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitDeclaration {
+    pub name: Identifier,
+    pub methods: Vec<TraitMethodDeclaration>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitMethodDeclaration {
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<TypeReference>,
+    /// A body marks this method as a default implementation.
+    pub body: Option<Block>,
     pub span: SourceSpan,
 }
 
