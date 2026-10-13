@@ -36,6 +36,8 @@ pub struct GenericTypeParameter {
     /// Unique within a compilation; names alone do not identify a parameter.
     pub id: u32,
     pub name: String,
+    /// Interface or trait contracts required of a concrete specialization.
+    pub bounds: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

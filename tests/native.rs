@@ -845,6 +845,85 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn bounded_generics_dispatch_traits_and_interfaces_for_classes_and_structs() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"trait Named { fn name() -> String }
+trait Described { fn description() -> String { return "default" } }
+trait Marked { fn marker() -> String { return "marked" } }
+interface Drawable { fn draw() -> String }
+
+class User implements Named, Described, Marked, Drawable {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn description() -> String { return "user:" + self.name() }
+    fn draw() -> String { return "draw:" + self.name() }
+}
+
+class Bot implements Named, Described, Marked, Drawable {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn draw() -> String { return "draw:" + self.name() }
+}
+
+struct Point implements Named {
+    value: String
+    fn name() -> String { return self.value }
+}
+
+fn describe<T: Named + Described + Marked>(value: T) -> String {
+    return value.name() + "|" + value.description() + "|" + value.marker()
+}
+
+fn paint<T: Drawable>(value: T) {
+    println(value.draw())
+}
+
+class Repository<T: Named> {
+    value: T
+    init(value: T) { self.value = value }
+    fn name() -> String { return self.value.name() }
+}
+
+fn repositoryName<T: Named>(repository: Repository<T>) -> String {
+    return repository.name()
+}
+
+struct Wrapper<T: Named> implements Named {
+    value: T
+    fn name() -> String { return self.value.name() }
+}
+
+fn main() {
+    let user = User("Grace")
+    let bot = Bot("Hal")
+    println(describe(user))
+    println(describe<User>(user))
+    println(describe(bot))
+    paint(user)
+
+    let repository = Repository<User>(user)
+    println(repository.name())
+    println(repositoryName(repository))
+
+    let point = Point { value: "origin" }
+    let wrapper = Wrapper<Point> { value: point }
+    println(wrapper.name())
+}"#;
+
+    let prnc_stdout = dir.build_and_run("bounded generics.prnc", source);
+    let princi_stdout = dir.build_and_run("bounded generics.princi", source);
+    let expected = "Grace|user:Grace|marked\nGrace|user:Grace|marked\nHal|default|marked\ndraw:Grace\nGrace\nGrace\norigin\n";
+    assert_eq!(prnc_stdout, expected);
+    assert_eq!(princi_stdout, expected);
+}
+
+#[cfg(windows)]
+#[test]
 fn generic_classes_and_structs_specialize_and_run_for_both_extensions() {
     if skip_without_native_toolchain() {
         return;

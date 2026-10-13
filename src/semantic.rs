@@ -243,6 +243,13 @@ struct Scope {
     variables: HashMap<String, VariableSymbol>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingGenericBoundCheck {
+    parameters: Vec<GenericTypeParameter>,
+    arguments: Vec<Type>,
+    span: SourceSpan,
+}
+
 struct Analyzer<'a> {
     source: &'a SourceFile,
     modules: ResolvedModules,
@@ -265,6 +272,8 @@ struct Analyzer<'a> {
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
     contract_conversions: HashMap<SourceSpan, Type>,
+    pending_generic_bound_checks: Vec<PendingGenericBoundCheck>,
+    contracts_validated: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -302,15 +311,23 @@ impl<'a> Analyzer<'a> {
             variable_types: HashMap::new(),
             generic_function_calls: HashMap::new(),
             contract_conversions: HashMap::new(),
+            pending_generic_bound_checks: Vec::new(),
+            contracts_validated: false,
             diagnostics: Vec::new(),
         }
     }
 
     fn run(mut self, program: &Program) -> SemanticResult {
         self.register_global_names(program);
+        self.validate_declared_type_parameter_bounds(program);
         self.resolve_global_functions(program);
         self.register_type_members(program);
         self.validate_contract_implementations(program);
+        self.contracts_validated = true;
+        let pending_checks = std::mem::take(&mut self.pending_generic_bound_checks);
+        for check in pending_checks {
+            self.validate_generic_arguments(&check.parameters, &check.arguments, check.span);
+        }
         self.validate_struct_value_layouts(program);
         self.check_declaration_bodies(program);
 
@@ -410,6 +427,90 @@ impl<'a> Analyzer<'a> {
                 }
                 Declaration::ExternBlock(block) => self.register_external_block(block),
                 Declaration::Import(_) => {}
+            }
+        }
+    }
+
+    fn validate_declared_type_parameter_bounds(&mut self, program: &Program) {
+        for declaration in &program.declarations {
+            match declaration {
+                Declaration::Function(function) => {
+                    self.validate_type_parameter_bounds(&function.type_parameters);
+                }
+                Declaration::Class(owner) | Declaration::Struct(owner) => {
+                    self.validate_type_parameter_bounds(&owner.type_parameters);
+                    for member in &owner.members {
+                        if let ClassMember::Method(method) = member {
+                            self.validate_type_parameter_bounds(&method.type_parameters);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn validate_type_parameter_bounds(&mut self, declarations: &[TypeParameterDeclaration]) {
+        for parameter in declarations {
+            let mut seen = HashSet::new();
+            for bound in &parameter.bounds {
+                if !seen.insert(bound.name.clone()) {
+                    self.error_with(
+                        DiagnosticCode::GenericConstraint,
+                        format!(
+                            "duplicate bound '{}' on generic parameter '{}'",
+                            bound.name, parameter.name.name
+                        ),
+                        bound.span,
+                    );
+                    continue;
+                }
+                if !bound.arguments.is_empty() {
+                    self.error_with(
+                        DiagnosticCode::GenericConstraint,
+                        "generic bounds cannot have type arguments in v0.2",
+                        bound.span,
+                    );
+                    continue;
+                }
+                match self.types.get(&bound.name) {
+                    None if matches!(
+                        bound.name.as_str(),
+                        "Int"
+                            | "Float"
+                            | "Bool"
+                            | "String"
+                            | "Void"
+                            | "List"
+                            | "Int32"
+                            | "Int64"
+                            | "Float64"
+                    ) =>
+                    {
+                        self.error_with(
+                            DiagnosticCode::GenericConstraint,
+                            format!(
+                                "generic bound '{}' must name an interface or trait",
+                                bound.name
+                            ),
+                            bound.span,
+                        );
+                    }
+                    None => self.error_with(
+                        DiagnosticCode::UnknownType,
+                        format!("unknown type '{}' in generic bound", bound.name),
+                        bound.span,
+                    ),
+                    Some(info) if !info.is_interface && !info.is_trait => self.error_with(
+                        DiagnosticCode::GenericConstraint,
+                        format!(
+                            "generic bound '{}' must name an interface or trait",
+                            bound.name
+                        ),
+                        bound.span,
+                    ),
+                    Some(_) => {}
+                }
             }
         }
     }
@@ -974,9 +1075,19 @@ impl<'a> Analyzer<'a> {
                 );
                 continue;
             }
+            let mut seen_bounds = HashSet::new();
             let parameter = GenericTypeParameter {
                 id: self.next_type_parameter_id,
                 name: name.clone(),
+                bounds: declaration
+                    .bounds
+                    .iter()
+                    .filter_map(|bound| {
+                        seen_bounds
+                            .insert(bound.name.clone())
+                            .then(|| bound.name.clone())
+                    })
+                    .collect(),
             };
             self.next_type_parameter_id = self.next_type_parameter_id.saturating_add(1);
             self.declared_type_parameter_names.insert(name.clone());
@@ -1253,7 +1364,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             name => {
-                let Some(info) = self.types.get(name) else {
+                let Some(info) = self.types.get(name).cloned() else {
                     let message = if self.declared_type_parameter_names.contains(name) {
                         format!("type parameter '{name}' is outside its declaration scope")
                     } else {
@@ -1270,7 +1381,76 @@ impl<'a> Analyzer<'a> {
                         Type::Struct(_) => GenericTypeConstructor::Struct(name.to_owned()),
                         _ => return Type::Error,
                     };
+                    self.validate_generic_arguments(&info.type_parameters, args, reference.span);
                     Type::generic_instance(constructor, args.to_vec())
+                }
+            }
+        }
+    }
+
+    fn validate_generic_arguments(
+        &mut self,
+        parameters: &[GenericTypeParameter],
+        arguments: &[Type],
+        span: SourceSpan,
+    ) {
+        if !self.contracts_validated {
+            self.pending_generic_bound_checks
+                .push(PendingGenericBoundCheck {
+                    parameters: parameters.to_vec(),
+                    arguments: arguments.to_vec(),
+                    span,
+                });
+            return;
+        }
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            if argument.is_error() {
+                continue;
+            }
+            for bound in &parameter.bounds {
+                let Some(bound_info) = self.types.get(bound) else {
+                    continue;
+                };
+                if self.type_satisfies_bound(argument, bound) {
+                    continue;
+                }
+                let kind = if bound_info.is_interface {
+                    "interface"
+                } else {
+                    "trait"
+                };
+                self.error_with(
+                    DiagnosticCode::GenericConstraint,
+                    format!("type {argument} does not satisfy required {kind} '{bound}'"),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn type_satisfies_bound(&self, argument: &Type, bound: &str) -> bool {
+        match argument {
+            Type::TypeParameter(parameter) => parameter.bounds.iter().any(|item| item == bound),
+            Type::Interface(name) | Type::Trait(name) if name == bound => true,
+            _ => {
+                let Some(type_name) = argument.nominal_name() else {
+                    return false;
+                };
+                let Some(info) = self.types.get(type_name) else {
+                    return false;
+                };
+                if info.is_interface {
+                    info.implemented_interfaces.iter().any(|item| item == bound)
+                } else if info.is_trait {
+                    info.implemented_traits.iter().any(|item| item == bound)
+                } else if self
+                    .types
+                    .get(bound)
+                    .is_some_and(|bound_info| bound_info.is_interface)
+                {
+                    info.implemented_interfaces.iter().any(|item| item == bound)
+                } else {
+                    info.implemented_traits.iter().any(|item| item == bound)
                 }
             }
         }
@@ -2131,6 +2311,7 @@ impl<'a> Analyzer<'a> {
                             &signature,
                             &resolved_arguments,
                             arguments,
+                            true,
                             call_span,
                         );
                         if let Some(type_arguments) = type_arguments {
@@ -2220,6 +2401,7 @@ impl<'a> Analyzer<'a> {
                                 &constructor,
                                 &[],
                                 arguments,
+                                false,
                                 call_span,
                             )
                         };
@@ -2248,6 +2430,7 @@ impl<'a> Analyzer<'a> {
                             &signature,
                             &[],
                             arguments,
+                            true,
                             call_span,
                         );
                         if let Some(type_arguments) = type_arguments {
@@ -2304,6 +2487,7 @@ impl<'a> Analyzer<'a> {
                         &signature,
                         &[],
                         arguments,
+                        true,
                         call_span,
                     );
                     self.check_call_arguments("function value", &signature, arguments, call_span);
@@ -2333,6 +2517,7 @@ impl<'a> Analyzer<'a> {
                     &signature,
                     &[],
                     arguments,
+                    true,
                     call_span,
                 );
                 self.check_call_arguments("function value", &signature, arguments, call_span);
@@ -2401,6 +2586,7 @@ impl<'a> Analyzer<'a> {
         if arguments.iter().any(Type::is_error) {
             return Type::Error;
         }
+        self.validate_generic_arguments(&info.type_parameters, arguments, span);
         if arguments.is_empty() {
             return info.ty;
         }
@@ -2418,6 +2604,7 @@ impl<'a> Analyzer<'a> {
         signature: &FunctionType,
         explicit_arguments: &[Type],
         call_arguments: &[Expression],
+        validate_bounds: bool,
         call_span: SourceSpan,
     ) -> (FunctionType, Option<Vec<Type>>) {
         if signature.type_parameters.is_empty() {
@@ -2481,7 +2668,10 @@ impl<'a> Analyzer<'a> {
             .type_parameters
             .iter()
             .map(|parameter| substitutions[&parameter.id].clone())
-            .collect();
+            .collect::<Vec<_>>();
+        if validate_bounds {
+            self.validate_generic_arguments(&signature.type_parameters, &type_arguments, call_span);
+        }
         let specialized = substitute_function_type(signature, &substitutions);
         (
             FunctionType::new(
@@ -2517,6 +2707,38 @@ impl<'a> Analyzer<'a> {
     }
 
     fn member_type(&mut self, object_type: &Type, member: &Identifier) -> (Type, bool) {
+        if let Type::TypeParameter(parameter) = object_type {
+            let signatures = parameter
+                .bounds
+                .iter()
+                .filter_map(|bound| self.types.get(bound))
+                .filter_map(|contract| contract.methods.get(&member.name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(signature) = signatures.first() {
+                if signatures.iter().any(|candidate| candidate != signature) {
+                    self.error_with(
+                        DiagnosticCode::InvalidMember,
+                        format!(
+                            "method '{}' is ambiguous across bounds on type parameter '{}'",
+                            member.name, parameter.name
+                        ),
+                        member.span,
+                    );
+                    return (Type::Error, false);
+                }
+                return (Type::Function(signature.clone()), false);
+            }
+            self.error_with(
+                DiagnosticCode::InvalidMember,
+                format!(
+                    "type parameter '{}' has no method '{}'; add a bound that declares it",
+                    parameter.name, member.name
+                ),
+                member.span,
+            );
+            return (Type::Error, false);
+        }
         if let Some(element) = object_type.list_element() {
             return match member.name.as_str() {
                 "length" => (Type::Int, true),
@@ -4027,6 +4249,176 @@ fn main() {
             &conflicting_arguments,
             "expected Int, found String (expression)"
         ));
+    }
+
+    #[test]
+    fn checks_function_class_and_struct_bounds_and_bound_methods() {
+        let result = analyze_text(
+            r#"trait Named { fn name() -> String }
+trait Described { fn description() -> String { return "default" } }
+interface Drawable { fn draw() }
+class User implements Named, Described, Drawable {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn draw() { println(self.value) }
+}
+fn acceptRepository(value: Repository<User>) {}
+fn acceptBounded<T: Named>(value: Repository<T>) {}
+class Catalog { repository: Repository<User> }
+fn summarize<T: Named + Described>(value: T) -> String {
+    return value.name() + ":" + value.description()
+}
+fn render<T: Drawable>(value: T) { value.draw() }
+class Repository<T: Named> {
+    value: T
+    init(value: T) { self.value = value }
+    fn name() -> String { return self.value.name() }
+}
+struct NamedHolder<T: Named> implements Named {
+    value: T
+    fn name() -> String { return self.value.name() }
+}
+fn main() {
+    let user = User("Ada")
+    let summary = summarize(user)
+    render(user)
+    let repository = Repository<User>(user)
+    let repositoryName = repository.name()
+    let holder = NamedHolder<User> { value: user }
+    let holderName = holder.name()
+}"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+        let Some(super::GlobalSymbol::Function(signature)) =
+            result.typed_program.symbols.global("summarize")
+        else {
+            panic!("bounded generic function signature should be registered");
+        };
+        assert_eq!(signature.type_parameters[0].bounds, ["Named", "Described"]);
+        assert_eq!(
+            result
+                .typed_program
+                .symbols
+                .type_symbols("Repository")
+                .unwrap()
+                .type_parameters[0]
+                .bounds,
+            ["Named"]
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .symbols
+                .type_symbols("NamedHolder")
+                .unwrap()
+                .type_parameters[0]
+                .bounds,
+            ["Named"]
+        );
+    }
+
+    #[test]
+    fn rejects_unsatisfied_function_class_struct_and_interface_bounds() {
+        let result = analyze_text(
+            r#"trait Named { fn name() -> String }
+trait Tagged { fn tag() -> String }
+interface Drawable { fn draw() }
+class User implements Named {
+    fn name() -> String { return "user" }
+}
+fn show<T: Named>(value: T) -> String { return value.name() }
+fn both<T: Named + Tagged>(value: T) { println(value.name()); println(value.tag()) }
+fn draw<T: Drawable>(value: T) { value.draw() }
+class Repository<T: Named> { value: T }
+struct Holder<T: Named> { value: T }
+fn unbounded<T>(value: T) { value.name() }
+fn unboundedRepository<T>(value: Repository<T>) {}
+fn main() {
+    show(42)
+    both(User())
+    draw(User())
+    let repository = Repository<Int>(1)
+    let holder = Holder<Int> { value: 1 }
+    unbounded(1)
+}"#,
+        );
+
+        assert!(has_message(
+            &result,
+            "type Int does not satisfy required trait 'Named'"
+        ));
+        assert!(has_message(
+            &result,
+            "type User does not satisfy required trait 'Tagged'"
+        ));
+        assert!(has_message(
+            &result,
+            "type User does not satisfy required interface 'Drawable'"
+        ));
+        assert!(has_message(
+            &result,
+            "type parameter 'T' has no method 'name'; add a bound that declares it"
+        ));
+        assert!(has_message(
+            &result,
+            "type T does not satisfy required trait 'Named'"
+        ));
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic
+                    .message()
+                    .contains("type Int does not satisfy required trait 'Named'"))
+                .count(),
+            3,
+            "the function argument and class/struct generic instances should be checked"
+        );
+    }
+
+    #[test]
+    fn validates_bound_declarations_and_compatible_method_sets() {
+        let invalid_bounds = analyze_text(
+            "trait Named { fn name() -> String }\nfn unknown<T: Missing>(value: T) {}\nfn concrete<T: Int>(value: T) {}\nfn duplicate<T: Named + Named>(value: T) {}\nfn generic<T: Named<Int>>(value: T) {}\nfn main() {}",
+        );
+        assert!(has_message(
+            &invalid_bounds,
+            "unknown type 'Missing' in generic bound"
+        ));
+        assert!(has_message(
+            &invalid_bounds,
+            "generic bound 'Int' must name an interface or trait"
+        ));
+        assert!(has_message(&invalid_bounds, "duplicate bound 'Named'"));
+        assert!(has_message(
+            &invalid_bounds,
+            "generic bounds cannot have type arguments in v0.2"
+        ));
+
+        let conflicting_methods = analyze_text(
+            r#"trait StringValue { fn value() -> String }
+trait IntValue { fn value() -> Int }
+fn use<T: StringValue + IntValue>(item: T) { item.value() }
+fn main() {}"#,
+        );
+        assert!(has_message(
+            &conflicting_methods,
+            "method 'value' is ambiguous across bounds on type parameter 'T'"
+        ));
+
+        let shared_method = analyze_text(
+            r#"trait Named { fn name() -> String }
+trait AlsoNamed { fn name() -> String }
+fn use<T: Named + AlsoNamed>(item: T) -> String { return item.name() }
+fn main() {}"#,
+        );
+        assert!(
+            shared_method.diagnostics.is_empty(),
+            "identical methods from multiple bounds are unambiguous: {:?}",
+            messages(&shared_method)
+        );
     }
 
     #[test]

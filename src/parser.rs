@@ -212,9 +212,17 @@ impl Parser<'_> {
 
         let mut parameters = Vec::new();
         loop {
-            parameters.push(TypeParameterDeclaration {
-                name: self.expect_identifier("expected generic parameter name")?,
-            });
+            let name = self.expect_identifier("expected generic parameter name")?;
+            let mut bounds = Vec::new();
+            if self.eat_punctuation(Punctuation::Colon) {
+                loop {
+                    bounds.push(self.parse_type_reference("expected interface or trait bound")?);
+                    if !self.eat_operator(Operator::Plus) {
+                        break;
+                    }
+                }
+            }
+            parameters.push(TypeParameterDeclaration { name, bounds });
             if self.eat_punctuation(Punctuation::Comma) {
                 continue;
             }
@@ -1945,6 +1953,36 @@ fn main() {
             Statement { kind: StatementKind::Variable(VariableDeclaration { initializer: Some(Expression { kind: ExpressionKind::Call { callee, .. }, .. }), .. }), .. }
                 if matches!(&callee.kind, ExpressionKind::GenericReference { name, arguments } if name.name == "Box" && type_reference_snapshot(&arguments[0]) == "List<Int>")
         ));
+    }
+
+    #[test]
+    fn parses_single_and_multiple_generic_contract_bounds() {
+        let result = parse_text(
+            "bounds.prnc",
+            "trait Named { fn name() -> String }\ninterface Drawable { fn draw() }\nfn show<T: Named + Drawable, U: Named>(value: T, other: U) {}\nclass Repository<T: Named + Drawable> {}\nstruct Holder<T: Named> { value: T }",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Function(show) = &result.program.declarations[2] else {
+            panic!("expected bounded generic function");
+        };
+        assert_eq!(show.type_parameters[0].name.name, "T");
+        assert_eq!(
+            show.type_parameters[0]
+                .bounds
+                .iter()
+                .map(|bound| bound.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Named", "Drawable"]
+        );
+        assert_eq!(show.type_parameters[1].bounds[0].name, "Named");
+        let Declaration::Class(repository) = &result.program.declarations[3] else {
+            panic!("expected bounded generic class");
+        };
+        assert_eq!(repository.type_parameters[0].bounds.len(), 2);
+        let Declaration::Struct(holder) = &result.program.declarations[4] else {
+            panic!("expected bounded generic struct");
+        };
+        assert_eq!(holder.type_parameters[0].bounds[0].name, "Named");
     }
 
     #[test]

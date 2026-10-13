@@ -33,6 +33,7 @@ pub struct TypeReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameterDeclaration {
     pub name: Identifier,
+    pub bounds: Vec<TypeReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

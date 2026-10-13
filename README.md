@@ -499,8 +499,9 @@ checking and runtime bounds checks.
 Generic methods may use their enclosing class parameters, as in
 `fn get() -> T`. Method-level generic parameters are not yet lowered in this
 work. Traits and runtime trait values are now implemented in the v0.2 branch
-work described below. Generic trait bounds, algebraic enums, exhaustive pattern
-matching, `Result<T, E>`, and `?` error propagation remain proposed v0.2 work.
+work described below. Bounded generics for functions, classes, and structs are
+implemented. Algebraic enums, exhaustive pattern matching, `Result<T, E>`, and
+`?` error propagation remain proposed v0.2 work.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
 
@@ -582,8 +583,49 @@ a generated table. A class trait view keeps the class reference. Converting a
 struct to a trait view boxes a copy in process-lifetime managed storage, so
 later changes to the original struct are not visible through that view. Struct
 methods are currently supported only on structs that implement a trait, and
-have read-only `self`. Traits are non-generic, and generic trait bounds are not
-implemented.
+have read-only `self`. Traits are non-generic.
+
+### Bounded generics (v0.2 development)
+
+Generic functions, classes, and structs can require interface and/or trait
+contracts. Write one bound after `:` and additional bounds separated by `+`:
+
+```princi
+trait Named { fn name() -> String }
+interface Printable { fn print() }
+
+fn show<T: Named + Printable>(value: T) {
+    println(value.name())
+    value.print()
+}
+
+class User implements Named, Printable {
+    fn name() -> String { return "Ada" }
+    fn print() { println("user") }
+}
+
+class Repository<T: Named> {
+    value: T
+}
+
+struct Holder<T: Named> {
+    value: T
+}
+
+fn main() {
+    show(User())
+}
+```
+
+At a generic function call or generic class/struct instantiation, every bound is
+checked against the concrete type. A bounded type parameter can call methods
+declared by its bounds. If multiple bounds declare the same method, their
+signatures must match. Generic functions remain monomorphized, so a bound call
+lowers against the concrete specialization; no erased generic dispatch is
+introduced. Interface bounds accept conforming classes, while trait bounds
+accept conforming classes and structs. Failed checks produce a short diagnostic
+such as `type Int does not satisfy required trait 'Named'`. Generic traits,
+associated types, and conditional or negative bounds are unsupported.
 
 ```princi
 class Box<T> {
@@ -767,7 +809,8 @@ missing or invalid `main`, `E0208` for invalid returns, and `E0209` for
 unsupported imports. `E0210` reports a local read before definite
 initialization. In the v0.2 work, `E0211` identifies invalid interface
 conformance and `E0212` identifies invalid trait implementations, missing
-methods, and default-method ambiguities.
+methods, and default-method ambiguities. `E0213` reports invalid generic
+bounds or a concrete type that does not satisfy a required interface or trait.
 
 Toolchain errors are separate from source errors: `E0401` means LLVM/Clang is
 missing, `E0403` means the Windows MinGW linker is missing or targets the wrong
