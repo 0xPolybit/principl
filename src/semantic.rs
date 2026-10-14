@@ -2259,11 +2259,18 @@ impl<'a> Analyzer<'a> {
             && !has_catch_all
             && !self.match_is_exhaustive(&value_type, &covered_variants, &covered_literals)
         {
-            self.error_with(
-                DiagnosticCode::Semantic,
-                format!("non-exhaustive match for type {value_type}; add a wildcard arm"),
-                span,
-            );
+            let missing_variants = self.missing_enum_variants(&value_type, &covered_variants);
+            let message = match missing_variants.as_deref() {
+                Some([variant]) => format!(
+                    "non-exhaustive match for type {value_type}; missing variant: {variant}"
+                ),
+                Some(variants) if !variants.is_empty() => format!(
+                    "non-exhaustive match for type {value_type}; missing variants: {}",
+                    variants.join(", ")
+                ),
+                _ => format!("non-exhaustive match for type {value_type}; add a wildcard arm"),
+            };
+            self.error_with(DiagnosticCode::Semantic, message, span);
         }
 
         // A binding is definitely initialized after a match only when every
@@ -2440,12 +2447,25 @@ impl<'a> Analyzer<'a> {
         literals: &HashSet<String>,
     ) -> bool {
         if let Some((_, info)) = self.enum_pattern_info(ty) {
-            return variants.len() == info.enum_variants.len();
+            return (0..info.enum_variants.len()).all(|index| variants.contains(&index));
         }
         if *ty == Type::Bool {
             return literals.contains("bool:true") && literals.contains("bool:false");
         }
         false
+    }
+
+    fn missing_enum_variants(&self, ty: &Type, covered: &HashSet<usize>) -> Option<Vec<String>> {
+        let (enum_type, info) = self.enum_pattern_info(ty)?;
+        let name = enum_type.nominal_name().unwrap_or("enum");
+        Some(
+            info.enum_variants
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !covered.contains(index))
+                .map(|(_, variant)| format!("{name}.{}", variant.name))
+                .collect(),
+        )
     }
 
     fn check_expression(&mut self, expression: &Expression, expected: Option<&Type>) -> Type {
@@ -5117,7 +5137,10 @@ fn main() {
     match bad { Some(left, right) => println(left) None => println("none") }
 }"#,
         );
-        assert!(has_message(&result, "non-exhaustive match for type State"));
+        assert!(has_message(
+            &result,
+            "non-exhaustive match for type State; missing variant: State.Failed"
+        ));
         assert!(has_message(
             &result,
             "enum 'State' has no variant 'Missing'"
@@ -5147,6 +5170,58 @@ fn main() {
             "fn main() { let ready = true; match ready { true => println(1) _ => println(2) false => println(3) } }",
         );
         assert!(has_message(&invalid, "unreachable match arm"));
+    }
+
+    #[test]
+    fn reports_uncovered_variants_for_concrete_generic_enum_instances() {
+        let result = analyze_text(
+            r#"enum Boolish { Yes No }
+enum Result<T, E> { Ok(T) Err(E) }
+fn complete(value: Boolish) {
+    match value { Yes => println("yes") _ => println("no") }
+}
+fn generic_complete(value: Result<Int, String>) {
+    match value { Ok(_) => println("ok") Err(_) => println("error") }
+}
+fn generic_missing(value: Result<String, Int>) {
+    match value { Ok(_) => println("ok") }
+}
+fn main() {
+    let value = Boolish.Yes
+    match value { Yes => println("yes") }
+}"#,
+        );
+
+        assert!(has_message(
+            &result,
+            "non-exhaustive match for type Result<String, Int>; missing variant: Result.Err"
+        ));
+        assert!(has_message(
+            &result,
+            "non-exhaustive match for type Boolish; missing variant: Boolish.No"
+        ));
+        assert_eq!(result.diagnostics.len(), 2, "{:?}", messages(&result));
+    }
+
+    #[test]
+    fn catch_all_makes_later_enum_arms_unreachable_and_literals_need_default() {
+        let result = analyze_text(
+            r#"enum Result<T, E> { Ok(T) Err(E) }
+fn main() {
+    let result = Result<Int, String>.Ok(1)
+    match result {
+        _ => println("handled")
+        Ok(value) => println(value)
+    }
+    match 1 { 1 => println("one") }
+}"#,
+        );
+
+        assert!(has_message(&result, "unreachable match arm"));
+        assert!(has_message(
+            &result,
+            "non-exhaustive match for type Int; add a wildcard arm"
+        ));
     }
 
     #[test]

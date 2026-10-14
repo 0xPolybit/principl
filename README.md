@@ -584,14 +584,18 @@ fn main() {
 ```
 
 Every enum variant must be covered, or the match must include `_` or a binding
-pattern. `Bool` matches are exhaustive with both `true` and `false`; other
-primitive matches need a catch-all arm. Integer, floating-point, boolean, and
-string literals are supported as patterns. Expression arms must have one
-compatible result type. A block arm has type `Void`. Each arm has its own
-lexical scope, and its bindings are immutable and unavailable after the arm.
-Duplicate variants/literals and patterns after a catch-all are diagnosed as
-unreachable. When nested payload patterns do not cover every payload value,
-the checker conservatively requires an additional catch-all arm.
+pattern. A non-exhaustive enum match names the missing case when possible, for
+example `missing variant: Boolish.No`. Coverage is checked against the enum's
+declared variants, so `Result<Int, String>` and `Result<String, Int>` use the
+same variant set regardless of their payload types. `Bool` matches are
+exhaustive with both `true` and `false`; other primitive matches need a
+catch-all arm. Integer, floating-point, boolean, and string literals are
+supported as patterns. Expression arms must have one compatible result type.
+A block arm has type `Void`. Each arm has its own lexical scope, and its
+bindings are immutable and unavailable after the arm. Duplicate
+variants/literals and patterns after a catch-all are diagnosed as unreachable.
+When nested payload patterns do not cover every payload value, the checker
+conservatively requires an additional catch-all arm.
 
 Enum matches lower to LLVM control flow using a tag switch for direct variant
 patterns. Nested payload checks and primitive/string literals use additional
