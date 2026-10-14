@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn recognizes_keywords_and_keeps_other_words_as_identifiers() {
         let tokens = kinds(
-            "fn return let var if else while for in class struct interface trait implements init self import extern true false function",
+            "fn return let var if else while for in class struct interface trait implements init self import extern true false enum function",
         );
 
         assert_eq!(
@@ -465,6 +465,7 @@ mod tests {
                 TokenKind::Keyword(Keyword::Extern),
                 TokenKind::BooleanLiteral(true),
                 TokenKind::BooleanLiteral(false),
+                TokenKind::Identifier("enum".to_owned()),
                 TokenKind::Identifier("function".to_owned()),
                 TokenKind::Eof,
             ]

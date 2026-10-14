@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
-    ExpressionKind, ExternBlockDeclaration, FieldDeclaration, FunctionDeclaration, Identifier,
-    InitializerDeclaration, InterfaceDeclaration, Literal, Program, Statement, StatementKind,
-    TraitDeclaration, TypeDeclaration, TypeDeclarationKind, TypeParameterDeclaration,
-    UnaryOperator, VariableDeclaration,
+    Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration,
+    EnumDeclaration, Expression, ExpressionKind, ExternBlockDeclaration, FieldDeclaration,
+    FunctionDeclaration, Identifier, InitializerDeclaration, InterfaceDeclaration, Literal,
+    Program, Statement, StatementKind, TraitDeclaration, TypeDeclaration, TypeDeclarationKind,
+    TypeParameterDeclaration, UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
@@ -106,6 +106,11 @@ impl TypedProgram {
             if let Some(signature) = &info.initializer {
                 collect_function_type_instances(signature, &mut instances);
             }
+            for variant in &info.enum_variants {
+                for ty in &variant.payload {
+                    collect_generic_nominal_instances(ty, &mut instances);
+                }
+            }
         }
         for call in self.generic_function_calls.values() {
             for ty in &call.type_arguments {
@@ -125,7 +130,9 @@ fn collect_generic_nominal_instances(ty: &Type, instances: &mut HashSet<Type>) {
         } => {
             if matches!(
                 constructor,
-                GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_)
+                GenericTypeConstructor::Class(_)
+                    | GenericTypeConstructor::Struct(_)
+                    | GenericTypeConstructor::Enum(_)
             ) {
                 instances.insert(ty.clone());
             }
@@ -189,6 +196,8 @@ pub struct TypeSymbols {
     pub initializer: Option<FunctionType>,
     pub is_interface: bool,
     pub is_trait: bool,
+    pub is_enum: bool,
+    pub enum_variants: Vec<EnumVariantSymbols>,
     pub implemented_interfaces: Vec<String>,
     pub implemented_traits: Vec<String>,
     /// The unique default provider selected for methods not implemented by
@@ -197,12 +206,20 @@ pub struct TypeSymbols {
     member_names: HashSet<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EnumVariantSymbols {
+    pub name: String,
+    pub payload: Vec<Type>,
+    pub span: SourceSpan,
+}
+
 impl TypeSymbols {
     fn new(
         ty: Type,
         type_parameters: Vec<GenericTypeParameter>,
         is_interface: bool,
         is_trait: bool,
+        is_enum: bool,
     ) -> Self {
         Self {
             ty,
@@ -214,6 +231,8 @@ impl TypeSymbols {
             initializer: None,
             is_interface,
             is_trait,
+            is_enum,
+            enum_variants: Vec::new(),
             implemented_interfaces: Vec::new(),
             implemented_traits: Vec::new(),
             default_trait_methods: HashMap::new(),
@@ -328,7 +347,7 @@ impl<'a> Analyzer<'a> {
         for check in pending_checks {
             self.validate_generic_arguments(&check.parameters, &check.arguments, check.span);
         }
-        self.validate_struct_value_layouts(program);
+        self.validate_inline_value_layouts(program);
         self.check_declaration_bodies(program);
 
         SemanticResult {
@@ -372,10 +391,32 @@ impl<'a> Analyzer<'a> {
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
                     self.types.insert(
                         name.clone(),
-                        TypeSymbols::new(ty, type_parameters, false, false),
+                        TypeSymbols::new(ty, type_parameters, false, false, false),
                     );
                     self.accepted_type_declarations
                         .insert(type_declaration.span);
+                }
+                Declaration::Enum(enum_declaration) => {
+                    let name = &enum_declaration.name.name;
+                    if is_reserved_type_name(name) || self.globals.contains_key(name) {
+                        self.error_with(
+                            DiagnosticCode::DuplicateDeclaration,
+                            format!("duplicate or reserved declaration '{name}'"),
+                            enum_declaration.name.span,
+                        );
+                        continue;
+                    }
+                    let ty = Type::Enum(name.clone());
+                    let type_parameters =
+                        self.declare_type_parameters(&enum_declaration.type_parameters);
+                    self.globals
+                        .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
+                    self.types.insert(
+                        name.clone(),
+                        TypeSymbols::new(ty, type_parameters, false, false, true),
+                    );
+                    self.accepted_type_declarations
+                        .insert(enum_declaration.span);
                 }
                 Declaration::Interface(interface) => {
                     let name = &interface.name.name;
@@ -390,8 +431,10 @@ impl<'a> Analyzer<'a> {
                     let ty = Type::Interface(name.clone());
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
-                    self.types
-                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), true, false));
+                    self.types.insert(
+                        name.clone(),
+                        TypeSymbols::new(ty, Vec::new(), true, false, false),
+                    );
                 }
                 Declaration::Trait(trait_declaration) => {
                     let name = &trait_declaration.name.name;
@@ -406,8 +449,10 @@ impl<'a> Analyzer<'a> {
                     let ty = Type::Trait(name.clone());
                     self.globals
                         .insert(name.clone(), GlobalSymbol::Type(ty.clone()));
-                    self.types
-                        .insert(name.clone(), TypeSymbols::new(ty, Vec::new(), false, true));
+                    self.types.insert(
+                        name.clone(),
+                        TypeSymbols::new(ty, Vec::new(), false, true, false),
+                    );
                 }
                 Declaration::Function(function) => {
                     let name = &function.name.name;
@@ -444,6 +489,9 @@ impl<'a> Analyzer<'a> {
                             self.validate_type_parameter_bounds(&method.type_parameters);
                         }
                     }
+                }
+                Declaration::Enum(item) => {
+                    self.validate_type_parameter_bounds(&item.type_parameters);
                 }
                 _ => {}
             }
@@ -642,6 +690,10 @@ impl<'a> Analyzer<'a> {
 
     fn register_type_members(&mut self, program: &Program) {
         for declaration in &program.declarations {
+            if let Declaration::Enum(enum_declaration) = declaration {
+                self.register_enum_variants(enum_declaration);
+                continue;
+            }
             if let Declaration::Interface(interface) = declaration {
                 self.register_interface_methods(interface);
                 continue;
@@ -701,6 +753,47 @@ impl<'a> Analyzer<'a> {
                 }
             }
             self.pop_type_parameters();
+        }
+    }
+
+    fn register_enum_variants(&mut self, declaration: &EnumDeclaration) {
+        if !self.accepted_type_declarations.contains(&declaration.span) {
+            return;
+        }
+        let parameters = self
+            .types
+            .get(&declaration.name.name)
+            .map(|info| info.type_parameters.clone())
+            .unwrap_or_default();
+        self.push_type_parameters(&parameters);
+        let mut variants = Vec::new();
+        let mut seen = HashSet::new();
+        for variant in &declaration.variants {
+            if !seen.insert(variant.name.name.clone()) {
+                self.error_with(
+                    DiagnosticCode::DuplicateDeclaration,
+                    format!(
+                        "duplicate variant '{}' in enum '{}'",
+                        variant.name.name, declaration.name.name
+                    ),
+                    variant.name.span,
+                );
+                continue;
+            }
+            let payload = variant
+                .payload
+                .iter()
+                .map(|reference| self.resolve_type_reference(reference, false))
+                .collect();
+            variants.push(EnumVariantSymbols {
+                name: variant.name.name.clone(),
+                payload,
+                span: variant.span,
+            });
+        }
+        self.pop_type_parameters();
+        if let Some(info) = self.types.get_mut(&declaration.name.name) {
+            info.enum_variants = variants;
         }
     }
 
@@ -1109,14 +1202,14 @@ impl<'a> Analyzer<'a> {
         self.type_parameter_scopes.pop();
     }
 
-    fn validate_struct_value_layouts(&mut self, program: &Program) {
+    fn validate_inline_value_layouts(&mut self, program: &Program) {
         fn recursive_inline_span(
             ty: &Type,
             types: &HashMap<String, TypeSymbols>,
             active: &mut Vec<String>,
             incoming_span: Option<SourceSpan>,
         ) -> Option<SourceSpan> {
-            if ty.list_element().is_some() || matches!(ty, Type::Class(_)) {
+            if ty.is_managed_reference() {
                 return None;
             }
             let Some(name) = ty.nominal_name() else {
@@ -1125,7 +1218,7 @@ impl<'a> Analyzer<'a> {
             let Some(info) = types.get(name) else {
                 return None;
             };
-            if !ty.is_struct() {
+            if !ty.is_struct() && !ty.is_enum() {
                 return None;
             }
             if active.iter().any(|item| item == name) {
@@ -1134,16 +1227,29 @@ impl<'a> Analyzer<'a> {
 
             active.push(name.to_owned());
             let substitutions = type_substitutions(&info.type_parameters, ty.generic_arguments());
-            for field_name in &info.field_order {
-                let Some(field_type) = info.fields.get(field_name) else {
-                    continue;
-                };
-                let instantiated_field = substitute_type(field_type, &substitutions);
-                let field_span = info.field_spans.get(field_name).copied();
-                if let Some(span) =
-                    recursive_inline_span(&instantiated_field, types, active, field_span)
-                {
-                    return Some(span);
+            if ty.is_struct() {
+                for field_name in &info.field_order {
+                    let Some(field_type) = info.fields.get(field_name) else {
+                        continue;
+                    };
+                    let instantiated_field = substitute_type(field_type, &substitutions);
+                    let field_span = info.field_spans.get(field_name).copied();
+                    if let Some(span) =
+                        recursive_inline_span(&instantiated_field, types, active, field_span)
+                    {
+                        return Some(span);
+                    }
+                }
+            } else {
+                for variant in &info.enum_variants {
+                    for payload_type in &variant.payload {
+                        let instantiated = substitute_type(payload_type, &substitutions);
+                        if let Some(span) =
+                            recursive_inline_span(&instantiated, types, active, Some(variant.span))
+                        {
+                            return Some(span);
+                        }
+                    }
                 }
             }
             active.pop();
@@ -1152,20 +1258,27 @@ impl<'a> Analyzer<'a> {
 
         let type_symbols = self.types.clone();
         for declaration in &program.declarations {
-            let Declaration::Struct(structure) = declaration else {
-                continue;
+            let (name, declaration_span, kind) = match declaration {
+                Declaration::Struct(item) => (&item.name.name, item.span, "struct"),
+                Declaration::Enum(item) => (&item.name.name, item.span, "enum"),
+                _ => continue,
             };
-            if !self.accepted_type_declarations.contains(&structure.span) {
+            if !self.accepted_type_declarations.contains(&declaration_span) {
                 continue;
             }
-            let Some(info) = type_symbols.get(&structure.name.name) else {
+            let Some(info) = type_symbols.get(name) else {
                 continue;
             };
             let root_type = if info.type_parameters.is_empty() {
                 info.ty.clone()
             } else {
+                let constructor = if info.is_enum {
+                    GenericTypeConstructor::Enum(name.clone())
+                } else {
+                    GenericTypeConstructor::Struct(name.clone())
+                };
                 Type::generic_instance(
-                    GenericTypeConstructor::Struct(structure.name.name.clone()),
+                    constructor,
                     info.type_parameters
                         .iter()
                         .cloned()
@@ -1176,10 +1289,12 @@ impl<'a> Analyzer<'a> {
             if let Some(span) =
                 recursive_inline_span(&root_type, &type_symbols, &mut Vec::new(), None)
             {
-                self.error(
-                    "recursive struct fields do not have a finite value layout",
-                    span,
-                );
+                let message = if kind == "struct" {
+                    "recursive struct fields do not have a finite value layout"
+                } else {
+                    "recursive enum payloads do not have a finite value layout"
+                };
+                self.error(message, span);
             }
         }
     }
@@ -1379,6 +1494,7 @@ impl<'a> Analyzer<'a> {
                     let constructor = match &info.ty {
                         Type::Class(_) => GenericTypeConstructor::Class(name.to_owned()),
                         Type::Struct(_) => GenericTypeConstructor::Struct(name.to_owned()),
+                        Type::Enum(_) => GenericTypeConstructor::Enum(name.to_owned()),
                         _ => return Type::Error,
                     };
                     self.validate_generic_arguments(&info.type_parameters, args, reference.span);
@@ -1497,6 +1613,7 @@ impl<'a> Analyzer<'a> {
             let constructor = match &info.ty {
                 Type::Class(name) => GenericTypeConstructor::Class(name.clone()),
                 Type::Struct(name) => GenericTypeConstructor::Struct(name.clone()),
+                Type::Enum(name) => GenericTypeConstructor::Enum(name.clone()),
                 _ => return,
             };
             Type::generic_instance(
@@ -1950,6 +2067,91 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    fn enum_type_from_expression(&mut self, expression: &Expression) -> Option<Type> {
+        let (name, type_arguments) = match &expression.kind {
+            ExpressionKind::Identifier(identifier) => (&identifier.name, None),
+            ExpressionKind::GenericReference { name, arguments } => {
+                (&name.name, Some(arguments.as_slice()))
+            }
+            _ => return None,
+        };
+        if self.lookup_variable(name).is_some() {
+            return None;
+        }
+        if !self.types.get(name).is_some_and(|info| info.is_enum) {
+            return None;
+        }
+        let arguments = type_arguments
+            .unwrap_or_default()
+            .iter()
+            .map(|argument| self.resolve_type_reference(argument, false))
+            .collect::<Vec<_>>();
+        let enum_type = self.instantiate_declared_type(name, &arguments, expression.span);
+        self.expression_types
+            .insert(expression.span, enum_type.clone());
+        Some(enum_type)
+    }
+
+    fn check_enum_variant(
+        &mut self,
+        enum_type: &Type,
+        variant_name: &Identifier,
+        arguments: &[Expression],
+        span: SourceSpan,
+    ) -> Type {
+        if enum_type.is_error() {
+            for argument in arguments {
+                self.check_expression(argument, None);
+            }
+            return Type::Error;
+        }
+        let Some(type_name) = enum_type.nominal_name() else {
+            return Type::Error;
+        };
+        let Some(info) = self.types.get(type_name).cloned() else {
+            return Type::Error;
+        };
+        let Some(variant) = info
+            .enum_variants
+            .iter()
+            .find(|variant| variant.name == variant_name.name)
+            .cloned()
+        else {
+            self.error_with(
+                DiagnosticCode::InvalidMember,
+                format!("enum '{type_name}' has no variant '{}'", variant_name.name),
+                variant_name.span,
+            );
+            for argument in arguments {
+                self.check_expression(argument, None);
+            }
+            return Type::Error;
+        };
+        if variant.payload.len() != arguments.len() {
+            self.error_with(
+                DiagnosticCode::InvalidCall,
+                format!(
+                    "variant '{}.{}' expects {} payload value(s), found {}",
+                    type_name,
+                    variant.name,
+                    variant.payload.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+        }
+        let substitutions =
+            type_substitutions(&info.type_parameters, enum_type.generic_arguments());
+        for (index, argument) in arguments.iter().enumerate() {
+            let expected = variant
+                .payload
+                .get(index)
+                .map(|ty| substitute_type(ty, &substitutions));
+            self.check_expression(argument, expected.as_ref());
+        }
+        enum_type.clone()
+    }
+
     fn check_expression(&mut self, expression: &Expression, expected: Option<&Type>) -> Type {
         let actual = match &expression.kind {
             ExpressionKind::Identifier(identifier) => self.check_identifier(identifier),
@@ -1978,8 +2180,12 @@ impl<'a> Analyzer<'a> {
                 self.check_call(callee, arguments, expression.span)
             }
             ExpressionKind::Member { object, member } => {
-                let object_type = self.check_expression(object, None);
-                self.member_type(&object_type, member).0
+                if let Some(enum_type) = self.enum_type_from_expression(object) {
+                    self.check_enum_variant(&enum_type, member, &[], expression.span)
+                } else {
+                    let object_type = self.check_expression(object, None);
+                    self.member_type(&object_type, member).0
+                }
             }
             ExpressionKind::Index { object, index } => {
                 let object_type = self.check_expression(object, None);
@@ -2249,6 +2455,13 @@ impl<'a> Analyzer<'a> {
         arguments: &[Expression],
         call_span: SourceSpan,
     ) -> Type {
+        if let ExpressionKind::Member { object, member } = &callee.kind {
+            if let Some(enum_type) = self.enum_type_from_expression(object) {
+                let result = self.check_enum_variant(&enum_type, member, arguments, call_span);
+                self.expression_types.insert(callee.span, result.clone());
+                return result;
+            }
+        }
         if let ExpressionKind::GenericReference {
             name,
             arguments: type_arguments,
@@ -2593,6 +2806,7 @@ impl<'a> Analyzer<'a> {
         let constructor = match info.ty {
             Type::Class(_) => GenericTypeConstructor::Class(name.to_owned()),
             Type::Struct(_) => GenericTypeConstructor::Struct(name.to_owned()),
+            Type::Enum(_) => GenericTypeConstructor::Enum(name.to_owned()),
             _ => return Type::Error,
         };
         Type::generic_instance(constructor, arguments.to_vec())
@@ -4435,6 +4649,81 @@ fn main() {}"#,
             "{:?}",
             messages(&result)
         );
+    }
+
+    #[test]
+    fn checks_simple_payload_generic_and_nested_enum_values() {
+        let result = analyze_text(
+            r#"struct Point { x: Int }
+class User { name: String }
+enum Direction { North South }
+enum NetworkState { Connected Failed(String) }
+enum Maybe<T> { Some(T) None }
+enum Result<T, E> { Ok(T) Err(E) }
+fn pass(value: Result<Int, String>) -> Result<Int, String> { return value }
+fn main() {
+    let direction = Direction.North
+    let state = NetworkState.Failed("offline")
+    let maybe = Maybe<Point>.Some(Point(3))
+    let result = pass(Result<Int, String>.Ok(42))
+    let absent = Maybe<Int>.None
+    let nested: List<Maybe<Result<Int, String>>> = [Maybe<Result<Int, String>>.Some(result)]
+    let held = Maybe<User>.Some(User("Mira"))
+}"#,
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "enum values should resolve through generic payload types: {:?}",
+            messages(&result)
+        );
+        let maybe = result
+            .typed_program
+            .symbols
+            .type_symbols("Maybe")
+            .expect("enum type should be registered");
+        assert!(maybe.is_enum);
+        assert_eq!(maybe.enum_variants.len(), 2);
+        assert_eq!(
+            maybe.enum_variants[0].payload,
+            [Type::TypeParameter(maybe.type_parameters[0].clone())]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_enum_variants_payload_errors_duplicates_and_recursive_layouts() {
+        let result = analyze_text(
+            r#"enum Token { End Value(Int) Value(String) }
+enum Bad { Nested(Bad) }
+enum Maybe<T> { Some(T) None }
+fn main() {
+    let unknown = Token.Missing
+    let missing = Token.Value
+    let extra = Token.End(1)
+    let wrong = Token.Value("text")
+    let bad_arity = Maybe<Int>.Some()
+}"#,
+        );
+        assert!(has_message(&result, "duplicate variant 'Value'"));
+        assert!(has_message(&result, "has no variant 'Missing'"));
+        assert!(has_message(&result, "expects 1 payload value(s), found 0"));
+        assert!(has_message(&result, "expects 0 payload value(s), found 1"));
+        assert!(has_message(&result, "expected Int, found String"));
+        assert!(has_message(
+            &result,
+            "recursive enum payloads do not have a finite value layout"
+        ));
+    }
+
+    #[test]
+    fn validates_generic_enum_arity_and_unknown_payload_types() {
+        let result = analyze_text(
+            "enum Maybe<T> { Some(T) None }\nfn main() { let wrong = Maybe<Int, String>.None; let unknown = Maybe<Missing>.None }",
+        );
+        assert!(has_message(
+            &result,
+            "type 'Maybe' expects 1 generic argument(s), found 2"
+        ));
+        assert!(has_message(&result, "unknown type 'Missing'"));
     }
 
     #[test]

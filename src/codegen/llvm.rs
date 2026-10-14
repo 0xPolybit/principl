@@ -6,10 +6,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, Expression,
-    ExpressionKind, ExternalFunctionDeclaration, FunctionDeclaration, InitializerDeclaration,
-    InterfaceDeclaration, Literal, Statement, StatementKind, TraitDeclaration,
-    TraitMethodDeclaration, TypeDeclaration, UnaryOperator,
+    AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration, EnumDeclaration,
+    Expression, ExpressionKind, ExternalFunctionDeclaration, FunctionDeclaration,
+    InitializerDeclaration, InterfaceDeclaration, Literal, Statement, StatementKind,
+    TraitDeclaration, TraitMethodDeclaration, TypeDeclaration, UnaryOperator,
 };
 use crate::compiler::{BuildOptions, Target};
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
@@ -321,7 +321,7 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate(mut self) -> Result<String, Diagnostic> {
-        let (functions, classes, structs, interfaces, traits, external_functions) =
+        let (functions, classes, structs, enums, interfaces, traits, external_functions) =
             self.supported_declarations()?;
         let main = functions
             .iter()
@@ -492,6 +492,31 @@ impl<'a> IrGenerator<'a> {
                 let Some(type_name) = instance.nominal_name() else {
                     continue;
                 };
+                let info = self.typed.symbols.type_symbols(type_name).ok_or_else(|| {
+                    self.error(
+                        "missing semantic generic type symbols",
+                        SourceSpan::new(0, 0),
+                    )
+                })?;
+                let substitutions = info
+                    .type_parameters
+                    .iter()
+                    .zip(instance.generic_arguments())
+                    .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                    .collect::<HashMap<_, _>>();
+                if instance.is_enum() {
+                    for variant in &info.enum_variants {
+                        for payload_type in &variant.payload {
+                            let concrete = substitute_codegen_type(payload_type, &substitutions);
+                            self.queue_nested_generic_types(
+                                &concrete,
+                                &mut generic_types,
+                                &mut queued_types,
+                            )?;
+                        }
+                    }
+                    continue;
+                }
                 let Some(declaration) = classes
                     .iter()
                     .chain(structs.iter())
@@ -504,18 +529,6 @@ impl<'a> IrGenerator<'a> {
                         SourceSpan::new(0, 0),
                     ));
                 };
-                let info = self.typed.symbols.type_symbols(type_name).ok_or_else(|| {
-                    self.error(
-                        "missing semantic generic type symbols",
-                        declaration.name.span,
-                    )
-                })?;
-                let substitutions = info
-                    .type_parameters
-                    .iter()
-                    .zip(instance.generic_arguments())
-                    .map(|(parameter, argument)| (parameter.id, argument.clone()))
-                    .collect::<HashMap<_, _>>();
                 let specialized_typed = self.typed.specialized_view(&substitutions);
                 for field_name in &info.field_order {
                     let Some(field_type) = info.fields.get(field_name) else {
@@ -577,6 +590,16 @@ impl<'a> IrGenerator<'a> {
                 ir.push_str(&self.struct_layout(structure)?);
             }
         }
+        for item in &enums {
+            if self
+                .typed
+                .symbols
+                .type_symbols(&item.name.name)
+                .is_some_and(|info| info.type_parameters.is_empty())
+            {
+                ir.push_str(&self.enum_layout(&Type::Enum(item.name.name.clone()))?);
+            }
+        }
         let mut concrete_types = queued_types.into_iter().collect::<Vec<_>>();
         concrete_types.sort_by_key(|ty| mangled_type(ty).unwrap_or_default());
         for ty in &concrete_types {
@@ -588,6 +611,15 @@ impl<'a> IrGenerator<'a> {
                 }
             ) {
                 ir.push_str(&self.generic_struct_layout(ty)?);
+            }
+            if matches!(
+                ty,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Enum(_),
+                    ..
+                }
+            ) {
+                ir.push_str(&self.enum_layout(ty)?);
             }
         }
         for class in &classes {
@@ -782,6 +814,7 @@ impl<'a> IrGenerator<'a> {
             Vec<&'a FunctionDeclaration>,
             Vec<&'a TypeDeclaration>,
             Vec<&'a TypeDeclaration>,
+            Vec<&'a EnumDeclaration>,
             Vec<&'a InterfaceDeclaration>,
             Vec<&'a TraitDeclaration>,
             Vec<&'a ExternalFunctionDeclaration>,
@@ -791,6 +824,7 @@ impl<'a> IrGenerator<'a> {
         let mut functions = Vec::new();
         let mut classes = Vec::new();
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
         let mut interfaces = Vec::new();
         let mut traits = Vec::new();
         let mut external_functions = Vec::new();
@@ -811,6 +845,7 @@ impl<'a> IrGenerator<'a> {
                     }
                     structs.push(item);
                 }
+                Declaration::Enum(item) => enums.push(item),
                 Declaration::Interface(item) => interfaces.push(item),
                 Declaration::Trait(item) => traits.push(item),
                 Declaration::Import(item) => {
@@ -838,6 +873,7 @@ impl<'a> IrGenerator<'a> {
             functions,
             classes,
             structs,
+            enums,
             interfaces,
             traits,
             external_functions,
@@ -937,6 +973,36 @@ impl<'a> IrGenerator<'a> {
         Ok(format!("{layout} = type {{ {} }}\n", fields.join(", ")))
     }
 
+    fn enum_layout(&self, enum_type: &Type) -> Result<String, Diagnostic> {
+        let Some(name) = enum_type.nominal_name() else {
+            return Err(self.error("missing enum layout name", SourceSpan::new(0, 0)));
+        };
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(name)
+            .ok_or_else(|| self.error("missing semantic enum layout", SourceSpan::new(0, 0)))?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(enum_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut fields = vec!["i32".to_owned()];
+        for variant in &info.enum_variants {
+            let payload = variant
+                .payload
+                .iter()
+                .map(|ty| substitute_codegen_type(ty, &substitutions))
+                .map(|ty| llvm_type(&ty, variant.span, self.source))
+                .collect::<Result<Vec<_>, _>>()?;
+            fields.push(format!("{{ {} }}", payload.join(", ")));
+        }
+        let layout = enum_type_name(enum_type)
+            .ok_or_else(|| self.error("could not name enum layout", SourceSpan::new(0, 0)))?;
+        Ok(format!("{layout} = type {{ {} }}\n", fields.join(", ")))
+    }
+
     fn generic_class_layout(&self, instance: &Type) -> Result<String, Diagnostic> {
         let Some(name) = instance.nominal_name() else {
             return Err(self.error("missing generic class name", SourceSpan::new(0, 0)));
@@ -990,7 +1056,10 @@ impl<'a> IrGenerator<'a> {
     ) -> Result<(), Diagnostic> {
         match &ty {
             Type::GenericInstance {
-                constructor: GenericTypeConstructor::Class(_) | GenericTypeConstructor::Struct(_),
+                constructor:
+                    GenericTypeConstructor::Class(_)
+                    | GenericTypeConstructor::Struct(_)
+                    | GenericTypeConstructor::Enum(_),
                 ..
             } => {
                 if contains_type_parameter(&ty) {
@@ -1729,6 +1798,14 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::Bool => Ok("i1".to_owned()),
         Type::String => Ok("ptr".to_owned()),
         Type::Class(_) => Ok("ptr".to_owned()),
+        Type::Enum(_) => enum_type_name(ty).ok_or_else(|| {
+            Diagnostic::at_source(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                source,
+                span,
+            )
+        }),
         Type::Interface(name) => Ok(interface_type_name(name)),
         Type::Trait(name) => Ok(trait_type_name(name)),
         Type::GenericInstance {
@@ -1746,6 +1823,17 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
             Diagnostic::at_source(
                 DiagnosticCode::UnsupportedFeature,
                 "this generic struct layout contains a type the native backend cannot represent",
+                source,
+                span,
+            )
+        }),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Enum(_),
+            ..
+        } => enum_type_name(ty).ok_or_else(|| {
+            Diagnostic::at_source(
+                DiagnosticCode::UnsupportedFeature,
+                "this generic enum layout contains a type the native backend cannot represent",
                 source,
                 span,
             )
@@ -1792,6 +1880,7 @@ fn mangled_type(ty: &Type) -> Option<String> {
         Type::Void => Some("v".to_owned()),
         Type::Class(name) => Some(format!("c{}_{}", name.len(), encode_identifier(name))),
         Type::Struct(name) => Some(format!("u{}_{}", name.len(), encode_identifier(name))),
+        Type::Enum(name) => Some(format!("e{}_{}", name.len(), encode_identifier(name))),
         Type::Interface(name) => Some(format!("n{}_{}", name.len(), encode_identifier(name))),
         Type::Trait(name) => Some(format!("t{}_{}", name.len(), encode_identifier(name))),
         Type::GenericInstance {
@@ -1808,6 +1897,15 @@ fn mangled_type(ty: &Type) -> Option<String> {
             arguments,
         } => Some(format!(
             "gu{}_{}_{}",
+            name.len(),
+            encode_identifier(name),
+            mangled_type_arguments(arguments)?
+        )),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Enum(name),
+            arguments,
+        } => Some(format!(
+            "ge{}_{}_{}",
             name.len(),
             encode_identifier(name),
             mangled_type_arguments(arguments)?
@@ -1981,6 +2079,17 @@ fn specialized_struct_type_name(ty: &Type) -> Option<String> {
             constructor: GenericTypeConstructor::Struct(_),
             ..
         } => Some(format!("%princi.struct.{}", mangled_type(ty)?)),
+        _ => None,
+    }
+}
+
+fn enum_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Enum(name) => Some(format!("%princi.enum.{}", encode_identifier(name))),
+        Type::GenericInstance {
+            constructor: GenericTypeConstructor::Enum(_),
+            ..
+        } => Some(format!("%princi.enum.{}", mangled_type(ty)?)),
         _ => None,
     }
 }
@@ -3106,6 +3215,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .expression_type(object)
             .cloned()
             .ok_or_else(|| self.error("missing semantic receiver type", object.span))?;
+        if object_type.is_enum() {
+            return self.emit_enum_variant_value(&object_type, member, &[], member.span);
+        }
         if object_type.list_element().is_some() {
             if member.name != "length" {
                 return Err(self.error(
@@ -3306,6 +3418,90 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         })
     }
 
+    fn emit_enum_variant_value(
+        &mut self,
+        enum_type: &Type,
+        variant_name: &crate::ast::Identifier,
+        arguments: &[Expression],
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let type_name = enum_type
+            .nominal_name()
+            .ok_or_else(|| self.error("missing enum type name", span))?;
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(type_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic enum declaration", span))?;
+        let variant_index = info
+            .enum_variants
+            .iter()
+            .position(|variant| variant.name == variant_name.name)
+            .ok_or_else(|| {
+                self.error(
+                    format!("enum '{type_name}' has no variant '{}'", variant_name.name),
+                    variant_name.span,
+                )
+            })?;
+        let variant = info.enum_variants[variant_index].clone();
+        if variant.payload.len() != arguments.len() {
+            return Err(self.error("enum variant arity changed after semantic analysis", span));
+        }
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(enum_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let payload_types = variant
+            .payload
+            .iter()
+            .map(|ty| substitute_codegen_type(ty, &substitutions))
+            .collect::<Vec<_>>();
+        let payload_llvm_types = payload_types
+            .iter()
+            .map(|ty| llvm_type(ty, variant.span, self.source))
+            .collect::<Result<Vec<_>, _>>()?;
+        let payload_aggregate_type = format!("{{ {} }}", payload_llvm_types.join(", "));
+        let mut payload_value = "zeroinitializer".to_owned();
+        if !arguments.is_empty() {
+            payload_value = "undef".to_owned();
+            for (index, (argument, expected_type)) in
+                arguments.iter().zip(payload_types.iter()).enumerate()
+            {
+                let value = self.emit_expression(argument)?;
+                if !expected_type.accepts(&value.ty) {
+                    return Err(self.error(
+                        "enum payload type changed after semantic analysis",
+                        argument.span,
+                    ));
+                }
+                let next = self.fresh_value();
+                self.instruction(&format!(
+                    "{next} = insertvalue {payload_aggregate_type} {payload_value}, {} {}, {index}",
+                    payload_llvm_types[index], value.operand
+                ));
+                payload_value = next;
+            }
+        }
+
+        let llvm_enum_type = llvm_type(enum_type, span, self.source)?;
+        let tagged = self.fresh_value();
+        self.instruction(&format!(
+            "{tagged} = insertvalue {llvm_enum_type} zeroinitializer, i32 {variant_index}, 0"
+        ));
+        let result = self.fresh_value();
+        self.instruction(&format!(
+            "{result} = insertvalue {llvm_enum_type} {tagged}, {payload_aggregate_type} {payload_value}, {}",
+            variant_index + 1
+        ));
+        Ok(IrValue {
+            ty: enum_type.clone(),
+            operand: result,
+        })
+    }
+
     fn emit_allocate_object(&mut self, class_type: &Type) -> Result<String, Diagnostic> {
         let layout = specialized_class_type_name(class_type).ok_or_else(|| {
             self.error(
@@ -3401,6 +3597,19 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         span: SourceSpan,
     ) -> Result<IrValue, Diagnostic> {
         if let ExpressionKind::Member { object, member } = ungroup_kind(&callee.kind) {
+            if self
+                .typed
+                .expression_type(object)
+                .is_some_and(Type::is_enum)
+            {
+                let enum_type = self
+                    .typed
+                    .expression_type_at(span)
+                    .cloned()
+                    .or_else(|| self.typed.expression_type(object).cloned())
+                    .ok_or_else(|| self.error("missing semantic enum type", span))?;
+                return self.emit_enum_variant_value(&enum_type, member, arguments, span);
+            }
             return self.emit_method_call(callee, object, member, arguments, span);
         }
         let name = match ungroup_kind(&callee.kind) {
@@ -4613,6 +4822,39 @@ fn main() {
         assert!(ir.contains("ret %princi.struct.506f696e74"));
         assert!(ir.contains("call %princi.struct.506f696e74 @princi_fn_7472616e736c617465"));
         assert!(!ir.contains("call ptr @princi_rt_alloc_object"));
+    }
+
+    #[test]
+    fn lowers_tagged_enum_values_and_generic_payload_layouts() {
+        let ir = lower(
+            r#"enum Direction { North South East West }
+enum NetworkState { Connected Failed(String) }
+enum Maybe<T> { Some(T) None }
+enum Result<T, E> { Ok(T) Err(E) }
+fn forward(value: Result<Int, String>) -> Result<Int, String> { return value }
+fn main() {
+    let direction = Direction.North
+    let state = NetworkState.Failed("offline")
+    let maybe = Maybe<String>.Some("ready")
+    let result = forward(Result<Int, String>.Ok(42))
+    let absent = Maybe<Int>.None
+}"#,
+        )
+        .expect("enum values should lower to typed LLVM aggregates");
+
+        assert!(
+            ir.contains("%princi.enum.446972656374696f6e = type { i32, {  }, {  }, {  }, {  } }")
+        );
+        assert!(ir.contains("%princi.enum.4e6574776f726b5374617465 = type { i32, {  }, { ptr } }"));
+        assert!(ir.contains("%princi.enum.ge5_4d61796265_a1_i = type { i32, { i64 }, {  } }"));
+        assert!(
+            ir.contains("%princi.enum.ge6_526573756c74_a2_i_s = type { i32, { i64 }, { ptr } }")
+        );
+        assert!(ir.contains("insertvalue %princi.enum.ge6_526573756c74_a2_i_s"));
+        assert!(
+            ir.contains("define %princi.enum.ge6_526573756c74_a2_i_s @princi_fn_666f7277617264")
+        );
+        assert!(ir.contains("ret %princi.enum.ge6_526573756c74_a2_i_s"));
     }
 
     #[test]

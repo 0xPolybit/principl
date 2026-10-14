@@ -195,6 +195,57 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn simple_and_generic_enum_values_move_through_functions_and_execute() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"struct Point { x: Int }
+struct Cell<T> { value: T }
+class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+}
+class User {
+    name: String
+    init(name: String) { self.name = name }
+}
+enum Direction { North South East West }
+enum NetworkState { Connected Connecting Disconnected Failed(String) }
+enum Maybe<T> { Some(T) None }
+enum Result<T, E> { Ok(T) Err(E) }
+enum Envelope<T> { Number(Int) Measure(Float) Flag(Bool) Point(Point) User(User) Text(String) Values(List<T>) Nested(Maybe<T>) GenericClass(Box<T>) GenericStruct(Cell<T>) }
+fn forward<U>(value: U) -> U {
+    return value
+}
+fn main() {
+    let direction = Direction.North
+    let state = NetworkState.Failed("Connection refused")
+    let maybe = Maybe<Result<Int, String>>.Some(forward(Result<Int, String>.Ok(42)))
+    let absent = Maybe<Int>.None
+    let point = forward(Envelope<Int>.Point(Point(3)))
+    let measure = forward(Envelope<Int>.Measure(2.5))
+    let flag = forward(Envelope<Int>.Flag(true))
+    let user = forward(Envelope<Int>.User(User("Mira")))
+    let text = forward(Envelope<Int>.Text("payload"))
+    let values = forward(Envelope<Int>.Values([1, 2, 3]))
+    let nested = forward(Envelope<Int>.Nested(Maybe<Int>.Some(9)))
+    let generic_class = forward(Envelope<Int>.GenericClass(Box(11)))
+    let generic_struct = forward(Envelope<Int>.GenericStruct(Cell<Int>(12)))
+    var numbers: List<Envelope<Int>> = [Envelope<Int>.Number(7)]
+    numbers.add(Envelope<Int>.Number(8))
+    let moved = forward(numbers[1])
+    println(numbers.length)
+    println("enum aggregate round-trip succeeded")
+}"#;
+    for file_name in ["enums.prnc", "enums.princi"] {
+        let stdout = dir.build_and_run(file_name, source);
+        assert_eq!(stdout, "2\nenum aggregate round-trip succeeded\n");
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn integer_main_return_becomes_the_process_exit_status() {
     if skip_without_native_toolchain() {
         return;

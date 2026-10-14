@@ -11,10 +11,26 @@ pub enum Declaration {
     Function(FunctionDeclaration),
     Class(TypeDeclaration),
     Struct(TypeDeclaration),
+    Enum(EnumDeclaration),
     Interface(InterfaceDeclaration),
     Trait(TraitDeclaration),
     Import(ImportDeclaration),
     ExternBlock(ExternBlockDeclaration),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDeclaration {
+    pub name: Identifier,
+    pub type_parameters: Vec<TypeParameterDeclaration>,
+    pub variants: Vec<EnumVariantDeclaration>,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariantDeclaration {
+    pub name: Identifier,
+    pub payload: Vec<TypeReference>,
+    pub span: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

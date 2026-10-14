@@ -5,10 +5,12 @@ use std::fmt;
 /// value is an inline pair containing a managed class reference and a dispatch
 /// table reference. A `Trait` value uses the same pair; class values keep their
 /// reference, while struct values are copied into managed storage when viewed
-/// through a trait. Princi has no raw-pointer type. `Any`, `Error`, function,
-/// range, generic-parameter, and generic-instance types are compiler
-/// representations; generic declarations and instances are checked before the
-/// native backend specializes them.
+/// through a trait. Enum values are inline tagged aggregates: copying one
+/// copies its payload slots, while managed-reference payloads remain shared
+/// under their existing type rules. Princi has no raw-pointer type. `Any`,
+/// `Error`, function, range, generic-parameter, and generic-instance types are
+/// compiler representations; generic declarations and instances are checked
+/// before the native backend specializes them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
@@ -18,6 +20,7 @@ pub enum Type {
     Void,
     Class(String),
     Struct(String),
+    Enum(String),
     Interface(String),
     Trait(String),
     TypeParameter(GenericTypeParameter),
@@ -45,6 +48,7 @@ pub enum GenericTypeConstructor {
     List,
     Class(String),
     Struct(String),
+    Enum(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -122,14 +126,29 @@ impl Type {
             )
     }
 
+    pub fn is_enum(&self) -> bool {
+        matches!(self, Type::Enum(_))
+            || matches!(
+                self,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Enum(_),
+                    ..
+                }
+            )
+    }
+
     pub fn nominal_name(&self) -> Option<&str> {
         match self {
-            Type::Class(name) | Type::Struct(name) | Type::Interface(name) | Type::Trait(name) => {
-                Some(name)
-            }
+            Type::Class(name)
+            | Type::Struct(name)
+            | Type::Enum(name)
+            | Type::Interface(name)
+            | Type::Trait(name) => Some(name),
             Type::GenericInstance {
                 constructor:
-                    GenericTypeConstructor::Class(name) | GenericTypeConstructor::Struct(name),
+                    GenericTypeConstructor::Class(name)
+                    | GenericTypeConstructor::Struct(name)
+                    | GenericTypeConstructor::Enum(name),
                 ..
             } => Some(name),
             _ => None,
@@ -202,9 +221,11 @@ impl fmt::Display for Type {
             Type::Bool => formatter.write_str("Bool"),
             Type::String => formatter.write_str("String"),
             Type::Void => formatter.write_str("Void"),
-            Type::Class(name) | Type::Struct(name) | Type::Interface(name) | Type::Trait(name) => {
-                formatter.write_str(name)
-            }
+            Type::Class(name)
+            | Type::Struct(name)
+            | Type::Enum(name)
+            | Type::Interface(name)
+            | Type::Trait(name) => formatter.write_str(name),
             Type::TypeParameter(parameter) => formatter.write_str(&parameter.name),
             Type::GenericInstance {
                 constructor,
@@ -212,9 +233,9 @@ impl fmt::Display for Type {
             } => {
                 let name = match constructor {
                     GenericTypeConstructor::List => "List",
-                    GenericTypeConstructor::Class(name) | GenericTypeConstructor::Struct(name) => {
-                        name
-                    }
+                    GenericTypeConstructor::Class(name)
+                    | GenericTypeConstructor::Struct(name)
+                    | GenericTypeConstructor::Enum(name) => name,
                 };
                 write!(formatter, "{name}<{}>", display_types(arguments))
             }
@@ -333,5 +354,18 @@ mod tests {
             vec![Type::String, Type::Float],
         );
         assert_eq!(pair.to_string(), "Pair<String, Float>");
+    }
+
+    #[test]
+    fn generic_enum_types_are_inline_values_not_managed_references() {
+        let maybe = Type::generic_instance(
+            GenericTypeConstructor::Enum("Maybe".to_owned()),
+            vec![Type::String],
+        );
+        assert_eq!(maybe.to_string(), "Maybe<String>");
+        assert!(maybe.is_enum());
+        assert!(!maybe.is_struct());
+        assert!(!maybe.is_managed_reference());
+        assert!(!Type::Enum("Direction".to_owned()).is_managed_reference());
     }
 }

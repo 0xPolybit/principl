@@ -80,6 +80,9 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Struct) => self
                 .parse_type_declaration(TypeDeclarationKind::Struct)
                 .map(Declaration::Struct),
+            TokenKind::Identifier(ref name) if name == "enum" => {
+                self.parse_enum().map(Declaration::Enum)
+            }
             TokenKind::Keyword(Keyword::Interface) => {
                 self.parse_interface().map(Declaration::Interface)
             }
@@ -91,9 +94,63 @@ impl Parser<'_> {
                 self.parse_extern_block().map(Declaration::ExternBlock)
             }
             _ => Err(self.error_here(
-                "expected a function, class, struct, interface, trait, import, or extern declaration",
+                "expected a function, class, struct, enum, interface, trait, import, or extern declaration",
             )),
         }
+    }
+
+    fn parse_enum(&mut self) -> Result<EnumDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let name = self.expect_identifier("expected enum name")?;
+        let type_parameters = self.parse_type_parameters()?;
+        self.expect_punctuation(Punctuation::LeftBrace, "expected '{' after enum name")?;
+
+        let mut variants = Vec::new();
+        while !self.check_punctuation(Punctuation::RightBrace) && !self.at_eof() {
+            let variant_name = self.expect_identifier("expected enum variant name")?;
+            let variant_start = variant_name.span.start;
+            let mut payload = Vec::new();
+            let mut end = variant_name.span.end;
+            if self.eat_punctuation(Punctuation::LeftParen) {
+                if !self.check_punctuation(Punctuation::RightParen) {
+                    loop {
+                        payload.push(self.parse_type_reference("expected enum payload type")?);
+                        if !self.eat_punctuation(Punctuation::Comma) {
+                            break;
+                        }
+                        if self.check_punctuation(Punctuation::RightParen) {
+                            break;
+                        }
+                    }
+                }
+                let close = self.expect_punctuation(
+                    Punctuation::RightParen,
+                    "expected ')' after enum payload types",
+                )?;
+                end = close.location.span.end;
+            }
+            variants.push(EnumVariantDeclaration {
+                name: variant_name,
+                payload,
+                span: SourceSpan::new(variant_start, end),
+            });
+
+            // Newlines are insignificant; commas and semicolons are accepted
+            // as optional separators for single-line declarations.
+            self.eat_punctuation(Punctuation::Comma);
+            self.eat_punctuation(Punctuation::Semicolon);
+        }
+
+        let close = self.expect_punctuation(
+            Punctuation::RightBrace,
+            "expected '}' to close enum declaration",
+        )?;
+        Ok(EnumDeclaration {
+            name,
+            type_parameters,
+            variants,
+            span: SourceSpan::new(start, close.location.span.end),
+        })
     }
 
     fn parse_extern_block(&mut self) -> Result<ExternBlockDeclaration, Diagnostic> {
@@ -896,7 +953,9 @@ impl Parser<'_> {
                             };
                             return self.parse_construction_expression(type_reference);
                         }
-                        if self.check_punctuation(Punctuation::LeftParen) {
+                        if self.check_punctuation(Punctuation::LeftParen)
+                            || self.check_punctuation(Punctuation::Dot)
+                        {
                             let span = SourceSpan::new(identifier.span.start, argument_span.end);
                             return Ok(Expression {
                                 kind: ExpressionKind::GenericReference {
@@ -1887,6 +1946,81 @@ fn main() {}"#,
                 ..function.parameters[0].type_reference.span.end],
             "List<List<Int>>"
         );
+    }
+
+    #[test]
+    fn parses_simple_payload_and_generic_enum_declarations_and_construction_syntax() {
+        let result = parse_text(
+            "enums.prnc",
+            r#"enum Direction { North South East West }
+enum NetworkState {
+    Connected
+    Failed(String, Int)
+}
+enum Maybe<T> { Some(T) None }
+enum Result<T, E> { Ok(T) Err(E) }
+fn main() {
+    let direction = Direction.North
+    let failure = NetworkState.Failed("offline", 7)
+    let result = Result<Int, String>.Ok(42)
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+
+        let Declaration::Enum(direction) = &result.program.declarations[0] else {
+            panic!("expected enum declaration");
+        };
+        assert_eq!(
+            direction
+                .variants
+                .iter()
+                .map(|variant| variant.name.name.as_str())
+                .collect::<Vec<_>>(),
+            ["North", "South", "East", "West"]
+        );
+        let Declaration::Enum(state) = &result.program.declarations[1] else {
+            panic!("expected payload enum declaration");
+        };
+        assert_eq!(state.variants[1].payload.len(), 2);
+        assert_eq!(state.variants[1].payload[0].name, "String");
+        assert_eq!(state.variants[1].payload[1].name, "Int");
+        let Declaration::Enum(maybe) = &result.program.declarations[2] else {
+            panic!("expected generic enum declaration");
+        };
+        assert_eq!(maybe.type_parameters[0].name.name, "T");
+
+        let Declaration::Function(main) = &result.program.declarations[4] else {
+            panic!("expected main function");
+        };
+        let StatementKind::Variable(variable) = &main.body.statements[2].kind else {
+            panic!("expected generic enum variable");
+        };
+        let Some(Expression {
+            kind: ExpressionKind::Call { callee, arguments },
+            ..
+        }) = variable.initializer.as_ref()
+        else {
+            panic!("expected payload variant call");
+        };
+        assert_eq!(arguments.len(), 1);
+        let ExpressionKind::Member { object, member } = &callee.kind else {
+            panic!("expected qualified enum variant");
+        };
+        assert_eq!(member.name, "Ok");
+        assert!(matches!(
+            object.kind,
+            ExpressionKind::GenericReference { .. }
+        ));
+    }
+
+    #[test]
+    fn enum_programs_parse_identically_with_both_source_extensions() {
+        let text = "enum Maybe<T> { Some(T) None }\nfn main() { let enum = 1; let value = Maybe<Int>.Some(enum) }";
+        let prnc = parse_text("alias.prnc", text);
+        let princi = parse_text("alias.princi", text);
+        assert!(prnc.diagnostics.is_empty(), "{:?}", prnc.diagnostics);
+        assert!(princi.diagnostics.is_empty(), "{:?}", princi.diagnostics);
+        assert_eq!(prnc.program, princi.program);
     }
 
     #[test]

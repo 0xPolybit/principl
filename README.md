@@ -500,8 +500,47 @@ Generic methods may use their enclosing class parameters, as in
 `fn get() -> T`. Method-level generic parameters are not yet lowered in this
 work. Traits and runtime trait values are now implemented in the v0.2 branch
 work described below. Bounded generics for functions, classes, and structs are
-implemented. Algebraic enums, exhaustive pattern matching, `Result<T, E>`, and
-`?` error propagation remain proposed v0.2 work.
+implemented. The v0.2 work also supports algebraic enum declarations,
+generic enum types, variant construction, and by-value movement through local
+variables, function parameters, and returns. Pattern matching, destructuring,
+exhaustiveness checking, and `?` propagation are still planned.
+
+Enums use named variants with optional positional payloads:
+
+```princi
+enum Direction {
+    North
+    South
+    East
+    West
+}
+
+enum NetworkState {
+    Connected
+    Connecting
+    Disconnected
+    Failed(String)
+}
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+fn main() {
+    let direction = Direction.North
+    let failure = NetworkState.Failed("Connection refused")
+    let result = Result<Int, String>.Ok(42)
+}
+```
+
+Each native enum value has an `i32` discriminant and typed storage for each
+variant payload. The current LLVM layout is an internal tagged aggregate, not a
+C ABI layout. Enum values copy inline struct/enum payloads by value; String,
+List, and class payloads retain their existing managed-reference behavior.
+Payload extraction and branching on variants are not yet available because
+pattern matching is planned separately. `Maybe<T>` and `Result<T, E>` are
+ordinary user-declared enums in this stage, not built-in prelude types.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
 
