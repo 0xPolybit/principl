@@ -246,6 +246,82 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn enum_match_payloads_and_match_expressions_execute_with_both_extensions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"enum NetworkState { Connected Connecting Disconnected Failed(String) Other }
+enum Maybe<T> { Some(T) None }
+fn valueOr<T>(value: Maybe<T>, fallback: T) -> T {
+    return match value {
+        Some(item) => item
+        None => fallback
+    }
+}
+fn main() {
+    let state = NetworkState.Failed("connection refused")
+    match state {
+        Connected => println("online")
+        Connecting => println("connecting")
+        Failed(reason) => println(reason)
+        _ => {
+            println("offline")
+        }
+    }
+    let message = match state {
+        Connected => "online"
+        Connecting => "connecting"
+        Failed(reason) => reason
+        _ => "offline"
+    }
+    println(message)
+    let maybe = Maybe<Int>.Some(7)
+    println(valueOr(maybe, 0))
+    let label = match maybe {
+        Some(value) => "some"
+        None => "none"
+    }
+    println(label)
+    let nested = Maybe<Maybe<Int>>.Some(Maybe<Int>.Some(9))
+    let inner = match nested {
+        Some(Some(number)) => number
+        _ => 0
+    }
+    println(inner)
+    let number = match 2 {
+        1 => 10
+        2 => 20
+        _ => 0
+    }
+    println(number)
+    let ready = match true {
+        true => "ready"
+        false => "waiting"
+    }
+    println(ready)
+    let measurement = match 1.5 {
+        1.5 => "float"
+        _ => "other"
+    }
+    println(measurement)
+    let response = match "ok" {
+        "ok" => "matched"
+        _ => "other"
+    }
+    println(response)
+}"#;
+    for extension in ["prnc", "princi"] {
+        let stdout = dir.build_and_run(&format!("match.{extension}"), source);
+        assert_eq!(
+            stdout,
+            "connection refused\nconnection refused\n7\nsome\n9\n20\nready\nfloat\nmatched\n"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn integer_main_return_becomes_the_process_exit_status() {
     if skip_without_native_toolchain() {
         return;

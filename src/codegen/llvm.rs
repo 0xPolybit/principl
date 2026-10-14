@@ -49,7 +49,7 @@ struct GenericCallRequest {
     call_span: SourceSpan,
 }
 
-/// Lower the semantically checked procedural, class, and struct subsets to LLVM IR.
+/// Lower semantically checked Princi constructs to the Windows LLVM IR module.
 pub fn generate_llvm_ir(typed: &TypedProgram, source: &SourceFile) -> Result<String, Diagnostic> {
     IrGenerator::new(typed, source).generate()
 }
@@ -2920,6 +2920,488 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 "this expression is outside the supported v0.1 LLVM backend",
                 expression.span,
             )),
+            ExpressionKind::Match(matched) => self.emit_match_expression(matched, expression),
+        }
+    }
+
+    fn emit_match_expression(
+        &mut self,
+        matched: &crate::ast::MatchExpression,
+        expression: &Expression,
+    ) -> Result<IrValue, Diagnostic> {
+        let value = self.emit_expression(&matched.value)?;
+        let result_type = self
+            .typed
+            .expression_type(expression)
+            .cloned()
+            .unwrap_or(Type::Error);
+        let arm_labels = (0..matched.arms.len())
+            .map(|_| self.fresh_label("match.arm"))
+            .collect::<Vec<_>>();
+        let fallback_label = self.fresh_label("match.invalid");
+        let merge_label = self.fresh_label("match.end");
+        let mut incoming = Vec::new();
+
+        let catch_all = matched
+            .arms
+            .iter()
+            .position(|arm| self.pattern_is_catch_all(&value.ty, &arm.pattern));
+        let switch_lowered =
+            self.emit_match_switch(matched, &value, &arm_labels, catch_all, &fallback_label)?;
+        let mut has_fallback_edge = switch_lowered && catch_all.is_none();
+        if !switch_lowered {
+            for (index, arm) in matched.arms.iter().enumerate() {
+                if self.pattern_is_catch_all(&value.ty, &arm.pattern) {
+                    self.terminate(&format!("br label %{}", arm_labels[index]));
+                    break;
+                }
+                let test = self.emit_pattern_test(&value.operand, &value.ty, &arm.pattern)?;
+                let next_label = if index + 1 == matched.arms.len() {
+                    has_fallback_edge = true;
+                    fallback_label.clone()
+                } else {
+                    self.fresh_label("match.next")
+                };
+                self.terminate(&format!(
+                    "br i1 {test}, label %{}, label %{next_label}",
+                    arm_labels[index]
+                ));
+                if index + 1 < matched.arms.len() {
+                    self.label(&next_label);
+                }
+            }
+        }
+
+        for (arm_index, arm) in matched.arms.iter().enumerate() {
+            self.label(&arm_labels[arm_index]);
+            self.push_scope();
+            self.bind_pattern(&value.operand, &value.ty, &arm.pattern)?;
+            let arm_value = match &arm.body {
+                crate::ast::MatchArmBody::Expression(body) => self.emit_expression(body)?,
+                crate::ast::MatchArmBody::Block(block) => {
+                    self.push_scope();
+                    self.emit_block_contents(block)?;
+                    self.pop_scope();
+                    IrValue {
+                        ty: Type::Void,
+                        operand: String::new(),
+                    }
+                }
+            };
+            self.pop_scope();
+            if !self.terminated {
+                let predecessor = self.current_label.clone();
+                self.terminate(&format!("br label %{merge_label}"));
+                if result_type != Type::Void {
+                    incoming.push((arm_value.operand, predecessor));
+                }
+            }
+        }
+
+        if has_fallback_edge {
+            self.label(&fallback_label);
+            self.terminate("unreachable");
+        }
+        self.label(&merge_label);
+        if result_type == Type::Void {
+            return Ok(IrValue {
+                ty: Type::Void,
+                operand: String::new(),
+            });
+        }
+        if incoming.is_empty() {
+            return Err(self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                expression.span,
+            ));
+        }
+        let result_llvm_type = llvm_type(&result_type, expression.span, self.source)?;
+        let result = self.fresh_value();
+        let incoming_values = incoming
+            .iter()
+            .map(|(operand, label)| format!("[ {operand}, %{label} ]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.instruction(&format!(
+            "{result} = phi {result_llvm_type} {incoming_values}"
+        ));
+        Ok(IrValue {
+            ty: result_type,
+            operand: result,
+        })
+    }
+
+    fn emit_match_switch(
+        &mut self,
+        matched: &crate::ast::MatchExpression,
+        value: &IrValue,
+        arm_labels: &[String],
+        catch_all: Option<usize>,
+        fallback_label: &str,
+    ) -> Result<bool, Diagnostic> {
+        let (switch_type, switch_operand, cases) = if value.ty.is_enum() {
+            let Some(type_name) = value.ty.nominal_name() else {
+                return Ok(false);
+            };
+            let Some(info) = self.typed.symbols.type_symbols(type_name) else {
+                return Ok(false);
+            };
+            let enum_llvm_type = llvm_type(&value.ty, matched.value.span, self.source)?;
+            let tag = self.fresh_value();
+            self.instruction(&format!(
+                "{tag} = extractvalue {enum_llvm_type} {}, 0",
+                value.operand
+            ));
+            let mut cases = Vec::new();
+            for (arm_index, arm) in matched.arms.iter().enumerate() {
+                let variant_index = match &arm.pattern.kind {
+                    crate::ast::PatternKind::Name(name) => info
+                        .enum_variants
+                        .iter()
+                        .position(|variant| variant.name == name.name)
+                        .filter(|index| info.enum_variants[*index].payload.is_empty()),
+                    crate::ast::PatternKind::Variant { name, payload } => {
+                        let Some(index) = info
+                            .enum_variants
+                            .iter()
+                            .position(|variant| variant.name == name.name)
+                        else {
+                            return Ok(false);
+                        };
+                        let substitutions = info
+                            .type_parameters
+                            .iter()
+                            .zip(value.ty.generic_arguments())
+                            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+                            .collect::<HashMap<_, _>>();
+                        let payload_types = info.enum_variants[index]
+                            .payload
+                            .iter()
+                            .map(|ty| substitute_codegen_type(ty, &substitutions))
+                            .collect::<Vec<_>>();
+                        let simple = payload.len() == payload_types.len()
+                            && payload.iter().zip(&payload_types).all(
+                                |(pattern, ty)| match &pattern.kind {
+                                    crate::ast::PatternKind::Wildcard => true,
+                                    crate::ast::PatternKind::Name(name) => {
+                                        !ty.is_enum()
+                                            || ty.nominal_name().and_then(|nested_name| {
+                                                self.typed.symbols.type_symbols(nested_name).map(
+                                                    |nested| {
+                                                        !nested.enum_variants.iter().any(
+                                                            |variant| variant.name == name.name,
+                                                        )
+                                                    },
+                                                )
+                                            }) == Some(true)
+                                    }
+                                    _ => false,
+                                },
+                            );
+                        simple.then_some(index)
+                    }
+                    _ => None,
+                };
+                if let Some(variant_index) = variant_index {
+                    cases.push((variant_index.to_string(), arm_index));
+                } else if !self.pattern_is_catch_all(&value.ty, &arm.pattern) {
+                    return Ok(false);
+                }
+            }
+            ("i32".to_owned(), tag, cases)
+        } else if matches!(value.ty, Type::Int | Type::Bool) {
+            let mut cases = Vec::new();
+            for (arm_index, arm) in matched.arms.iter().enumerate() {
+                let constant = match (&value.ty, &arm.pattern.kind) {
+                    (Type::Int, crate::ast::PatternKind::Literal(Literal::Integer(text))) => {
+                        Some(text.clone())
+                    }
+                    (Type::Bool, crate::ast::PatternKind::Literal(Literal::Boolean(value))) => {
+                        Some(value.to_string())
+                    }
+                    (_, crate::ast::PatternKind::Wildcard | crate::ast::PatternKind::Name(_))
+                        if self.pattern_is_catch_all(&value.ty, &arm.pattern) =>
+                    {
+                        None
+                    }
+                    _ => return Ok(false),
+                };
+                if let Some(constant) = constant {
+                    cases.push((constant, arm_index));
+                }
+            }
+            (
+                llvm_type(&value.ty, matched.value.span, self.source)?,
+                value.operand.clone(),
+                cases,
+            )
+        } else {
+            return Ok(false);
+        };
+
+        let default = catch_all
+            .map(|index| arm_labels[index].as_str())
+            .unwrap_or(fallback_label);
+        let mut instruction = format!("switch {switch_type} {switch_operand}, label %{default} [");
+        for (constant, arm_index) in cases {
+            instruction.push_str(&format!(
+                " {switch_type} {constant}, label %{}",
+                arm_labels[arm_index]
+            ));
+        }
+        instruction.push_str(" ]");
+        self.terminate(&instruction);
+        Ok(true)
+    }
+
+    fn pattern_is_catch_all(&self, ty: &Type, pattern: &crate::ast::Pattern) -> bool {
+        match &pattern.kind {
+            crate::ast::PatternKind::Wildcard => true,
+            crate::ast::PatternKind::Name(name) => {
+                !ty.is_enum()
+                    || ty
+                        .nominal_name()
+                        .and_then(|type_name| self.typed.symbols.type_symbols(type_name))
+                        .map_or(true, |info| {
+                            !info
+                                .enum_variants
+                                .iter()
+                                .any(|variant| variant.name == name.name)
+                        })
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_pattern_test(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        pattern: &crate::ast::Pattern,
+    ) -> Result<String, Diagnostic> {
+        match &pattern.kind {
+            crate::ast::PatternKind::Wildcard => Ok("true".to_owned()),
+            crate::ast::PatternKind::Name(name) => {
+                let variant_index = ty
+                    .nominal_name()
+                    .and_then(|type_name| self.typed.symbols.type_symbols(type_name))
+                    .filter(|_| ty.is_enum())
+                    .and_then(|info| {
+                        info.enum_variants
+                            .iter()
+                            .position(|variant| variant.name == name.name)
+                    });
+                if let Some(index) = variant_index {
+                    self.emit_enum_tag_test(value, ty, index, pattern.span)
+                } else {
+                    Ok("true".to_owned())
+                }
+            }
+            crate::ast::PatternKind::Variant { name, payload } => {
+                let index = self.enum_variant_index(ty, name, pattern.span)?;
+                let mut conditions =
+                    vec![self.emit_enum_tag_test(value, ty, index, pattern.span)?];
+                let payload_types = self.enum_payload_types(ty, index, pattern.span)?;
+                let enum_llvm_type = llvm_type(ty, pattern.span, self.source)?;
+                for (payload_index, (subpattern, payload_type)) in
+                    payload.iter().zip(&payload_types).enumerate()
+                {
+                    let extracted = self.fresh_value();
+                    self.instruction(&format!(
+                        "{extracted} = extractvalue {enum_llvm_type} {value}, {}, {payload_index}",
+                        index + 1
+                    ));
+                    conditions.push(self.emit_pattern_test(
+                        &extracted,
+                        payload_type,
+                        subpattern,
+                    )?);
+                }
+                self.combine_pattern_conditions(conditions)
+            }
+            crate::ast::PatternKind::Literal(literal) => {
+                let result = self.fresh_value();
+                match (ty, literal) {
+                    (Type::Int, Literal::Integer(text)) => {
+                        let number = text.parse::<i64>().map_err(|_| {
+                            self.error_with(
+                                DiagnosticCode::Semantic,
+                                "integer pattern is outside the supported Int range",
+                                pattern.span,
+                            )
+                        })?;
+                        self.instruction(&format!("{result} = icmp eq i64 {value}, {number}"));
+                    }
+                    (Type::Float, Literal::FloatingPoint(number)) => {
+                        self.instruction(&format!("{result} = fcmp oeq double {value}, {number}"));
+                    }
+                    (Type::Bool, Literal::Boolean(boolean)) => {
+                        self.instruction(&format!("{result} = icmp eq i1 {value}, {boolean}"));
+                    }
+                    (Type::String, Literal::String(_)) => {
+                        let constant = self.emit_literal(literal, pattern.span)?;
+                        self.instruction(&format!(
+                            "{result} = call i1 @{}(ptr {value}, ptr {})",
+                            crate::runtime::windows_x86_64::string_equal_function(),
+                            constant.operand
+                        ));
+                    }
+                    _ => {
+                        return Err(self.error_with(
+                            DiagnosticCode::InternalCompiler,
+                            INTERNAL_CODEGEN_MESSAGE,
+                            pattern.span,
+                        ));
+                    }
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    fn emit_enum_tag_test(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        index: usize,
+        span: SourceSpan,
+    ) -> Result<String, Diagnostic> {
+        let enum_llvm_type = llvm_type(ty, span, self.source)?;
+        let tag = self.fresh_value();
+        let comparison = self.fresh_value();
+        self.instruction(&format!("{tag} = extractvalue {enum_llvm_type} {value}, 0"));
+        self.instruction(&format!("{comparison} = icmp eq i32 {tag}, {index}"));
+        Ok(comparison)
+    }
+
+    fn enum_variant_index(
+        &self,
+        ty: &Type,
+        name: &crate::ast::Identifier,
+        span: SourceSpan,
+    ) -> Result<usize, Diagnostic> {
+        let Some(type_name) = ty.nominal_name() else {
+            return Err(self.error("variant pattern requires an enum", span));
+        };
+        self.typed
+            .symbols
+            .type_symbols(type_name)
+            .and_then(|info| {
+                info.enum_variants
+                    .iter()
+                    .position(|variant| variant.name == name.name)
+            })
+            .ok_or_else(|| {
+                self.error(
+                    "could not resolve enum pattern after semantic analysis",
+                    name.span,
+                )
+            })
+    }
+
+    fn enum_payload_types(
+        &self,
+        ty: &Type,
+        variant_index: usize,
+        span: SourceSpan,
+    ) -> Result<Vec<Type>, Diagnostic> {
+        let Some(type_name) = ty.nominal_name() else {
+            return Err(self.error("missing enum type for pattern payload", span));
+        };
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(type_name)
+            .ok_or_else(|| self.error("missing enum symbols for pattern payload", span))?;
+        let variant = info
+            .enum_variants
+            .get(variant_index)
+            .ok_or_else(|| self.error("missing enum variant for pattern payload", span))?;
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(ty.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        Ok(variant
+            .payload
+            .iter()
+            .map(|payload| substitute_codegen_type(payload, &substitutions))
+            .collect())
+    }
+
+    fn combine_pattern_conditions(
+        &mut self,
+        conditions: Vec<String>,
+    ) -> Result<String, Diagnostic> {
+        let mut conditions = conditions.into_iter();
+        let Some(mut result) = conditions.next() else {
+            return Ok("true".to_owned());
+        };
+        for condition in conditions {
+            let combined = self.fresh_value();
+            self.instruction(&format!("{combined} = and i1 {result}, {condition}"));
+            result = combined;
+        }
+        Ok(result)
+    }
+
+    fn bind_pattern(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        pattern: &crate::ast::Pattern,
+    ) -> Result<(), Diagnostic> {
+        match &pattern.kind {
+            crate::ast::PatternKind::Wildcard => Ok(()),
+            crate::ast::PatternKind::Name(name) => {
+                let is_variant = ty
+                    .nominal_name()
+                    .and_then(|type_name| self.typed.symbols.type_symbols(type_name))
+                    .filter(|_| ty.is_enum())
+                    .is_some_and(|info| {
+                        info.enum_variants
+                            .iter()
+                            .any(|variant| variant.name == name.name)
+                    });
+                if is_variant {
+                    return Ok(());
+                }
+                let binding_type = self
+                    .typed
+                    .binding_type(name)
+                    .cloned()
+                    .unwrap_or_else(|| ty.clone());
+                let llvm_binding_type = llvm_type(&binding_type, name.span, self.source)?;
+                let address = self.allocate(&llvm_binding_type);
+                self.instruction(&format!("store {llvm_binding_type} {value}, ptr {address}"));
+                self.bind(
+                    &name.name,
+                    LocalBinding {
+                        address,
+                        ty: binding_type,
+                    },
+                );
+                Ok(())
+            }
+            crate::ast::PatternKind::Literal(_) => Ok(()),
+            crate::ast::PatternKind::Variant { name, payload } => {
+                let index = self.enum_variant_index(ty, name, pattern.span)?;
+                let payload_types = self.enum_payload_types(ty, index, pattern.span)?;
+                let enum_llvm_type = llvm_type(ty, pattern.span, self.source)?;
+                for (payload_index, (subpattern, payload_type)) in
+                    payload.iter().zip(&payload_types).enumerate()
+                {
+                    let extracted = self.fresh_value();
+                    self.instruction(&format!(
+                        "{extracted} = extractvalue {enum_llvm_type} {value}, {}, {payload_index}",
+                        index + 1
+                    ));
+                    self.bind_pattern(&extracted, payload_type, subpattern)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -4855,6 +5337,56 @@ fn main() {
             ir.contains("define %princi.enum.ge6_526573756c74_a2_i_s @princi_fn_666f7277617264")
         );
         assert!(ir.contains("ret %princi.enum.ge6_526573756c74_a2_i_s"));
+    }
+
+    #[test]
+    fn lowers_enum_matches_to_tag_dispatch_payload_extraction_and_result_phi() {
+        let ir = lower(
+            r#"enum NetworkState { Connected Connecting Disconnected Failed(String) }
+enum Maybe<T> { Some(T) None }
+fn main() {
+    let state = NetworkState.Failed("offline")
+    match state {
+        Connected => println("online")
+        Connecting => println("connecting")
+        Failed(reason) => println(reason)
+        Disconnected => println("offline")
+    }
+    let maybe = Maybe<Int>.Some(42)
+    let message = match maybe {
+        Some(value) => "some"
+        None => "none"
+    }
+    println(message)
+    let number = match 2 {
+        1 => 10
+        2 => 20
+        _ => 0
+    }
+    println(number)
+    let response = match "yes" {
+        "yes" => "matched"
+        _ => "other"
+    }
+    println(response)
+}"#,
+        )
+        .expect("match expressions should lower to valid LLVM IR");
+
+        assert!(
+            ir.contains("switch i32"),
+            "enum matches should switch on tags"
+        );
+        assert!(ir.contains("extractvalue %princi.enum."));
+        assert!(
+            ir.contains("phi ptr"),
+            "String-valued match needs a phi node"
+        );
+        assert!(
+            ir.contains("switch i64"),
+            "integer literals should lower as a switch"
+        );
+        assert!(ir.contains("@princi_rt_string_equal"));
     }
 
     #[test]

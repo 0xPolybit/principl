@@ -413,7 +413,9 @@ literals (including exponents); double-quoted strings with `\\`, `\"`, `\n`,
 The lexer recognizes the v0.1 keywords `fn`, `return`, `let`, `var`, `if`,
 `else`, `while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and
 `extern`. v0.2 development adds `interface`, `trait`, and `implements` for
-behavioral contracts and their implementations.
+behavioral contracts and their implementations. The word `match` is parsed
+contextually so existing identifiers with that name remain usable. The match
+arm separator `=>` is also recognized.
 
 Supported operators are `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `<`, `<=`,
 `>`, `>=`, `&&`, `||`, `!`, `+=`, `-=`, and `*=`. Punctuation includes
@@ -502,8 +504,9 @@ work. Traits and runtime trait values are now implemented in the v0.2 branch
 work described below. Bounded generics for functions, classes, and structs are
 implemented. The v0.2 work also supports algebraic enum declarations,
 generic enum types, variant construction, and by-value movement through local
-variables, function parameters, and returns. Pattern matching, destructuring,
-exhaustiveness checking, and `?` propagation are still planned.
+variables, function parameters, and returns. Enum pattern matching and
+exhaustiveness checking are implemented as described below; `?` propagation
+remains planned.
 
 Enums use named variants with optional positional payloads:
 
@@ -538,11 +541,62 @@ Each native enum value has an `i32` discriminant and typed storage for each
 variant payload. The current LLVM layout is an internal tagged aggregate, not a
 C ABI layout. Enum values copy inline struct/enum payloads by value; String,
 List, and class payloads retain their existing managed-reference behavior.
-Payload extraction and branching on variants are not yet available because
-pattern matching is planned separately. `Maybe<T>` and `Result<T, E>` are
-ordinary user-declared enums in this stage, not built-in prelude types.
+`match` inspects the active tag and extracts payloads. `Maybe<T>` and
+`Result<T, E>` are ordinary user-declared enums in this stage, not built-in
+prelude types.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
+
+### Match expressions and patterns (v0.2 development)
+
+`match` can be used as a statement or as an expression. Enum variants may be
+matched by name, and positional payloads may bind immutable names or use
+wildcards. Bare names matching nullary variants select them; a payload variant
+must use parentheses even when its payload pattern is `_`. Other lowercase
+names bind the whole matched value. A misspelled uppercase enum variant is
+reported as an unknown variant.
+
+```princi
+enum NetworkState {
+    Connected
+    Connecting
+    Disconnected
+    Failed(String)
+}
+
+fn main() {
+    let state = NetworkState.Failed("Connection refused")
+    match state {
+        Connected => println("online")
+        Connecting => println("connecting")
+        Failed(reason) => println(reason)
+        Disconnected => println("offline")
+    }
+
+    let message = match state {
+        Connected => "online"
+        Connecting => "connecting"
+        Failed(reason) => reason
+        Disconnected => "offline"
+    }
+    println(message)
+}
+```
+
+Every enum variant must be covered, or the match must include `_` or a binding
+pattern. `Bool` matches are exhaustive with both `true` and `false`; other
+primitive matches need a catch-all arm. Integer, floating-point, boolean, and
+string literals are supported as patterns. Expression arms must have one
+compatible result type. A block arm has type `Void`. Each arm has its own
+lexical scope, and its bindings are immutable and unavailable after the arm.
+Duplicate variants/literals and patterns after a catch-all are diagnosed as
+unreachable. When nested payload patterns do not cover every payload value,
+the checker conservatively requires an additional catch-all arm.
+
+Enum matches lower to LLVM control flow using a tag switch for direct variant
+patterns. Nested payload checks and primitive/string literals use additional
+comparisons. Array/list patterns, struct destructuring, range patterns, and
+guards are outside this v0.2 subset.
 
 ### Interfaces (v0.2)
 

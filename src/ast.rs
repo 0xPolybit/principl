@@ -228,6 +228,44 @@ pub struct ForStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchExpression {
+    pub value: Box<Expression>,
+    pub arms: Vec<MatchArm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: MatchArmBody,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchArmBody {
+    Expression(Expression),
+    Block(Block),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternKind {
+    Wildcard,
+    /// A bare name is resolved as a nullary enum variant when it names one;
+    /// otherwise it introduces an immutable arm-local binding.
+    Name(Identifier),
+    Variant {
+        name: Identifier,
+        payload: Vec<Pattern>,
+    },
+    Literal(Literal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expression {
     pub kind: ExpressionKind,
     pub span: SourceSpan,
@@ -272,6 +310,7 @@ pub enum ExpressionKind {
         start: Box<Expression>,
         end: Box<Expression>,
     },
+    Match(MatchExpression),
     Group(Box<Expression>),
 }
 

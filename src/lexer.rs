@@ -77,6 +77,7 @@ pub enum Punctuation {
     Colon,
     Semicolon,
     Arrow,
+    FatArrow,
     Range,
 }
 
@@ -290,6 +291,7 @@ impl<'a> Lexer<'a> {
             '/' => TokenKind::Operator(Operator::Slash),
             '%' => TokenKind::Operator(Operator::Percent),
             '=' if self.consume_if('=') => TokenKind::Operator(Operator::Equal),
+            '=' if self.consume_if('>') => TokenKind::Punctuation(Punctuation::FatArrow),
             '=' => TokenKind::Operator(Operator::Assign),
             '!' if self.consume_if('=') => TokenKind::Operator(Operator::NotEqual),
             '!' => TokenKind::Operator(Operator::Not),
@@ -439,7 +441,7 @@ mod tests {
     #[test]
     fn recognizes_keywords_and_keeps_other_words_as_identifiers() {
         let tokens = kinds(
-            "fn return let var if else while for in class struct interface trait implements init self import extern true false enum function",
+            "fn return let var if else while for match in class struct interface trait implements init self import extern true false enum function",
         );
 
         assert_eq!(
@@ -453,6 +455,7 @@ mod tests {
                 TokenKind::Keyword(Keyword::Else),
                 TokenKind::Keyword(Keyword::While),
                 TokenKind::Keyword(Keyword::For),
+                TokenKind::Identifier("match".to_owned()),
                 TokenKind::Keyword(Keyword::In),
                 TokenKind::Keyword(Keyword::Class),
                 TokenKind::Keyword(Keyword::Struct),
@@ -475,7 +478,7 @@ mod tests {
     #[test]
     fn lexes_all_requested_operators_and_punctuation() {
         let tokens =
-            kinds("+ - * / % = == != < <= > >= && || ! += -= *= -> .. ( ) { } [ ] , . : ;");
+            kinds("+ - * / % = == != < <= > >= && || ! += -= *= -> => .. ( ) { } [ ] , . : ;");
         let mut expected = vec![
             TokenKind::Operator(Operator::Plus),
             TokenKind::Operator(Operator::Minus),
@@ -496,6 +499,7 @@ mod tests {
             TokenKind::Operator(Operator::MinusAssign),
             TokenKind::Operator(Operator::StarAssign),
             TokenKind::Punctuation(Punctuation::Arrow),
+            TokenKind::Punctuation(Punctuation::FatArrow),
             TokenKind::Punctuation(Punctuation::Range),
             TokenKind::Punctuation(Punctuation::LeftParen),
             TokenKind::Punctuation(Punctuation::RightParen),

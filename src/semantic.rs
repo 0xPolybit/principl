@@ -4,8 +4,9 @@ use crate::ast::{
     Assignment, AssignmentOperator, BinaryOperator, Block, ClassMember, Declaration,
     EnumDeclaration, Expression, ExpressionKind, ExternBlockDeclaration, FieldDeclaration,
     FunctionDeclaration, Identifier, InitializerDeclaration, InterfaceDeclaration, Literal,
-    Program, Statement, StatementKind, TraitDeclaration, TypeDeclaration, TypeDeclarationKind,
-    TypeParameterDeclaration, UnaryOperator, VariableDeclaration,
+    MatchArmBody, MatchExpression, Pattern, PatternKind, Program, Statement, StatementKind,
+    TraitDeclaration, TypeDeclaration, TypeDeclarationKind, TypeParameterDeclaration,
+    UnaryOperator, VariableDeclaration,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::ffi::{CAbiType, ExternalFunctionType};
@@ -267,6 +268,14 @@ struct PendingGenericBoundCheck {
     parameters: Vec<GenericTypeParameter>,
     arguments: Vec<Type>,
     span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatternCoverage {
+    CatchAll,
+    EnumVariant { index: usize, complete: bool },
+    Literal(String),
+    Partial(String),
 }
 
 struct Analyzer<'a> {
@@ -2152,6 +2161,293 @@ impl<'a> Analyzer<'a> {
         enum_type.clone()
     }
 
+    fn check_match_expression(&mut self, matched: &MatchExpression, span: SourceSpan) -> Type {
+        let value_type = self.check_expression(&matched.value, None);
+        let before = self.scopes.clone();
+        let mut branch_states = Vec::new();
+        let mut result_type: Option<Type> = None;
+        let mut covered_variants = HashSet::new();
+        let mut covered_literals = HashSet::new();
+        let mut covered_partial_patterns = HashSet::new();
+        let mut has_catch_all = false;
+
+        for arm in &matched.arms {
+            self.scopes = before.clone();
+            self.push_scope();
+            if has_catch_all
+                || self.patterns_already_exhaustive(
+                    &value_type,
+                    &covered_variants,
+                    &covered_literals,
+                )
+            {
+                self.error_with(
+                    DiagnosticCode::Semantic,
+                    "unreachable match arm",
+                    arm.pattern.span,
+                );
+            }
+
+            let coverage = self.check_pattern(&arm.pattern, &value_type);
+            match &coverage {
+                PatternCoverage::CatchAll => has_catch_all = true,
+                PatternCoverage::EnumVariant { index, complete } => {
+                    if covered_variants.contains(index) {
+                        self.error_with(
+                            DiagnosticCode::Semantic,
+                            "unreachable match arm; enum variant was already covered",
+                            arm.pattern.span,
+                        );
+                    } else if *complete {
+                        covered_variants.insert(*index);
+                    } else if !covered_partial_patterns.insert(pattern_fingerprint(&arm.pattern)) {
+                        self.error_with(
+                            DiagnosticCode::Semantic,
+                            "unreachable match arm; pattern was already covered",
+                            arm.pattern.span,
+                        );
+                    }
+                }
+                PatternCoverage::Literal(key) => {
+                    if !covered_literals.insert(key.clone()) {
+                        self.error_with(
+                            DiagnosticCode::Semantic,
+                            "unreachable match arm; literal was already covered",
+                            arm.pattern.span,
+                        );
+                    }
+                }
+                PatternCoverage::Partial(key) => {
+                    if !covered_partial_patterns.insert(key.clone()) {
+                        self.error_with(
+                            DiagnosticCode::Semantic,
+                            "unreachable match arm; pattern was already covered",
+                            arm.pattern.span,
+                        );
+                    }
+                }
+            }
+
+            let arm_type = match &arm.body {
+                MatchArmBody::Expression(expression) => self.check_expression(expression, None),
+                MatchArmBody::Block(block) => {
+                    self.check_block(block, true);
+                    Type::Void
+                }
+            };
+            if let Some(previous) = result_type.as_ref() {
+                if !previous.is_error() && !arm_type.is_error() {
+                    self.require_type(previous, &arm_type, arm.span, "match arm result");
+                }
+                if previous.is_error() {
+                    result_type = Some(arm_type.clone());
+                }
+            } else {
+                result_type = Some(arm_type);
+            }
+            self.pop_scope();
+            branch_states.push(self.scopes.clone());
+        }
+
+        if matched.arms.is_empty() {
+            self.error_with(
+                DiagnosticCode::Syntax,
+                "match expression must contain at least one arm",
+                span,
+            );
+        } else if !value_type.is_error()
+            && !has_catch_all
+            && !self.match_is_exhaustive(&value_type, &covered_variants, &covered_literals)
+        {
+            self.error_with(
+                DiagnosticCode::Semantic,
+                format!("non-exhaustive match for type {value_type}; add a wildcard arm"),
+                span,
+            );
+        }
+
+        // A binding is definitely initialized after a match only when every
+        // arm initializes it. Each branch starts from the same incoming state.
+        if !branch_states.is_empty() {
+            self.scopes = before;
+            for (scope_index, scope) in self.scopes.iter_mut().enumerate() {
+                for (name, variable) in &mut scope.variables {
+                    variable.initialized = branch_states.iter().all(|state| {
+                        state
+                            .get(scope_index)
+                            .and_then(|branch| branch.variables.get(name))
+                            .is_some_and(|branch_variable| branch_variable.initialized)
+                    });
+                }
+            }
+        }
+
+        result_type.unwrap_or(Type::Error)
+    }
+
+    fn check_pattern(&mut self, pattern: &Pattern, expected: &Type) -> PatternCoverage {
+        match &pattern.kind {
+            PatternKind::Wildcard => PatternCoverage::CatchAll,
+            PatternKind::Name(identifier) => {
+                if let Some((enum_type, info)) = self.enum_pattern_info(expected) {
+                    if let Some((index, variant)) = info
+                        .enum_variants
+                        .iter()
+                        .enumerate()
+                        .find(|(_, variant)| variant.name == identifier.name)
+                    {
+                        if !variant.payload.is_empty() {
+                            self.error_with(
+                                DiagnosticCode::InvalidCall,
+                                format!(
+                                    "variant '{}.{}' requires {} payload pattern(s)",
+                                    enum_type.nominal_name().unwrap_or("enum"),
+                                    variant.name,
+                                    variant.payload.len()
+                                ),
+                                identifier.span,
+                            );
+                            return PatternCoverage::Partial(pattern_fingerprint(pattern));
+                        }
+                        return PatternCoverage::EnumVariant {
+                            index,
+                            complete: true,
+                        };
+                    }
+                    if identifier
+                        .name
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_uppercase)
+                    {
+                        self.error_with(
+                            DiagnosticCode::InvalidMember,
+                            format!(
+                                "enum '{}' has no variant '{}'",
+                                enum_type.nominal_name().unwrap_or("<unknown>"),
+                                identifier.name
+                            ),
+                            identifier.span,
+                        );
+                        return PatternCoverage::Partial(pattern_fingerprint(pattern));
+                    }
+                }
+                self.variable_types
+                    .insert(identifier.span, expected.clone());
+                self.declare_local(&identifier.name, identifier, expected.clone(), false, true);
+                PatternCoverage::CatchAll
+            }
+            PatternKind::Variant { name, payload } => {
+                let Some((enum_type, info)) = self.enum_pattern_info(expected) else {
+                    if !expected.is_error() {
+                        self.error_with(
+                            DiagnosticCode::TypeMismatch,
+                            format!("variant pattern requires an enum, found {expected}"),
+                            pattern.span,
+                        );
+                    }
+                    return PatternCoverage::Partial(pattern_fingerprint(pattern));
+                };
+                let Some((index, variant)) = info
+                    .enum_variants
+                    .iter()
+                    .enumerate()
+                    .find(|(_, variant)| variant.name == name.name)
+                else {
+                    self.error_with(
+                        DiagnosticCode::InvalidMember,
+                        format!(
+                            "enum '{}' has no variant '{}'",
+                            enum_type.nominal_name().unwrap_or("<unknown>"),
+                            name.name
+                        ),
+                        name.span,
+                    );
+                    return PatternCoverage::Partial(pattern_fingerprint(pattern));
+                };
+                if variant.payload.len() != payload.len() {
+                    self.error_with(
+                        DiagnosticCode::InvalidCall,
+                        format!(
+                            "variant '{}.{}' expects {} payload pattern(s), found {}",
+                            enum_type.nominal_name().unwrap_or("enum"),
+                            variant.name,
+                            variant.payload.len(),
+                            payload.len()
+                        ),
+                        pattern.span,
+                    );
+                }
+                let substitutions =
+                    type_substitutions(&info.type_parameters, enum_type.generic_arguments());
+                let mut complete = variant.payload.len() == payload.len();
+                for (payload_pattern, payload_type) in payload.iter().zip(&variant.payload) {
+                    let payload_type = substitute_type(payload_type, &substitutions);
+                    let nested = self.check_pattern(payload_pattern, &payload_type);
+                    complete &= nested == PatternCoverage::CatchAll;
+                }
+                PatternCoverage::EnumVariant { index, complete }
+            }
+            PatternKind::Literal(literal) => {
+                let literal_type = match literal {
+                    Literal::Integer(_) => Type::Int,
+                    Literal::FloatingPoint(_) => Type::Float,
+                    Literal::String(_) => Type::String,
+                    Literal::Boolean(_) => Type::Bool,
+                };
+                match literal {
+                    Literal::Integer(value) if value.parse::<i64>().is_err() => self.error_with(
+                        DiagnosticCode::TypeMismatch,
+                        "integer pattern is outside the supported Int range",
+                        pattern.span,
+                    ),
+                    Literal::FloatingPoint(value) if !matches!(value.parse::<f64>(), Ok(number) if number.is_finite()) => {
+                        self.error_with(
+                            DiagnosticCode::TypeMismatch,
+                            "floating-point pattern is outside the supported Float range",
+                            pattern.span,
+                        )
+                    }
+                    _ => {}
+                }
+                self.require_type(expected, &literal_type, pattern.span, "match pattern");
+                PatternCoverage::Literal(pattern_literal_key(literal))
+            }
+        }
+    }
+
+    fn enum_pattern_info(&self, ty: &Type) -> Option<(Type, TypeSymbols)> {
+        if !ty.is_enum() {
+            return None;
+        }
+        let name = ty.nominal_name()?;
+        Some((ty.clone(), self.types.get(name)?.clone()))
+    }
+
+    fn patterns_already_exhaustive(
+        &self,
+        ty: &Type,
+        variants: &HashSet<usize>,
+        literals: &HashSet<String>,
+    ) -> bool {
+        self.match_is_exhaustive(ty, variants, literals)
+    }
+
+    fn match_is_exhaustive(
+        &self,
+        ty: &Type,
+        variants: &HashSet<usize>,
+        literals: &HashSet<String>,
+    ) -> bool {
+        if let Some((_, info)) = self.enum_pattern_info(ty) {
+            return variants.len() == info.enum_variants.len();
+        }
+        if *ty == Type::Bool {
+            return literals.contains("bool:true") && literals.contains("bool:false");
+        }
+        false
+    }
+
     fn check_expression(&mut self, expression: &Expression, expected: Option<&Type>) -> Type {
         let actual = match &expression.kind {
             ExpressionKind::Identifier(identifier) => self.check_identifier(identifier),
@@ -2236,6 +2532,7 @@ impl<'a> Analyzer<'a> {
                     Type::Error
                 }
             }
+            ExpressionKind::Match(matched) => self.check_match_expression(matched, expression.span),
             ExpressionKind::Group(inner) => {
                 let actual = self.check_expression(inner, expected);
                 self.expression_types
@@ -3230,6 +3527,40 @@ fn type_substitutions(
         .zip(arguments)
         .map(|(parameter, argument)| (parameter.id, argument.clone()))
         .collect()
+}
+
+fn pattern_literal_key(literal: &Literal) -> String {
+    match literal {
+        Literal::Integer(value) => {
+            let normalized = value
+                .parse::<i64>()
+                .map_or_else(|_| value.clone(), |number| number.to_string());
+            format!("int:{normalized}")
+        }
+        Literal::FloatingPoint(value) => match value.parse::<f64>() {
+            Ok(number) => format!("float:{:016x}", number.to_bits()),
+            Err(_) => format!("float:{value}"),
+        },
+        Literal::String(value) => format!("string:{value}"),
+        Literal::Boolean(value) => format!("bool:{value}"),
+    }
+}
+
+fn pattern_fingerprint(pattern: &Pattern) -> String {
+    match &pattern.kind {
+        PatternKind::Wildcard => "_".to_owned(),
+        PatternKind::Name(name) => format!("name:{}", name.name),
+        PatternKind::Variant { name, payload } => format!(
+            "variant:{}({})",
+            name.name,
+            payload
+                .iter()
+                .map(pattern_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        PatternKind::Literal(literal) => pattern_literal_key(literal),
+    }
 }
 
 fn substitute_function_type(
@@ -4724,6 +5055,98 @@ fn main() {
             "type 'Maybe' expects 1 generic argument(s), found 2"
         ));
         assert!(has_message(&result, "unknown type 'Missing'"));
+    }
+
+    #[test]
+    fn checks_enum_match_payload_bindings_expression_types_and_arm_scopes() {
+        let source = r#"enum Result<T, E> { Ok(T) Err(E) }
+enum State { Online Offline }
+fn message(result: Result<Int, String>) -> String {
+    return match result {
+        Ok(value) => "received"
+        Err(error) => error
+    }
+}
+fn main() {
+    let state = State.Online
+    let label = match state {
+        Online => "online"
+        Offline => "offline"
+    }
+    println(message(Result<Int, String>.Err("failure")))
+    println(label)
+}"#;
+        for extension in ["prnc", "princi"] {
+            let result = analyze_source(&format!("match.{extension}"), source);
+            assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+            assert_eq!(
+                result
+                    .typed_program
+                    .variable_type(variable(&result, "main", 1)),
+                Some(&Type::String)
+            );
+        }
+
+        let leaked = analyze_text(
+            r#"enum Maybe<T> { Some(T) None }
+fn main() {
+    let value = Maybe<Int>.Some(1)
+    match value { Some(item) => println(item) None => println("none") }
+    println(item)
+}"#,
+        );
+        assert!(has_message(&leaked, "undefined identifier 'item'"));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_unreachable_invalid_and_incompatible_match_arms() {
+        let result = analyze_text(
+            r#"enum State { Ready Failed(String) }
+enum Maybe<T> { Some(T) None }
+fn main() {
+    let state = State.Ready
+    match state { Ready => println("ready") }
+    match state {
+        Missing(value) => println(value)
+        Failed => println("missing payload")
+        _ => println("fallback")
+    }
+    match true { true => println("yes") true => println("again") false => println("no") }
+    let invalid = match state { Ready => 1 Failed(_) => "failed" }
+    let bad = Maybe<Int>.Some(1)
+    match bad { Some(left, right) => println(left) None => println("none") }
+}"#,
+        );
+        assert!(has_message(&result, "non-exhaustive match for type State"));
+        assert!(has_message(
+            &result,
+            "enum 'State' has no variant 'Missing'"
+        ));
+        assert!(has_message(
+            &result,
+            "variant 'State.Failed' requires 1 payload pattern(s)"
+        ));
+        assert!(has_message(&result, "unreachable match arm"));
+        assert!(has_message(
+            &result,
+            "expected Int, found String (match arm result)"
+        ));
+        assert!(has_message(
+            &result,
+            "expects 1 payload pattern(s), found 2"
+        ));
+    }
+
+    #[test]
+    fn supports_boolean_and_literal_match_coverage() {
+        let valid = analyze_text(
+            "fn main() { let ready = true; let text = match ready { true => \"yes\" false => \"no\" }; let number = match 2 { 1 => \"one\" 2 => \"two\" _ => \"other\" } }",
+        );
+        assert!(valid.diagnostics.is_empty(), "{:?}", messages(&valid));
+        let invalid = analyze_text(
+            "fn main() { let ready = true; match ready { true => println(1) _ => println(2) false => println(3) } }",
+        );
+        assert!(has_message(&invalid, "unreachable match arm"));
     }
 
     #[test]

@@ -937,6 +937,19 @@ impl Parser<'_> {
         let token = self.current().clone();
         match token.kind {
             TokenKind::Identifier(name) => {
+                if name == "match" {
+                    let saved = self.cursor;
+                    let diagnostic_count = self.diagnostics.len();
+                    let start = token.location.span.start;
+                    self.advance();
+                    if let Ok(value) = self.parse_expression_bp(RANGE_PRECEDENCE, false) {
+                        if self.check_punctuation(Punctuation::LeftBrace) {
+                            return self.parse_match_expression_after_value(start, value);
+                        }
+                    }
+                    self.cursor = saved;
+                    self.diagnostics.truncate(diagnostic_count);
+                }
                 self.advance();
                 let identifier = Identifier {
                     name,
@@ -1029,6 +1042,172 @@ impl Parser<'_> {
             TokenKind::Punctuation(Punctuation::LeftBracket) => self.parse_list_expression(),
             _ => Err(self.error_here("expected an expression")),
         }
+    }
+
+    fn parse_match_expression_after_value(
+        &mut self,
+        start: usize,
+        value: Expression,
+    ) -> Result<Expression, Diagnostic> {
+        self.expect_punctuation(Punctuation::LeftBrace, "expected '{' before match arms")?;
+        let mut arms = Vec::new();
+
+        while !self.check_punctuation(Punctuation::RightBrace) && !self.at_eof() {
+            let arm_start = self.current().location.span.start;
+            let pattern = self.parse_pattern()?;
+            self.expect_punctuation(Punctuation::FatArrow, "expected '=>' after match pattern")?;
+            let body = if self.check_punctuation(Punctuation::LeftBrace) {
+                MatchArmBody::Block(self.parse_block()?)
+            } else {
+                MatchArmBody::Expression(self.parse_expression()?)
+            };
+            let arm_end = match &body {
+                MatchArmBody::Expression(expression) => expression.span.end,
+                MatchArmBody::Block(block) => block.span.end,
+            };
+            arms.push(MatchArm {
+                pattern,
+                body,
+                span: SourceSpan::new(arm_start, arm_end),
+            });
+
+            if self.eat_punctuation(Punctuation::Comma)
+                || self.eat_punctuation(Punctuation::Semicolon)
+                || self.check_punctuation(Punctuation::RightBrace)
+                || self.line_break_before_current()
+                || self.can_start_pattern()
+            {
+                continue;
+            }
+            return Err(self.error_here("expected a line break or separator after match arm"));
+        }
+
+        let close =
+            self.expect_punctuation(Punctuation::RightBrace, "expected '}' after match arms")?;
+        Ok(Expression {
+            kind: ExpressionKind::Match(MatchExpression {
+                value: Box::new(value),
+                arms,
+            }),
+            span: SourceSpan::new(start, close.location.span.end),
+        })
+    }
+
+    fn parse_pattern(&mut self) -> Result<Pattern, Diagnostic> {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                if name == "_" {
+                    return Ok(Pattern {
+                        kind: PatternKind::Wildcard,
+                        span: token.location.span,
+                    });
+                }
+                let identifier = Identifier {
+                    name,
+                    span: token.location.span,
+                };
+                if self.eat_punctuation(Punctuation::LeftParen) {
+                    let mut payload = Vec::new();
+                    if !self.check_punctuation(Punctuation::RightParen) {
+                        loop {
+                            payload.push(self.parse_pattern()?);
+                            if !self.eat_punctuation(Punctuation::Comma) {
+                                break;
+                            }
+                            if self.check_punctuation(Punctuation::RightParen) {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect_punctuation(
+                        Punctuation::RightParen,
+                        "expected ')' after variant pattern",
+                    )?;
+                    Ok(Pattern {
+                        kind: PatternKind::Variant {
+                            name: identifier,
+                            payload,
+                        },
+                        span: SourceSpan::new(token.location.span.start, close.location.span.end),
+                    })
+                } else {
+                    Ok(Pattern {
+                        kind: PatternKind::Name(identifier),
+                        span: token.location.span,
+                    })
+                }
+            }
+            TokenKind::IntegerLiteral(value) => {
+                self.advance();
+                Ok(Pattern {
+                    kind: PatternKind::Literal(Literal::Integer(value)),
+                    span: token.location.span,
+                })
+            }
+            TokenKind::FloatingPointLiteral(value) => {
+                self.advance();
+                Ok(Pattern {
+                    kind: PatternKind::Literal(Literal::FloatingPoint(value)),
+                    span: token.location.span,
+                })
+            }
+            TokenKind::StringLiteral(value) => {
+                self.advance();
+                Ok(Pattern {
+                    kind: PatternKind::Literal(Literal::String(value)),
+                    span: token.location.span,
+                })
+            }
+            TokenKind::BooleanLiteral(value) => {
+                self.advance();
+                Ok(Pattern {
+                    kind: PatternKind::Literal(Literal::Boolean(value)),
+                    span: token.location.span,
+                })
+            }
+            TokenKind::Operator(Operator::Minus) => {
+                self.advance();
+                let number = self.current().clone();
+                match number.kind {
+                    TokenKind::IntegerLiteral(value) => {
+                        self.advance();
+                        Ok(Pattern {
+                            kind: PatternKind::Literal(Literal::Integer(format!("-{value}"))),
+                            span: SourceSpan::new(
+                                token.location.span.start,
+                                number.location.span.end,
+                            ),
+                        })
+                    }
+                    TokenKind::FloatingPointLiteral(value) => {
+                        self.advance();
+                        Ok(Pattern {
+                            kind: PatternKind::Literal(Literal::FloatingPoint(format!("-{value}"))),
+                            span: SourceSpan::new(
+                                token.location.span.start,
+                                number.location.span.end,
+                            ),
+                        })
+                    }
+                    _ => Err(self.error_here("expected a numeric literal after '-' in pattern")),
+                }
+            }
+            _ => Err(self.error_here("expected a match pattern")),
+        }
+    }
+
+    fn can_start_pattern(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier(_)
+                | TokenKind::IntegerLiteral(_)
+                | TokenKind::FloatingPointLiteral(_)
+                | TokenKind::StringLiteral(_)
+                | TokenKind::BooleanLiteral(_)
+                | TokenKind::Operator(Operator::Minus)
+        )
     }
 
     fn parse_list_expression(&mut self) -> Result<Expression, Diagnostic> {
@@ -1693,6 +1872,67 @@ mod tests {
             function.body.statements[6].kind,
             StatementKind::Return(None)
         ));
+    }
+
+    #[test]
+    fn parses_match_statement_arms_payload_patterns_and_expression_arms() {
+        let result = parse_text(
+            "match.prnc",
+            r#"enum State { Connected Connecting Failed(String) }
+fn main() {
+    let state = State.Connected
+    match state {
+        Connected => println("online")
+        Failed(reason) => println(reason)
+        _ => println("offline")
+    }
+    let message = match state {
+        Connected => "online"
+        Connecting => "connecting"
+        Failed(reason) => reason
+    }
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Function(function) = &result.program.declarations[1] else {
+            panic!("expected main function");
+        };
+        let StatementKind::Expression(Expression {
+            kind: ExpressionKind::Match(statement_match),
+            ..
+        }) = &function.body.statements[1].kind
+        else {
+            panic!("match statement should use the match expression AST");
+        };
+        assert_eq!(statement_match.arms.len(), 3);
+        assert!(matches!(
+            statement_match.arms[1].pattern.kind,
+            crate::ast::PatternKind::Variant { .. }
+        ));
+        let StatementKind::Variable(variable) = &function.body.statements[2].kind else {
+            panic!("expected match result binding");
+        };
+        assert!(matches!(
+            variable.initializer.as_ref().unwrap().kind,
+            ExpressionKind::Match(_)
+        ));
+    }
+
+    #[test]
+    fn match_remains_available_as_a_contextual_identifier() {
+        let result = parse_text(
+            "match-name.prnc",
+            "fn match(value: Int) -> Int { return value }\nfn main() { let result = match(7); let match_value = 2 }",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let Declaration::Function(function) = &result.program.declarations[0] else {
+            panic!("expected function named match");
+        };
+        assert_eq!(function.name.name, "match");
+        let Declaration::Function(main) = &result.program.declarations[1] else {
+            panic!("expected main function");
+        };
+        assert_eq!(main.body.statements.len(), 2);
     }
 
     #[test]
