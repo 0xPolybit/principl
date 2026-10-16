@@ -401,6 +401,90 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn result_question_propagates_errors_through_generic_and_nested_expressions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"fn divide(a: Int, b: Int) -> Result<Int, String> {
+    if b == 0 {
+        return Result<Int, String>.Err("division by zero")
+    }
+    return Result<Int, String>.Ok(a / b)
+}
+
+fn increment(value: Int) -> Int {
+    return value + 1
+}
+
+fn fromArgument(value: Result<Int, String>) -> Result<Int, String> {
+    return Result<Int, String>.Ok(increment(value?))
+}
+
+fn fromLocal(value: Result<Int, String>) -> Result<Int, String> {
+    if true {
+        let number = value?
+        return Result<Int, String>.Ok(increment(number))
+    }
+    return Result<Int, String>.Ok(0)
+}
+
+fn direct<T>(value: Result<T, String>) -> Result<T, String> {
+    return value?
+}
+
+fn relay<T>(value: Result<T, String>) -> Result<T, String> {
+    let unwrapped = value?
+    return Result<T, String>.Ok(unwrapped)
+}
+
+fn changeSuccessType(value: Result<Int, String>) -> Result<String, String> {
+    let number = value?
+    return Result<String, String>.Ok("converted")
+}
+
+fn main() {
+    match fromLocal(divide(8, 2)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match fromLocal(divide(8, 0)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match fromArgument(divide(8, 1)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match direct<Int>(Result<Int, String>.Ok(11)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match relay<String>(Result<String, String>.Ok("generic")) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match changeSuccessType(divide(8, 0)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match changeSuccessType(divide(8, 2)) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+}"#;
+
+    for extension in ["prnc", "princi"] {
+        let stdout = dir.build_and_run(&format!("propagate.{extension}"), source);
+        assert_eq!(
+            stdout,
+            "5\ndivision by zero\n9\n11\ngeneric\ndivision by zero\nconverted\n"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn integer_main_return_becomes_the_process_exit_status() {
     if skip_without_native_toolchain() {
         return;

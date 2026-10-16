@@ -301,6 +301,7 @@ pub enum ExpressionKind {
         operator: UnaryOperator,
         operand: Box<Expression>,
     },
+    Try(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,

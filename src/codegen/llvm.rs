@@ -2724,7 +2724,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             StatementKind::Return(value) => {
                 if let Some(value) = value {
+                    let result_wrapping = self.typed.return_result_wrapping(value.span).cloned();
                     let value = self.emit_expression(value)?;
+                    let value = if let Some(result_type) = result_wrapping {
+                        self.emit_enum_variant_values(
+                            &result_type,
+                            "Ok",
+                            vec![value],
+                            statement.span,
+                        )?
+                    } else {
+                        value
+                    };
                     let ty_name = llvm_type(&value.ty, statement.span, self.source)?;
                     self.terminate(&format!("ret {ty_name} {}", value.operand));
                 } else {
@@ -2885,6 +2896,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     )),
                 }
             }
+            ExpressionKind::Try(operand) => self.emit_try_expression(operand, expression),
             ExpressionKind::Binary {
                 left,
                 operator,
@@ -2922,6 +2934,187 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             )),
             ExpressionKind::Match(matched) => self.emit_match_expression(matched, expression),
         }
+    }
+
+    fn emit_try_expression(
+        &mut self,
+        operand: &Expression,
+        expression: &Expression,
+    ) -> Result<IrValue, Diagnostic> {
+        let propagation = self
+            .typed
+            .result_propagation(expression.span)
+            .cloned()
+            .ok_or_else(|| {
+                self.error_with(
+                    DiagnosticCode::InternalCompiler,
+                    INTERNAL_CODEGEN_MESSAGE,
+                    expression.span,
+                )
+            })?;
+        let value = self.emit_expression(operand)?;
+        let result_llvm_type = llvm_type(&propagation.result_type, expression.span, self.source)?;
+        let result_name = propagation
+            .result_type
+            .nominal_name()
+            .ok_or_else(|| self.error("missing Result enum name", expression.span))?;
+        let result_info = self
+            .typed
+            .symbols
+            .type_symbols(result_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing Result enum declaration", expression.span))?;
+        let ok_index = result_info
+            .enum_variants
+            .iter()
+            .position(|variant| variant.name == "Ok")
+            .ok_or_else(|| self.error("Result enum is missing its Ok variant", expression.span))?;
+        let err_index = result_info
+            .enum_variants
+            .iter()
+            .position(|variant| variant.name == "Err")
+            .ok_or_else(|| self.error("Result enum is missing its Err variant", expression.span))?;
+
+        let tag = self.fresh_value();
+        self.instruction(&format!(
+            "{tag} = extractvalue {result_llvm_type} {}, 0",
+            value.operand
+        ));
+        let is_ok = self.fresh_value();
+        self.instruction(&format!("{is_ok} = icmp eq i32 {tag}, {ok_index}"));
+        let success_label = self.fresh_label("try.ok");
+        let error_label = self.fresh_label("try.err");
+        self.terminate(&format!(
+            "br i1 {is_ok}, label %{success_label}, label %{error_label}"
+        ));
+
+        self.label(&error_label);
+        let error_llvm_type = llvm_type(&propagation.error_type, expression.span, self.source)?;
+        let error_payload_type = format!("{{ {error_llvm_type} }}");
+        let error_payload = self.fresh_value();
+        self.instruction(&format!(
+            "{error_payload} = extractvalue {result_llvm_type} {}, {}",
+            value.operand,
+            err_index + 1
+        ));
+        let error_value = self.fresh_value();
+        self.instruction(&format!(
+            "{error_value} = extractvalue {error_payload_type} {error_payload}, 0"
+        ));
+        let propagated_error = self.emit_enum_variant_values(
+            &propagation.enclosing_result_type,
+            "Err",
+            vec![IrValue {
+                ty: propagation.error_type.clone(),
+                operand: error_value,
+            }],
+            expression.span,
+        )?;
+        let enclosing_llvm_type = llvm_type(
+            &propagation.enclosing_result_type,
+            expression.span,
+            self.source,
+        )?;
+        self.terminate(&format!(
+            "ret {enclosing_llvm_type} {}",
+            propagated_error.operand
+        ));
+
+        self.label(&success_label);
+        let success_llvm_type = llvm_type(&propagation.success_type, expression.span, self.source)?;
+        let success_payload_type = format!("{{ {success_llvm_type} }}");
+        let success_payload = self.fresh_value();
+        self.instruction(&format!(
+            "{success_payload} = extractvalue {result_llvm_type} {}, {}",
+            value.operand,
+            ok_index + 1
+        ));
+        let success_value = self.fresh_value();
+        self.instruction(&format!(
+            "{success_value} = extractvalue {success_payload_type} {success_payload}, 0"
+        ));
+        Ok(IrValue {
+            ty: propagation.success_type,
+            operand: success_value,
+        })
+    }
+
+    fn emit_enum_variant_values(
+        &mut self,
+        enum_type: &Type,
+        variant_name: &str,
+        values: Vec<IrValue>,
+        span: SourceSpan,
+    ) -> Result<IrValue, Diagnostic> {
+        let type_name = enum_type
+            .nominal_name()
+            .ok_or_else(|| self.error("missing enum type name", span))?;
+        let info = self
+            .typed
+            .symbols
+            .type_symbols(type_name)
+            .cloned()
+            .ok_or_else(|| self.error("missing semantic enum declaration", span))?;
+        let variant_index = info
+            .enum_variants
+            .iter()
+            .position(|variant| variant.name == variant_name)
+            .ok_or_else(|| {
+                self.error(
+                    format!("enum '{type_name}' has no variant '{variant_name}'"),
+                    span,
+                )
+            })?;
+        let variant = &info.enum_variants[variant_index];
+        if variant.payload.len() != values.len() {
+            return Err(self.error("enum payload arity changed after semantic analysis", span));
+        }
+        let substitutions = info
+            .type_parameters
+            .iter()
+            .zip(enum_type.generic_arguments())
+            .map(|(parameter, argument)| (parameter.id, argument.clone()))
+            .collect::<HashMap<_, _>>();
+        let payload_types = variant
+            .payload
+            .iter()
+            .map(|ty| substitute_codegen_type(ty, &substitutions))
+            .collect::<Vec<_>>();
+        let payload_llvm_types = payload_types
+            .iter()
+            .map(|ty| llvm_type(ty, span, self.source))
+            .collect::<Result<Vec<_>, _>>()?;
+        let payload_aggregate_type = format!("{{ {} }}", payload_llvm_types.join(", "));
+        let mut payload_value = if values.is_empty() {
+            "zeroinitializer".to_owned()
+        } else {
+            "undef".to_owned()
+        };
+        for (index, (value, expected_type)) in values.iter().zip(&payload_types).enumerate() {
+            if !expected_type.accepts(&value.ty) {
+                return Err(self.error("enum payload type changed after semantic analysis", span));
+            }
+            let next = self.fresh_value();
+            self.instruction(&format!(
+                "{next} = insertvalue {payload_aggregate_type} {payload_value}, {} {}, {index}",
+                payload_llvm_types[index], value.operand
+            ));
+            payload_value = next;
+        }
+        let llvm_enum_type = llvm_type(enum_type, span, self.source)?;
+        let tagged = self.fresh_value();
+        self.instruction(&format!(
+            "{tagged} = insertvalue {llvm_enum_type} zeroinitializer, i32 {variant_index}, 0"
+        ));
+        let result = self.fresh_value();
+        self.instruction(&format!(
+            "{result} = insertvalue {llvm_enum_type} {tagged}, {payload_aggregate_type} {payload_value}, {}",
+            variant_index + 1
+        ));
+        Ok(IrValue {
+            ty: enum_type.clone(),
+            operand: result,
+        })
     }
 
     fn emit_match_expression(
@@ -5337,6 +5530,35 @@ fn main() {
             ir.contains("define %princi.enum.ge6_526573756c74_a2_i_s @princi_fn_666f7277617264")
         );
         assert!(ir.contains("ret %princi.enum.ge6_526573756c74_a2_i_s"));
+    }
+
+    #[test]
+    fn lowers_result_propagation_to_tag_branch_early_error_and_success_value() {
+        let ir = lower(
+            r#"enum Result<T, E> { Ok(T) Err(E) }
+fn read(value: Result<Int, String>) -> Result<Int, String> { return value? }
+fn increment(value: Int) -> Int { return value + 1 }
+fn nested(value: Result<Int, String>) -> Result<Int, String> {
+    return Result<Int, String>.Ok(increment(value?))
+}
+fn generic<T>(value: Result<T, String>) -> Result<T, String> {
+    let item = value?
+    return Result<T, String>.Ok(item)
+}
+fn main() {
+    let result = nested(Result<Int, String>.Ok(4))
+    let generic_result = generic<Int>(result)
+}"#,
+        )
+        .expect("Result propagation should lower to valid LLVM IR");
+
+        assert!(ir.contains("icmp eq i32"));
+        assert!(ir.contains("br i1 %v"));
+        assert!(ir.contains("try.err."));
+        assert!(ir.contains("try.ok."));
+        assert!(ir.contains("extractvalue %princi.enum.ge6_526573756c74_a2_i_s"));
+        assert!(ir.contains("ret %princi.enum.ge6_526573756c74_a2_i_s"));
+        assert!(ir.contains("princi_generic_67656e65726963"));
     }
 
     #[test]

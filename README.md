@@ -554,17 +554,50 @@ C ABI layout. Enum values copy inline struct/enum payloads by value; String,
 List, and class payloads retain their existing managed-reference behavior.
 `match` inspects the active tag and extracts payloads. `Maybe<T>` is an ordinary
 user-declared enum. `Result<T, E>` is included from the source prelude as the
-ordinary generic enum `Ok(T) | Err(E)`; it receives no special semantic or
-backend treatment. A top-level declaration named `Result` replaces the
-prelude definition for that source file.
+ordinary generic enum `Ok(T) | Err(E)` and uses the regular enum type checking
+and layout. Postfix `?` is compiler syntax that branches on those variants; it
+does not add a special runtime representation. A top-level declaration named
+`Result` replaces the prelude definition for that source file.
 
 Construct enum values with a qualified generic type when its arguments are
 not otherwise fixed by construction, for example
 `Result<Int, String>.Err("division by zero")`. Match arms use the matched
 value's type, so their variant patterns are written concisely as `Ok(value)`
 and `Err(error)`. The prelude is embedded in the compiler and requires no
-manual import or installed source file. Postfix `?` propagation is not yet
-implemented.
+manual import or installed source file.
+
+Postfix `?` propagates a failed result from functions that return a compatible
+`Result`:
+
+```princi
+fn readNumber() -> Result<Int, String> {
+    return Result<Int, String>.Ok(42)
+}
+
+fn loadNumber() -> Result<Int, String> {
+    let number = readNumber()?
+    return Result<Int, String>.Ok(number)
+}
+
+fn passNumber() -> Result<Int, String> {
+    return readNumber()?
+}
+```
+
+`operation()?` evaluates the operation once, yields the `Ok` payload as the
+expression value, and immediately returns an `Err` with the same error payload
+from the enclosing function. The operand and enclosing return type must use the
+ordinary `Result<T, E>` enum, and their error types must match exactly; no
+`From`/`Into`-style error conversion is performed. A function using `?` must
+return `Result`. When the entire expression in a `return` statement is
+`operation()?` (parentheses are allowed), the success payload must match the
+function's `Result` success type and is wrapped in `Ok` for that return.
+Elsewhere, `?` yields the success payload normally, so it can appear in local
+initializers, arguments, and larger expressions. Generic functions may use
+`?` when their error types match under the specialization.
+
+The operator rejects non-`Result` operands, non-`Result` enclosing functions,
+and mismatched error types at compile time.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
 

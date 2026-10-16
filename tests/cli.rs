@@ -378,3 +378,45 @@ fn common_user_errors_have_stable_codes_and_no_internal_trace() {
         assert!(!stderr.contains("stack backtrace"), "{name}: {stderr}");
     }
 }
+
+#[test]
+fn invalid_result_propagation_exits_nonzero_without_emitting_an_executable() {
+    let dir = TestDir::new();
+    let cases = [
+        (
+            "wrong-return.prnc",
+            "fn read() -> Result<Int, String> { return Result<Int, String>.Ok(1) }\nfn bad() -> Int { return read()? }\nfn main() {}",
+            "E0208",
+            "requires the enclosing function to return Result<T, E>",
+        ),
+        (
+            "wrong-error.princi",
+            "fn read() -> Result<Int, Int> { return Result<Int, Int>.Ok(1) }\nfn bad() -> Result<Int, String> { let value = read()?; return Result<Int, String>.Ok(value) }\nfn main() {}",
+            "E0201",
+            "error type must match the enclosing function exactly",
+        ),
+        (
+            "not-result.prnc",
+            "fn bad() -> Result<Int, String> { return 1? }\nfn main() {}",
+            "E0201",
+            "requires Result<T, E>, found Int",
+        ),
+    ];
+
+    for (name, text, code, expected_message) in cases {
+        let source = dir.0.join(name);
+        fs::write(&source, text).expect("invalid Princi source should be written");
+        let result = dir
+            .compiler()
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("CLI process should start");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{name} unexpectedly compiled");
+        assert!(stderr.contains(&format!("error[{code}]")), "{stderr}");
+        assert!(stderr.contains(expected_message), "{stderr}");
+        assert!(!source.with_extension("exe").exists());
+        assert!(!stderr.contains("panicked"), "{stderr}");
+    }
+}

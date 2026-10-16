@@ -62,6 +62,7 @@ pub enum Operator {
     PlusAssign,
     MinusAssign,
     StarAssign,
+    Question,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +289,7 @@ impl<'a> Lexer<'a> {
             '-' => TokenKind::Operator(Operator::Minus),
             '*' if self.consume_if('=') => TokenKind::Operator(Operator::StarAssign),
             '*' => TokenKind::Operator(Operator::Star),
+            '?' => TokenKind::Operator(Operator::Question),
             '/' => TokenKind::Operator(Operator::Slash),
             '%' => TokenKind::Operator(Operator::Percent),
             '=' if self.consume_if('=') => TokenKind::Operator(Operator::Equal),
@@ -478,7 +480,7 @@ mod tests {
     #[test]
     fn lexes_all_requested_operators_and_punctuation() {
         let tokens =
-            kinds("+ - * / % = == != < <= > >= && || ! += -= *= -> => .. ( ) { } [ ] , . : ;");
+            kinds("+ - * / % = == != < <= > >= && || ! += -= *= ? -> => .. ( ) { } [ ] , . : ;");
         let mut expected = vec![
             TokenKind::Operator(Operator::Plus),
             TokenKind::Operator(Operator::Minus),
@@ -498,6 +500,7 @@ mod tests {
             TokenKind::Operator(Operator::PlusAssign),
             TokenKind::Operator(Operator::MinusAssign),
             TokenKind::Operator(Operator::StarAssign),
+            TokenKind::Operator(Operator::Question),
             TokenKind::Punctuation(Punctuation::Arrow),
             TokenKind::Punctuation(Punctuation::FatArrow),
             TokenKind::Punctuation(Punctuation::Range),

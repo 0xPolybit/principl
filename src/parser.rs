@@ -861,6 +861,14 @@ impl Parser<'_> {
                 };
                 continue;
             }
+            if self.check_operator(Operator::Question) {
+                let question = self.advance();
+                left = Expression {
+                    span: SourceSpan::new(left.span.start, question.location.span.end),
+                    kind: ExpressionKind::Try(Box::new(left)),
+                };
+                continue;
+            }
 
             if self.check_punctuation(Punctuation::Range) && min_precedence <= RANGE_PRECEDENCE {
                 if matches!(&left.kind, ExpressionKind::Range { .. }) {
@@ -1709,6 +1717,7 @@ mod tests {
                 )
             }
             ExpressionKind::Group(inner) => format!("({})", expression_snapshot(inner)),
+            ExpressionKind::Try(inner) => format!("{}?", expression_snapshot(inner)),
             other => panic!("snapshot helper does not support {other:?}"),
         }
     }
@@ -2157,6 +2166,24 @@ fn main() {}"#,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn postfix_question_binds_tighter_than_binary_operators_and_keeps_its_span() {
+        let result = parse_text("try.prnc", "fn main() { let value = read()? + 1 }");
+        let function = only_function(&result);
+        let StatementKind::Variable(variable) = &function.body.statements[0].kind else {
+            panic!("expected a variable declaration");
+        };
+        let ExpressionKind::Binary { left, .. } = &variable.initializer.as_ref().unwrap().kind
+        else {
+            panic!("the binary expression should be the initializer");
+        };
+        let ExpressionKind::Try(operand) = &left.kind else {
+            panic!("postfix '?' should be attached before addition");
+        };
+        assert!(matches!(operand.kind, ExpressionKind::Call { .. }));
+        assert_eq!(left.span.end, left.span.start + "read()?".len());
     }
 
     #[test]

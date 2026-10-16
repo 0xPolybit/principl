@@ -23,6 +23,8 @@ pub struct TypedProgram {
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
     contract_conversions: HashMap<SourceSpan, Type>,
+    result_propagations: HashMap<SourceSpan, ResultPropagation>,
+    return_result_wrappings: HashMap<SourceSpan, Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,15 @@ pub struct GenericFunctionCall {
     pub name: String,
     pub type_arguments: Vec<Type>,
     pub signature: FunctionType,
+}
+
+/// Type information needed to lower postfix `?` after generic specialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultPropagation {
+    pub result_type: Type,
+    pub success_type: Type,
+    pub error_type: Type,
+    pub enclosing_result_type: Type,
 }
 
 impl TypedProgram {
@@ -61,6 +72,14 @@ impl TypedProgram {
         self.contract_conversions.get(&span)
     }
 
+    pub(crate) fn result_propagation(&self, span: SourceSpan) -> Option<&ResultPropagation> {
+        self.result_propagations.get(&span)
+    }
+
+    pub(crate) fn return_result_wrapping(&self, span: SourceSpan) -> Option<&Type> {
+        self.return_result_wrappings.get(&span)
+    }
+
     pub(crate) fn specialized_view(&self, substitutions: &HashMap<u32, Type>) -> Self {
         let mut specialized = self.clone();
         for ty in specialized.expression_types.values_mut() {
@@ -76,6 +95,16 @@ impl TypedProgram {
                 .map(|ty| substitute_type(ty, substitutions))
                 .collect();
             call.signature = substitute_function_type(&call.signature, substitutions);
+        }
+        for propagation in specialized.result_propagations.values_mut() {
+            propagation.result_type = substitute_type(&propagation.result_type, substitutions);
+            propagation.success_type = substitute_type(&propagation.success_type, substitutions);
+            propagation.error_type = substitute_type(&propagation.error_type, substitutions);
+            propagation.enclosing_result_type =
+                substitute_type(&propagation.enclosing_result_type, substitutions);
+        }
+        for ty in specialized.return_result_wrappings.values_mut() {
+            *ty = substitute_type(ty, substitutions);
         }
         specialized
     }
@@ -300,6 +329,8 @@ struct Analyzer<'a> {
     variable_types: HashMap<SourceSpan, Type>,
     generic_function_calls: HashMap<SourceSpan, GenericFunctionCall>,
     contract_conversions: HashMap<SourceSpan, Type>,
+    result_propagations: HashMap<SourceSpan, ResultPropagation>,
+    return_result_wrappings: HashMap<SourceSpan, Type>,
     pending_generic_bound_checks: Vec<PendingGenericBoundCheck>,
     contracts_validated: bool,
     diagnostics: Vec<Diagnostic>,
@@ -339,6 +370,8 @@ impl<'a> Analyzer<'a> {
             variable_types: HashMap::new(),
             generic_function_calls: HashMap::new(),
             contract_conversions: HashMap::new(),
+            result_propagations: HashMap::new(),
+            return_result_wrappings: HashMap::new(),
             pending_generic_bound_checks: Vec::new(),
             contracts_validated: false,
             diagnostics: Vec::new(),
@@ -371,6 +404,8 @@ impl<'a> Analyzer<'a> {
                 variable_types: self.variable_types,
                 generic_function_calls: self.generic_function_calls,
                 contract_conversions: self.contract_conversions,
+                result_propagations: self.result_propagations,
+                return_result_wrappings: self.return_result_wrappings,
             },
             diagnostics: self.diagnostics,
         }
@@ -2051,6 +2086,21 @@ impl<'a> Analyzer<'a> {
 
         match value {
             Some(expression) => {
+                if is_try_expression(expression) {
+                    if let Some((success_type, _)) = self.result_components(&return_type) {
+                        let actual = self.check_expression(expression, Some(&success_type));
+                        if !actual.is_error() && success_type.accepts(&actual) {
+                            self.return_result_wrappings
+                                .insert(expression.span, return_type);
+                        }
+                    } else {
+                        // The postfix expression reports that the function's
+                        // return type is not a compatible Result. Avoid a
+                        // second, less useful return-value mismatch here.
+                        self.check_expression(expression, None);
+                    }
+                    return;
+                }
                 let expected = (return_type.list_element().is_some()
                     && is_list_literal(expression))
                 .then_some(&return_type);
@@ -2526,6 +2576,7 @@ impl<'a> Analyzer<'a> {
                 let operand_type = self.check_expression(operand, None);
                 self.unary_result(*operator, &operand_type, expression.span)
             }
+            ExpressionKind::Try(operand) => self.check_try_expression(operand, expression.span),
             ExpressionKind::Binary {
                 left,
                 operator,
@@ -2567,6 +2618,92 @@ impl<'a> Analyzer<'a> {
         self.expression_types
             .insert(expression.span, actual.clone());
         actual
+    }
+
+    fn check_try_expression(&mut self, operand: &Expression, span: SourceSpan) -> Type {
+        let result_type = self.check_expression(operand, None);
+        if result_type.is_error() {
+            return Type::Error;
+        }
+        let Some((success_type, error_type)) = self.result_components(&result_type) else {
+            self.error_with(
+                DiagnosticCode::TypeMismatch,
+                format!("postfix '?' requires Result<T, E>, found {result_type}"),
+                span,
+            );
+            return Type::Error;
+        };
+        let Some(enclosing_result_type) = self.current_return_type.clone() else {
+            self.error_with(
+                DiagnosticCode::InvalidReturn,
+                "postfix '?' is only valid inside a Result-returning function",
+                span,
+            );
+            return Type::Error;
+        };
+        let Some((_, enclosing_error_type)) = self.result_components(&enclosing_result_type) else {
+            self.error_with(
+                DiagnosticCode::InvalidReturn,
+                format!(
+                    "postfix '?' requires the enclosing function to return Result<T, E>, found {enclosing_result_type}"
+                ),
+                span,
+            );
+            return Type::Error;
+        };
+        if error_type != enclosing_error_type {
+            self.error_with(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "postfix '?' error type must match the enclosing function exactly: expected {enclosing_error_type}, found {error_type}"
+                ),
+                span,
+            );
+            return Type::Error;
+        }
+        self.result_propagations.insert(
+            span,
+            ResultPropagation {
+                result_type,
+                success_type: success_type.clone(),
+                error_type,
+                enclosing_result_type,
+            },
+        );
+        success_type
+    }
+
+    /// Return the success/error payload types only for the ordinary generic
+    /// `Result<T, E>` enum with its canonical `Ok(T)` and `Err(E)` variants.
+    fn result_components(&self, ty: &Type) -> Option<(Type, Type)> {
+        let Type::GenericInstance {
+            constructor: GenericTypeConstructor::Enum(name),
+            arguments,
+        } = ty
+        else {
+            return None;
+        };
+        if name != "Result" || arguments.len() != 2 {
+            return None;
+        }
+        let info = self.types.get(name)?;
+        if !info.is_enum || info.type_parameters.len() != 2 || info.enum_variants.len() != 2 {
+            return None;
+        }
+        let ok = info
+            .enum_variants
+            .iter()
+            .find(|variant| variant.name == "Ok")?;
+        let err = info
+            .enum_variants
+            .iter()
+            .find(|variant| variant.name == "Err")?;
+        if ok.payload.as_slice() != [Type::TypeParameter(info.type_parameters[0].clone())]
+            || err.payload.as_slice() != [Type::TypeParameter(info.type_parameters[1].clone())]
+        {
+            return None;
+        }
+        Some((arguments[0].clone(), arguments[1].clone()))
     }
 
     fn check_identifier(&mut self, identifier: &Identifier) -> Type {
@@ -3702,6 +3839,10 @@ fn is_list_literal(expression: &Expression) -> bool {
     }
 }
 
+fn is_try_expression(expression: &Expression) -> bool {
+    matches!(ungroup_kind(&expression.kind), ExpressionKind::Try(_))
+}
+
 fn is_equality_type(ty: &Type) -> bool {
     matches!(ty, Type::Int | Type::Float | Type::Bool | Type::String)
 }
@@ -3735,7 +3876,7 @@ fn binary_text(operator: BinaryOperator) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::analyze;
-    use crate::ast::{Declaration, StatementKind};
+    use crate::ast::{Declaration, ExpressionKind, StatementKind};
     use crate::diagnostics::DiagnosticCode;
     use crate::lexer;
     use crate::parser;
@@ -5038,6 +5179,92 @@ fn main() {
             maybe.enum_variants[0].payload,
             [Type::TypeParameter(maybe.type_parameters[0].clone())]
         );
+    }
+
+    #[test]
+    fn checks_result_propagation_and_records_types_for_generic_lowering() {
+        let result = analyze_text(
+            r#"enum Result<T, E> { Ok(T) Err(E) }
+fn read() -> Result<Int, String> { return Result<Int, String>.Ok(4) }
+fn apply<T>(value: Result<T, String>) -> Result<T, String> {
+    let item = value?
+    return Result<T, String>.Ok(item)
+}
+fn direct(value: Result<Int, String>) -> Result<Int, String> { return (value?) }
+fn main() { let result = apply<Int>(read()) }"#,
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "valid propagation should type check: {:?}",
+            messages(&result)
+        );
+
+        let apply = function(&result, "apply");
+        let StatementKind::Variable(variable) = &apply.body.statements[0].kind else {
+            panic!("expected propagated local declaration");
+        };
+        let expression = variable.initializer.as_ref().expect("initializer");
+        let ExpressionKind::Try(_) = expression.kind else {
+            panic!("initializer should contain a Try expression");
+        };
+        assert_eq!(
+            result.typed_program.expression_type(expression),
+            Some(&Type::TypeParameter(
+                result
+                    .typed_program
+                    .symbols
+                    .global("apply")
+                    .and_then(|symbol| match symbol {
+                        super::GlobalSymbol::Function(signature) => {
+                            signature.type_parameters.first().cloned()
+                        }
+                        _ => None,
+                    })
+                    .expect("generic parameter")
+            ))
+        );
+        let propagation = result
+            .typed_program
+            .result_propagation(expression.span)
+            .expect("typed propagation data");
+        assert!(matches!(
+            &propagation.success_type,
+            Type::TypeParameter(parameter) if parameter.name == "T"
+        ));
+        assert_eq!(propagation.error_type, Type::String);
+
+        let direct = function(&result, "direct");
+        let StatementKind::Return(Some(returned)) = &direct.body.statements[0].kind else {
+            panic!("expected return statement");
+        };
+        assert!(result
+            .typed_program
+            .return_result_wrapping(returned.span)
+            .is_some());
+    }
+
+    #[test]
+    fn diagnoses_invalid_result_propagation_contexts_and_error_types() {
+        let result = analyze_text(
+            r#"enum Result<T, E> { Ok(T) Err(E) }
+fn nonResult(value: Int) -> Int { return value? }
+fn wrongReturn(value: Result<Int, String>) -> Int { return value? }
+fn wrongError(value: Result<Int, Int>) -> Result<Int, String> { let item = value?; return Result<Int, String>.Ok(item) }
+fn nonResultOperand() -> Result<Int, String> { return 5? }
+fn main() {}"#,
+        );
+        assert!(has_message(
+            &result,
+            "postfix '?' requires the enclosing function to return Result<T, E>"
+        ));
+        assert!(has_message(
+            &result,
+            "postfix '?' error type must match the enclosing function exactly"
+        ));
+        assert!(has_message(
+            &result,
+            "postfix '?' requires Result<T, E>, found Int"
+        ));
     }
 
     #[test]
