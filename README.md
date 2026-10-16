@@ -525,15 +525,26 @@ enum NetworkState {
     Failed(String)
 }
 
-enum Result<T, E> {
-    Ok(T)
-    Err(E)
+enum Maybe<T> {
+    Some(T)
+    None
+}
+
+fn divide(a: Int, b: Int) -> Result<Int, String> {
+    if b == 0 {
+        return Result<Int, String>.Err("division by zero")
+    }
+    return Result<Int, String>.Ok(a / b)
 }
 
 fn main() {
     let direction = Direction.North
     let failure = NetworkState.Failed("Connection refused")
-    let result = Result<Int, String>.Ok(42)
+    let result = divide(10, 2)
+    match result {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
 }
 ```
 
@@ -541,9 +552,19 @@ Each native enum value has an `i32` discriminant and typed storage for each
 variant payload. The current LLVM layout is an internal tagged aggregate, not a
 C ABI layout. Enum values copy inline struct/enum payloads by value; String,
 List, and class payloads retain their existing managed-reference behavior.
-`match` inspects the active tag and extracts payloads. `Maybe<T>` and
-`Result<T, E>` are ordinary user-declared enums in this stage, not built-in
-prelude types.
+`match` inspects the active tag and extracts payloads. `Maybe<T>` is an ordinary
+user-declared enum. `Result<T, E>` is included from the source prelude as the
+ordinary generic enum `Ok(T) | Err(E)`; it receives no special semantic or
+backend treatment. A top-level declaration named `Result` replaces the
+prelude definition for that source file.
+
+Construct enum values with a qualified generic type when its arguments are
+not otherwise fixed by construction, for example
+`Result<Int, String>.Err("division by zero")`. Match arms use the matched
+value's type, so their variant patterns are written concisely as `Ok(value)`
+and `Err(error)`. The prelude is embedded in the compiler and requires no
+manual import or installed source file. Postfix `?` propagation is not yet
+implemented.
 The compiler remains Windows x86-64 only with the existing
 `princi build` workflow and `.prnc`/`.princi` extension equivalence.
 

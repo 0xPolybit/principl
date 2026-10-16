@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
+mod prelude;
 pub mod runtime;
 pub mod semantic;
 pub mod source;

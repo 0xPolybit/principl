@@ -322,6 +322,85 @@ fn main() {
 
 #[cfg(windows)]
 #[test]
+fn prelude_result_supports_generic_primitive_struct_class_and_nested_payloads() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"struct Point {
+    x: Int
+    y: Int
+}
+
+class User {
+    name: String
+
+    init(name: String) {
+        self.name = name
+    }
+}
+
+fn wrap<T>(value: T) -> Result<T, String> {
+    return Result<T, String>.Ok(value)
+}
+
+fn divide(a: Int, b: Int) -> Result<Int, String> {
+    if b == 0 {
+        return Result<Int, String>.Err("division by zero")
+    }
+    return Result<Int, String>.Ok(a / b)
+}
+
+fn point() -> Result<Point, String> {
+    return Result<Point, String>.Ok(Point(3, 4))
+}
+
+fn user() -> Result<User, String> {
+    return Result<User, String>.Ok(User("Ada"))
+}
+
+fn nested() -> Result<Result<Int, String>, String> {
+    return Result<Result<Int, String>, String>.Ok(Result<Int, String>.Ok(7))
+}
+
+fn main() {
+    match divide(10, 2) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match divide(10, 0) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match wrap("generic") {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match point() {
+        Ok(value) => println(value.x + value.y)
+        Err(error) => println(error)
+    }
+    match user() {
+        Ok(value) => println(value.name)
+        Err(error) => println(error)
+    }
+    match nested() {
+        Ok(inner) => match inner {
+            Ok(value) => println(value)
+            Err(error) => println(error)
+        }
+        Err(error) => println(error)
+    }
+}"#;
+
+    for extension in ["prnc", "princi"] {
+        let stdout = dir.build_and_run(&format!("prelude-result.{extension}"), source);
+        assert_eq!(stdout, "5\ndivision by zero\ngeneric\n7\nAda\n7\n");
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn integer_main_return_becomes_the_process_exit_status() {
     if skip_without_native_toolchain() {
         return;
