@@ -238,7 +238,7 @@ impl<'a> Lexer<'a> {
                         't' => value.push('\t'),
                         '0' => {
                             return Err(self.error(
-                                "NUL bytes are not supported in v0.1 string literals",
+                                "NUL bytes are not supported in string literals",
                                 escape_start,
                                 self.offset,
                             ));
@@ -263,7 +263,7 @@ impl<'a> Lexer<'a> {
                     let nul_start = self.offset;
                     self.advance();
                     return Err(self.error(
-                        "NUL bytes are not supported in v0.1 string literals",
+                        "NUL bytes are not supported in string literals",
                         nul_start,
                         self.offset,
                     ));

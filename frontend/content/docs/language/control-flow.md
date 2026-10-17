@@ -1,4 +1,4 @@
-Princi uses `if`/`else`, `while`, and integer range `for` statements to control execution. Blocks are written with braces. `if` and `while` conditions must evaluate to `Bool`.
+Princi uses `if`/`else`, `while`, integer range `for` loops, and `match` to control execution. Blocks are written with braces. `if` and `while` conditions must evaluate to `Bool`.
 
 ## If and else
 
@@ -56,9 +56,9 @@ fn main() {
 
 Definite initialization follows the same branch rule: assigning a local in both the `if` and `else` branches initializes it afterward. With no `else`, the compiler cannot assume the branch ran.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-Conditions must be `Bool`. There are no `break`, `continue`, `switch`, `match`, pattern matching, or exception-handling statements. A loop body does not guarantee that a local assigned only inside it is initialized after the loop.
+Conditions must be `Bool`. There are no `break`, `continue`, switch statements, or exception-handling statements. Enum and literal matching is provided by [`match`](/docs/language/match). A loop body does not guarantee that a local assigned only inside it is initialized after the loop.
 
 See [Loops](/docs/language/loops) for range behavior and [Functions](/docs/language/functions) for return rules.
 

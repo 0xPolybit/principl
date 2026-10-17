@@ -1,4 +1,4 @@
-`List<T>` is v0.1's only generic collection. `T` is the element type, and the compiler checks each literal, read, write, and append against it.
+`List<T>` is a built-in generic collection. `T` is the element type, and the compiler checks each literal, read, write, and append against it. Lists can hold nested generic values, enums, classes, structs, and supported interface or trait values.
 
 ## Create a list
 
@@ -23,7 +23,7 @@ fn main() {
 }
 ~~~
 
-Mixed element types are errors. The compiler does not promote `Int` to `Float` or find a shared element type. Nested lists and lists of classes, structs, and primitive values are supported.
+Mixed element types are errors. The compiler does not promote `Int` to `Float` or find a shared element type. Nested lists and lists of classes, structs, enums, and primitive values are supported. Interface and trait element types are supported where their runtime representation is valid.
 
 ## Read, update, append
 
@@ -65,9 +65,9 @@ fn main() {
 
 `let` prevents replacing the handle; it does not make the referenced list immutable. A list referenced by `let` may use `.add` or indexed assignment. `.length` itself cannot be assigned.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-Lists do not support removal, slicing, comprehensions, iteration APIs, iterators, higher-order functions, or custom generic types. Lists cannot be passed to `print`/`println` directly. The managed runtime retains list allocations until the program exits. A struct nested inside a list is a value; to change a nested struct field, update the struct value and assign it back as a whole element.
+Lists do not support removal, slicing, comprehensions, iteration APIs, iterators, or higher-order collection functions. Lists cannot be passed to `print`/`println` directly. The managed runtime retains list allocations until the program exits. A struct nested inside a list is a value; to change a nested struct field, update the struct value and assign it back as a whole element.
 
 ## Related topics
 

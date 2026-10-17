@@ -1,4 +1,4 @@
-Princi v0.1 can declare direct external functions that use the Windows x86-64 C ABI. Keep declarations inside an `extern "C"` block and give each function a C-safe signature:
+Princi v0.2 can declare direct external functions that use the Windows x86-64 C ABI. Keep declarations inside an `extern "C"` block and give each function a C-safe signature:
 
 ~~~princi
 extern "C" {
@@ -30,9 +30,9 @@ fn main() {
 }
 ~~~
 
-The compiler emits the Windows x86-64 C calling convention. A declared symbol must be provided by the linked Windows toolchain/runtime; the v0.1 CLI does not accept extra library or object-file linker flags.
+The compiler emits the Windows x86-64 C calling convention. A declared symbol must be provided by the linked Windows toolchain/runtime; the CLI does not accept extra library or object-file linker flags.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 This is a narrow ABI boundary, not general pointer interoperability. Parameters and results cannot use `Bool`, `String`, classes, structs, lists, aggregates, or Princi-managed references. There are no raw pointer types, callbacks, variadic declarations, C++ conventions, alternate calling conventions, `repr(C)` layouts, manual memory operations, or pinning. External declarations have no Princi body and cannot overload another declared external name.
 
@@ -41,4 +41,4 @@ This is a narrow ABI boundary, not general pointer interoperability. Parameters 
 - [Primitive types](/docs/language/primitive-types)
 - [Windows toolchain](/docs/compiler/windows-toolchain)
 - [Diagnostics](/docs/compiler/diagnostics)
-- [Explicit v0.1 scope](/docs/reference/limitations)
+- [Explicit v0.2 scope](/docs/reference/limitations)

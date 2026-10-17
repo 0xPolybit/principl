@@ -138,7 +138,7 @@ export function ExampleGallery({ examples }: { examples: PrinciExample[] }) {
           {filteredExamples.length === 1
             ? "1 example"
             : `${filteredExamples.length} examples`}
-          {query || category !== "All examples" ? " found" : " in the v0.1 gallery"}
+          {query || category !== "All examples" ? " found" : " in the v0.2 gallery"}
         </p>
       </div>
 

@@ -53,11 +53,11 @@ Method parameters are immutable, and a missing return annotation means `Void`. M
 
 ## Visibility and dispatch
 
-Visibility modifiers do not exist in v0.1; class methods and fields are public/module-visible under the current temporary rules. Dispatch is static. A class reference does not enable overriding or virtual dispatch.
+Visibility modifiers do not exist in v0.2; class methods and fields are public/module-visible under the current temporary rules. Calls on concrete classes use static dispatch. Calls through an interface or trait value use dynamic dispatch. A class reference does not enable inheritance or virtual class dispatch.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-Methods exist only on classes. Struct methods are rejected. Method overloading, inheritance, virtual methods, interfaces, traits, abstract methods, static methods, operator overloads, and reflection are unsupported.
+Class methods can use type parameters from a generic class, but methods cannot declare their own generic parameters. Structs can implement traits and provide the required trait methods; the language has no separate inherent-method syntax for structs. Method overloading, inheritance, virtual class methods, abstract methods, static methods, operator overloads, and reflection are unsupported.
 
 ## Related topics
 

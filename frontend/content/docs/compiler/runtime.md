@@ -12,7 +12,7 @@ fn main() {
 }
 ~~~
 
-The runtime also provides string concatenation/equality, class allocation, list creation/access/growth, bounds diagnostics, checked FFI conversion, and process-startup/shutdown helpers. These routines use the Windows C runtime for basic printing and heap primitives.
+The runtime also provides string concatenation/equality, class and trait-view allocation, list creation/access/growth, bounds diagnostics, checked FFI conversion, interface/trait dispatch tables, and process-startup/shutdown helpers. These routines use the Windows C runtime for basic printing and heap primitives.
 
 ## Startup and termination
 
@@ -22,9 +22,9 @@ The runtime code is part of the generated program's LLVM module and native objec
 
 ## Platform boundary
 
-Language-level code generation calls runtime facade functions. Platform-specific LLVM definitions live under `runtime/windows_x86_64.rs`, keeping the v0.1 Windows ABI details out of the source-language type model. The current build only emits Windows x86-64 programs.
+Language-level code generation calls runtime facade functions. Platform-specific LLVM definitions live under `runtime/windows_x86_64.rs`, keeping the Windows ABI details out of the source-language type model. The current build only emits Windows x86-64 programs.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 This is a small compiler/runtime ABI, not an installable general-purpose runtime library. It does not provide a tracing collector, finalizers, user allocation/free functions, raw pointers, concurrency APIs, or portable runtime targets. See [Managed Memory](/docs/compiler/managed-memory) for the actual allocation lifetime.
 

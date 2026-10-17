@@ -619,7 +619,7 @@ impl<'a> Analyzer<'a> {
         if block.abi != "C" {
             self.error(
                 format!(
-                    "unsupported extern ABI '{}'; only extern \"C\" is supported in v0.1",
+                    "unsupported extern ABI '{}'; only extern \"C\" is supported",
                     block.abi
                 ),
                 block.abi_span,
@@ -700,7 +700,7 @@ impl<'a> Analyzer<'a> {
             name => {
                 self.error(
                     format!(
-                        "type '{name}' is not FFI-safe in v0.1; use Int32, Int64, Float64{}",
+                        "type '{name}' is not FFI-safe; use Int32, Int64, Float64{}",
                         if allow_void { ", or Void" } else { "" }
                     ),
                     type_reference.span,
@@ -786,7 +786,7 @@ impl<'a> Analyzer<'a> {
                     {
                         self.error_with(
                             DiagnosticCode::InvalidTrait,
-                            "methods on structs are not supported in v0.1 unless they implement a trait",
+                            "methods on structs are supported only when they implement a trait",
                             method.name.span,
                         )
                     }
@@ -795,7 +795,7 @@ impl<'a> Analyzer<'a> {
                         if type_declaration.kind == TypeDeclarationKind::Struct =>
                     {
                         self.error(
-                            "structs do not support init constructors in v0.1; construct them from fields",
+                            "structs do not support init constructors; construct them from fields",
                             initializer.span,
                         )
                     }
@@ -2077,7 +2077,7 @@ impl<'a> Analyzer<'a> {
                 }
                 if object_type.is_struct() && self.is_struct_list_element_path(object) {
                     self.error(
-                        "mutating fields of struct list elements is not supported in v0.1; assign the updated struct back to the list",
+                    "mutating fields of struct list elements is not supported; assign the updated struct back to the list",
                         target.span,
                     );
                     return (Type::Error, false);
@@ -2834,7 +2834,7 @@ impl<'a> Analyzer<'a> {
             Some(GlobalSymbol::Function(signature)) => Type::Function(signature.clone()),
             Some(GlobalSymbol::ExternalFunction(_)) => {
                 self.error(
-                    "external C functions must be called directly in v0.1",
+                    "external C functions must be called directly",
                     identifier.span,
                 );
                 Type::Error
@@ -4532,11 +4532,11 @@ fn main() {
         ));
         assert!(has_message(
             &result,
-            "methods on structs are not supported in v0.1"
+            "methods on structs are supported only when they implement a trait"
         ));
         assert!(has_message(
             &result,
-            "structs do not support init constructors in v0.1"
+            "structs do not support init constructors"
         ));
         assert!(has_message(
             &result,
@@ -5771,10 +5771,7 @@ fn ordinary(value: Int32) {}
 fn main() {}"#,
         );
 
-        assert!(has_message(
-            &result,
-            "only extern \"C\" is supported in v0.1"
-        ));
+        assert!(has_message(&result, "only extern \"C\" is supported"));
         assert!(has_message(&result, "type 'String' is not FFI-safe"));
         assert!(has_message(&result, "type 'List' is not FFI-safe"));
         assert!(has_message(&result, "type 'User' is not FFI-safe"));
@@ -5806,7 +5803,7 @@ fn main() {
 
         assert!(has_message(
             &result,
-            "external C functions must be called directly in v0.1"
+            "external C functions must be called directly"
         ));
     }
 }

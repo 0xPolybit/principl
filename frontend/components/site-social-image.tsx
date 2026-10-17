@@ -48,7 +48,7 @@ export function createPrinciSocialImage() {
             >
               P
             </div>
-            <span style={{ color: "#d6dfd7", fontSize: 25, letterSpacing: 4 }}>PRINCIPL / V0.1</span>
+            <span style={{ color: "#d6dfd7", fontSize: 25, letterSpacing: 4 }}>PRINCIPL / V0.2</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <strong style={{ fontSize: 70, letterSpacing: -3 }}>Structure when needed.</strong>

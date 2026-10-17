@@ -1,0 +1,3 @@
+fn main() {
+    match true {
+        true => println("yes")

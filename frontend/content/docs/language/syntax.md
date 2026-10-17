@@ -2,7 +2,7 @@ Princi source uses braces for blocks and a small set of top-level declarations. 
 
 ## Top-level declarations
 
-The v0.1 parser accepts functions, classes, structs, built-in imports, and restricted C declarations:
+The v0.2 parser accepts functions, generic declarations, classes, structs, interfaces, traits, enums, built-in imports, and restricted C declarations:
 
 ~~~princi
 import io
@@ -17,7 +17,7 @@ struct Point {
 }
 ~~~
 
-Function bodies contain local declarations, assignments, branches, loops, returns, nested blocks, and expression statements. Class bodies contain fields, methods, and at most one `init`; structs contain fields only.
+Function bodies contain local declarations, assignments, branches, loops, returns, nested blocks, `match` expressions/statements, and expression statements. Classes can define fields, methods, and at most one `init`; structs contain fields and trait implementations; interfaces declare required methods, traits can include default methods, and enums declare variants.
 
 ## Statements and line breaks
 
@@ -55,7 +55,7 @@ Calls, member access, and indexing bind most tightly. Binary operators associate
 | 6 | `+`, `-` |
 | 7 | `*`, `/`, `%` |
 | 8 | unary `+`, `-`, `!` |
-| 9 | calls, member access, indexing |
+| 9 | calls, member access, indexing, postfix `?` |
 
 ~~~princi
 fn main() {
@@ -75,9 +75,9 @@ princi build hello.princi
 
 See [variables](/docs/language/variables), [operators](/docs/language/operators), and [lexical syntax](/docs/reference/lexical-syntax) for details.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-There are no semantically active indentation rules, macros, decorators, pattern matching, enums, or expression-valued assignments. A range cannot be chained without explicit grouping. Some syntax parsed by the frontend may still be rejected if it falls outside the implemented v0.1 semantic or native backend subset.
+There are no semantically active indentation rules, macros, decorators, or expression-valued assignments. A range cannot be chained without explicit grouping. Pattern matching supports the documented finite enum and primitive-literal subset only; parsed syntax outside the semantic or native backend subset receives a diagnostic.
 
 ## Related topics
 

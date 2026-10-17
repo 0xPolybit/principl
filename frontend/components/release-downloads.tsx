@@ -11,7 +11,7 @@ export function ReleaseDownloads() {
     <div className="release-downloads">
       <div aria-label={`Princi ${releaseVersion} downloads`} className="release-download-actions" role="group">
         <a
-          aria-label="Download Princi v0.1.0 Windows x86-64 installer"
+          aria-label={`Download Princi ${releaseVersion} Windows x86-64 installer`}
           className="button-link button-primary"
           href={windowsInstallerUrl}
         >
@@ -19,7 +19,7 @@ export function ReleaseDownloads() {
           Windows installer <code>.exe</code>
         </a>
         <a
-          aria-label="Download Princi v0.1.0 Windows x86-64 portable archive"
+          aria-label={`Download Princi ${releaseVersion} Windows x86-64 portable archive`}
           className="button-link button-secondary"
           href={windowsPortableArchiveUrl}
         >

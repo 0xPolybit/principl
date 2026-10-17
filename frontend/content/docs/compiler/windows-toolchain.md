@@ -1,4 +1,4 @@
-Princi v0.1 produces Windows x86-64 executables using LLVM/Clang and x86-64 MinGW-w64 GCC. The compiler invokes these tools with structured process arguments and an explicit target; it does not construct a shell command from paths.
+Princi v0.2 produces Windows x86-64 executables using LLVM/Clang and x86-64 MinGW-w64 GCC. The compiler invokes these tools with structured process arguments and an explicit target; it does not construct a shell command from paths.
 
 ## Object and link steps
 
@@ -34,7 +34,7 @@ By default the compiler starts `clang` and `gcc` by name from `PATH`. Set `PRINC
 
 `E0401` means LLVM/Clang could not be started; `E0403` means the linker is unavailable or targets the wrong architecture; `E0404` reports a linker command failure. LLVM/native generation failure is reported separately as `E9002`. These errors exit nonzero rather than producing a success message.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Only the Windows x86-64 GNU target is supported. The compiler does not target MSVC, Linux, macOS, ARM, or WebAssembly. It does not provide CLI flags for additional library or object files. See [Installation](/docs/installation) for the complete Windows setup.
 

@@ -1,4 +1,4 @@
-Princi v0.1 provides `while` loops and `for name in start..end` loops. Loop bodies are blocks, and the loop variable in a `for` loop is immutable and visible only in that loop's scope.
+Princi provides `while` loops and `for name in start..end` loops. Loop bodies are blocks, and the loop variable in a `for` loop is immutable and visible only in that loop's scope.
 
 ## While loops
 
@@ -50,7 +50,7 @@ The `index` name is immutable. Use a separate `var` if the body needs an indepen
 
 The loop variable belongs to the loop scope and cannot be used after it. Assigning a local only inside a loop does not prove that local is initialized afterward, because the loop may execute zero times.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Native `for` loops require integer bounds and always increment by one. There is no custom step, reverse-range syntax, collection iteration, `break`, or `continue`. The range expression itself accepts matching numeric bounds, but non-integer ranges cannot drive a native `for` loop.
 

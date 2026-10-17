@@ -4,7 +4,7 @@
 
 **Reader:** Developers evaluating and trying Princi.
 
-**Question:** What is Princi today, what does its v0.1 compiler actually
+**Question:** What is Princi today, what does its v0.2 compiler actually
 support, and how can I build a first program on Windows?
 
 **Success:** Within the first screen, a visitor can identify Princi as a

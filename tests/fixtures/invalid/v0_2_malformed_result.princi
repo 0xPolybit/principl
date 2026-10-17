@@ -1,0 +1,4 @@
+fn invalid() -> Result<Int> {
+    return Result<Int>.Ok(1)
+}
+fn main() {}

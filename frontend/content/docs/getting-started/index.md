@@ -1,4 +1,4 @@
-This guide takes you from a clean Windows machine to a running Princi executable. Princi v0.1 compiles native Windows x86-64 programs; the compiler is written in Rust and uses LLVM/Clang plus MinGW-w64 for native output.
+This guide takes you from a clean Windows machine to a running Princi executable. Princi v0.2 compiles native Windows x86-64 programs; the compiler is written in Rust and uses LLVM/Clang plus MinGW-w64 for native output.
 
 ## Follow these steps
 

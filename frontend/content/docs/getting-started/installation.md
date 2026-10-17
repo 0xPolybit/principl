@@ -1,8 +1,8 @@
-Princi v0.1 builds native Windows x86-64 executables. A local setup needs the Rust toolchain for the compiler itself, LLVM/Clang for verified Windows object generation, and MinGW-w64 GCC for the final link.
+Princi v0.2 builds native Windows x86-64 executables. A local setup needs the Rust toolchain for the compiler itself, LLVM/Clang for verified Windows object generation, and MinGW-w64 GCC for the final link.
 
-> **Windows-only target:** These steps set up the supported v0.1 target. The compiler does not currently produce Linux, macOS, or WebAssembly programs.
+> **Windows-only target:** These steps set up the supported v0.2 target. The compiler does not currently produce Linux, macOS, or WebAssembly programs.
 
-## Download the v0.1 compiler
+## Download the v0.2 compiler
 
 <!-- princi-release-downloads -->
 

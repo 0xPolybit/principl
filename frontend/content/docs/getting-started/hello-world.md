@@ -38,7 +38,7 @@ Expected output:
 Hello from PrinciPL!
 ```
 
-Compilation and execution are separate steps. v0.1 has no `princi run` command; build first, then launch the `.exe` with Windows.
+Compilation and execution are separate steps. The v0.2 CLI has no `princi run` command; build first, then launch the `.exe` with Windows.
 
 ## A first real program: recursion and a condition
 
@@ -79,4 +79,4 @@ Expected output:
 120
 ```
 
-The example uses syntax supported by the v0.1 native backend: typed function parameters and returns, integer comparison and multiplication, recursion, local type inference, conditional branches, and `println` for `String` and `Int` values. Continue to [compiling programs](/docs/compiling) to learn how to choose the output path.
+The example uses typed parameters and returns, integer comparison and multiplication, recursion, local type inference, conditional branches, and `println` for `String` and `Int` values. Continue to [compiling programs](/docs/compiling) to learn how to choose the output path.

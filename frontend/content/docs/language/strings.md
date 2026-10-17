@@ -46,7 +46,7 @@ fn main() {
 
 String literals are immutable module constants. Concatenation allocates a managed result. String values can be passed to and returned from functions like other values.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Embedded NUL bytes, including a `\0` escape, are rejected because runtime strings use NUL-terminated storage. There is no interpolation, mutable character indexing, slicing, formatting syntax, or implicit conversion from other types. Strings cannot cross the current C FFI boundary.
 

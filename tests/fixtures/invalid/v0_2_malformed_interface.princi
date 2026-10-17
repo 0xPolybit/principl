@@ -1,0 +1,2 @@
+interface Drawable { fn draw(value: ) -> Void }
+fn main() {}

@@ -7,8 +7,9 @@ const pipelineSteps = [
   ["Parser", "Syntax analysis with recovery"],
   ["AST", "Span-preserving source tree"],
   ["Module resolution", "Fixed built-in io and math registry"],
-  ["Semantic analysis", "Names, scopes, calls, and language rules"],
-  ["Typed representation", "AST plus resolved symbols and expression types"],
+  ["Semantic analysis", "Names, types, bounds, conformance, and match coverage"],
+  ["Generic specialization", "Concrete instances for used type arguments"],
+  ["Typed representation", "AST plus specialized symbols and resolved expression types"],
   ["LLVM IR", "Windows target triple and runtime helpers"],
   ["Windows x86-64 COFF", "Object emitted by LLVM/Clang"],
   ["MinGW-w64 linker", "GCC links the object and Windows C runtime"],
@@ -18,7 +19,7 @@ const pipelineSteps = [
 const memoryStages = [
   {
     title: "Managed",
-    status: "CURRENT · v0.1",
+    status: "CURRENT · v0.2",
     description: "Runtime registers heap blocks and releases them together when the program exits.",
     current: true,
   },
@@ -37,7 +38,7 @@ const memoryStages = [
   {
     title: "Raw / manual",
     status: "FUTURE DIRECTION",
-    description: "A possible low-level control layer, not a v0.1 source feature.",
+    description: "A possible low-level control layer, not a v0.2 source feature.",
     current: false,
   },
 ];
@@ -49,7 +50,7 @@ export function CompilerPipelineDiagram() {
         <span>Build path</span>
         <span>Princi source to native Windows executable</span>
       </figcaption>
-      <ol aria-label="Princi v0.1 compiler pipeline" className={styles.pipelineSteps}>
+      <ol aria-label="Princi v0.2 compiler pipeline" className={styles.pipelineSteps}>
         {pipelineSteps.map(([title, description], index) => (
           <li className={styles.pipelineStep} key={title}>
             <span aria-hidden="true" className={styles.stepNumber}>{String(index + 1).padStart(2, "0")}</span>
@@ -71,7 +72,7 @@ export function MemoryRoadmapDiagram() {
         <span>Roadmap concept</span>
         <span>Possible progression of memory control</span>
       </figcaption>
-      <ol aria-label="Future memory model direction, not a v0.1 feature list" className={styles.memoryStages}>
+      <ol aria-label="Future memory model direction, not a v0.2 feature list" className={styles.memoryStages}>
         {memoryStages.map((stage) => (
           <li className={stage.current ? styles.currentStage : styles.futureStage} key={stage.title}>
             <span className={styles.stageStatus}>{stage.status}</span>
@@ -81,7 +82,7 @@ export function MemoryRoadmapDiagram() {
         ))}
       </ol>
       <p className={styles.roadmapNote}>
-        Only <strong>Managed</strong> describes the v0.1 implementation. The remaining stages are concepts for future versions, not available APIs or a committed release schedule.
+        Only <strong>Managed</strong> describes the v0.2 implementation. The remaining stages are concepts for future versions, not available APIs or a committed release schedule.
       </p>
     </figure>
   );

@@ -1,4 +1,4 @@
-//! The deliberately small foreign-function boundary for Princi v0.1.
+//! The deliberately small foreign-function boundary for Princi v0.2.
 //!
 //! This models C ABI types independently from language types. Managed values,
 //! aggregates, pointers, callbacks, and non-C calling conventions do not cross

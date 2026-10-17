@@ -85,7 +85,7 @@ fn main() {
 }
 ~~~
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 There is no operator overloading, implicit numeric promotion, exponentiation operator, bitwise operator, or compound division/remainder assignment. Equality is not defined for class or struct values.
 

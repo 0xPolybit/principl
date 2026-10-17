@@ -47,9 +47,9 @@ extern "C" {
 }
 ~~~
 
-The example above is rejected: managed Princi strings cannot cross the v0.1 C boundary. `Bool`, classes, structs, lists, pointers, and other aggregates are likewise unsupported.
+The example above is rejected: managed Princi strings cannot cross the v0.2 C boundary. `Bool`, classes, structs, lists, pointers, and other aggregates are likewise unsupported.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Calls are direct and non-variadic under the Windows x86-64 C ABI. The compiler does not import C headers or compile C sources. There are no callbacks, C++ or alternate calling conventions, raw pointers, `repr(C)` structs, aggregate arguments, manual allocation/free, or pinning. External names must satisfy the restricted ASCII C identifier rules and cannot collide with compiler/runtime symbols.
 

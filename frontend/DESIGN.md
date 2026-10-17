@@ -5,7 +5,7 @@ labels of a toolchain interface, with the information hierarchy of good
 technical documentation. It should feel at home beside systems-language and
 compiler projects without borrowing their brand patterns. The site helps
 developers evaluate and try Princi; every language claim remains tied to the
-repository's documented v0.1 behavior.
+repository's documented v0.2 behavior.
 
 ## Visual system
 
@@ -24,12 +24,12 @@ repository's documented v0.1 behavior.
   in both themes. Mobile navigation remains in the keyboard order and closes
   with Escape.
 - No decorative gradients, fake product capabilities, or external font
-  requests. Code and examples describe only features present in the v0.1
+  requests. Code and examples describe only features present in the v0.2
   scope.
 
 ## Shared shell and components
 
-The global shell provides Home, Docs, Learn, Examples, GitHub, a v0.1 marker,
+The global shell provides Home, Docs, Learn, Examples, GitHub, a v0.2 marker,
 the theme selector, responsive menu, and a footer with compiler-target details.
 Reusable components include button links, badges, cards, callouts, section
 headings, feature grids, inline code, navigation links, code samples, copy

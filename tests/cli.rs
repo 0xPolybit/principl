@@ -308,7 +308,7 @@ fn ffi_rejects_managed_values_before_native_linking() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("error[E0299]: type 'String' is not FFI-safe in v0.1"),
+        stderr.contains("error[E0299]: type 'String' is not FFI-safe"),
         "{stderr}"
     );
     assert!(

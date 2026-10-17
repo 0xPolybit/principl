@@ -245,6 +245,53 @@ fn v02_negative_fixtures_report_diagnostics_and_never_emit_executables() {
 }
 
 #[test]
+fn malformed_v02_programs_report_errors_without_panicking() {
+    for (name, fixture) in [
+        (
+            "malformed generic.prnc",
+            include_str!("fixtures/invalid/v0_2_malformed_generic.prnc"),
+        ),
+        (
+            "malformed interface.princi",
+            include_str!("fixtures/invalid/v0_2_malformed_interface.princi"),
+        ),
+        (
+            "malformed trait.prnc",
+            include_str!("fixtures/invalid/v0_2_malformed_trait.prnc"),
+        ),
+        (
+            "malformed enum.princi",
+            include_str!("fixtures/invalid/v0_2_malformed_enum.princi"),
+        ),
+        (
+            "malformed match.prnc",
+            include_str!("fixtures/invalid/v0_2_malformed_match.prnc"),
+        ),
+        (
+            "malformed Result.princi",
+            include_str!("fixtures/invalid/v0_2_malformed_result.princi"),
+        ),
+    ] {
+        let dir = TestDir::new();
+        let source = dir.source(name, fixture);
+        let result = dir.build(&source, None);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+
+        assert!(!result.status.success(), "{name} unexpectedly compiled");
+        assert!(
+            stderr.contains("error["),
+            "{name} produced no diagnostic: {stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{name} panicked: {stderr}");
+        assert!(!stderr.contains("stack backtrace"), "{name}: {stderr}");
+        assert!(
+            !source.with_extension("exe").exists(),
+            "{name} emitted an executable"
+        );
+    }
+}
+
+#[test]
 fn positive_conformance_fixtures_keep_both_suffixes_as_exact_aliases() {
     assert_eq!(
         include_str!("fixtures/conformance/v0_1.prnc"),
@@ -260,6 +307,11 @@ fn positive_conformance_fixtures_keep_both_suffixes_as_exact_aliases() {
         include_str!("fixtures/conformance/v0_2.prnc"),
         include_str!("fixtures/conformance/v0_2.princi"),
         "v0.2 conformance fixtures must use identical source text"
+    );
+    assert_eq!(
+        include_str!("fixtures/conformance/showcase_v0_2.prnc"),
+        include_str!("fixtures/conformance/showcase_v0_2.princi"),
+        "v0.2 showcase fixtures must use identical source text"
     );
 }
 
@@ -277,6 +329,10 @@ fn hello_and_full_conformance_sources_lower_identically_from_both_extensions() {
         (
             include_str!("fixtures/conformance/v0_2.prnc"),
             include_str!("fixtures/conformance/v0_2.princi"),
+        ),
+        (
+            include_str!("fixtures/conformance/showcase_v0_2.prnc"),
+            include_str!("fixtures/conformance/showcase_v0_2.princi"),
         ),
     ] {
         let prnc_ir = generate_llvm_ir("program.prnc", prnc);
@@ -442,6 +498,53 @@ fn v02_conformance_builds_and_runs_identically_with_both_extensions() {
             expected_stderr,
             "unexpected stderr for .{extension}"
         );
+        assert_eq!(run.status.code(), Some(expected_exit));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn v02_release_showcase_builds_and_runs_with_both_extensions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+
+    let prnc = include_str!("fixtures/conformance/showcase_v0_2.prnc");
+    let princi = include_str!("fixtures/conformance/showcase_v0_2.princi");
+    assert_eq!(prnc, princi, "showcase extensions must be aliases");
+    let expected_stdout =
+        normalize_newlines(include_str!("fixtures/conformance/showcase_v0_2.stdout").as_bytes());
+    let expected_stderr =
+        normalize_newlines(include_str!("fixtures/conformance/showcase_v0_2.stderr").as_bytes());
+    let expected_exit = include_str!("fixtures/conformance/showcase_v0_2.exitcode")
+        .trim()
+        .parse::<i32>()
+        .expect("showcase exit code should be an integer");
+
+    for (extension, source_text) in [("prnc", prnc), ("princi", princi)] {
+        let dir = TestDir::new();
+        let source = dir.source(&format!("showcase.{extension}"), source_text);
+        let build = dir.build(&source, None);
+        assert!(
+            build.status.success(),
+            "showcase .{extension} build failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(build.stdout.is_empty());
+        assert!(
+            build.stderr.is_empty(),
+            "successful build emitted diagnostics: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let executable = source.with_extension("exe");
+        assert!(executable.is_file(), "expected {}", executable.display());
+        let run = Command::new(executable)
+            .output()
+            .expect("showcase executable should launch");
+        assert_eq!(normalize_newlines(&run.stdout), expected_stdout);
+        assert_eq!(normalize_newlines(&run.stderr), expected_stderr);
         assert_eq!(run.status.code(), Some(expected_exit));
     }
 }

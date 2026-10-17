@@ -72,7 +72,7 @@ fn choose(flag: Bool) -> Int {
 
 An assignment only inside a loop does not guarantee initialization after the loop, because the loop can execute zero times.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Inference only uses a declaration's initializer. There is no flow-sensitive type inference, implicit numeric conversion, destructuring, global mutable variable syntax, or reassignment of immutable bindings.
 

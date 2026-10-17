@@ -1,5 +1,5 @@
 export const repositoryUrl = "https://github.com/0xPolybit/principl";
-export const releaseVersion = "v0.1.0";
+export const releaseVersion = "v0.2.0";
 export const releasePageUrl = `${repositoryUrl}/releases/tag/${releaseVersion}`;
 export const latestReleasePageUrl = `${repositoryUrl}/releases/latest`;
 const releaseAssetBaseUrl = `${repositoryUrl}/releases/download/${releaseVersion}`;

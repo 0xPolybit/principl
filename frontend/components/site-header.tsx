@@ -28,14 +28,14 @@ export function SiteHeader() {
           <span className="brand-copy">
             <span className="brand-line">
               <span className="brand-name">PrinciPL</span>
-              <span className="brand-version">v0.1</span>
+              <span className="brand-version">v0.2</span>
             </span>
             <span className="brand-descriptor">Princi programming language</span>
           </span>
         </Link>
 
         <div className="site-header-utilities">
-          <Badge>v0.1</Badge>
+          <Badge>v0.2</Badge>
           <ThemeSwitcher />
         </div>
         <button

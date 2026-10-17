@@ -1,4 +1,4 @@
-Imports name a small fixed set of compiler-provided modules. v0.1 recognizes the exact, case-sensitive module names `io` and `math`:
+Imports name a small fixed set of compiler-provided modules. v0.2 recognizes the exact, case-sensitive module names `io` and `math`:
 
 ~~~princi
 import io
@@ -16,14 +16,14 @@ Both imports are optional. At present, an import validates a name against the bu
 The resolver maps a module name directly to the built-in registry, independent of the source path or `.prnc`/`.princi` extension. Repeating a known import is idempotent. Unknown names and dotted or nested paths are diagnosed:
 
 ~~~princi
-import graphics // error: not a v0.1 built-in module
+import graphics // error: not a v0.2 built-in module
 ~~~
 
 ~~~princi
 import io.text // error: nested module imports are unsupported
 ~~~
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 Princi does not search directories or load other source files for imports. There is no filesystem module resolution, namespace qualification, cyclic user-module loading, package manager, registry, or remote dependency download. Only `io` and `math` resolve; neither currently adds source-level functions, and `math` has no public operations.
 

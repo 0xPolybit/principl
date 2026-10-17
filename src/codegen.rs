@@ -1,4 +1,4 @@
-//! LLVM IR lowering and the v0.1 Windows native toolchain bridge.
+//! LLVM IR lowering and the Windows x86-64 native toolchain bridge.
 
 mod llvm;
 

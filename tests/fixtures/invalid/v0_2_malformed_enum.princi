@@ -1,0 +1,2 @@
+enum State { Failed(String }
+fn main() {}

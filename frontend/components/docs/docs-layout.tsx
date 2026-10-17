@@ -87,7 +87,7 @@ export function DocsLayout({
           <header className="docs-page-header">
             <div className="docs-title-row">
               <h1>{doc.title}</h1>
-              <span className="docs-version">v0.1</span>
+              <span className="docs-version">v0.2</span>
             </div>
             <p>{doc.description}</p>
           </header>

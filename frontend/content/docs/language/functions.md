@@ -11,7 +11,7 @@ fn main() {
 }
 ~~~
 
-Calls must provide the declared number of arguments, in order, with matching types. The compiler checks calls before generating native code.
+Calls must provide the declared number of arguments, in order, with matching types. Generic functions can declare type parameters and infer them from arguments when unambiguous; see [Generics](/docs/language/generics).
 
 ## Return values and Void
 
@@ -64,9 +64,9 @@ fn main() -> Int {
 
 See [methods](/docs/language/methods) for functions attached to class instances.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-There are no closures, function overloading, default or named arguments, variadic functions, function literals, or generic functions. Calls use positional arguments. Return type inference is not provided.
+There are no closures, function overloading, default or named arguments, variadic functions, or function literals. Calls use positional arguments. Return type inference is not provided; generic inference uses argument types only. Methods cannot declare their own generic parameters.
 
 ## Related topics
 

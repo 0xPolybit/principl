@@ -1,9 +1,9 @@
 # PrinciPL website
 
 The separate Next.js website introduces PrinciPL and documents the compiler's
-current v0.1 behavior. It does not modify or run the Rust compiler. Product
-claims are based on the repository README, `docs/v0.1-scope.md`, and checked-in
-examples.
+current v0.2 behavior. It does not modify or run the Rust compiler. Product
+claims are based on the repository README, canonical `docs/v0.2-scope.md`, and
+checked-in compiler and native integration fixtures.
 
 ## Prerequisites
 
@@ -55,7 +55,7 @@ service.
 ## Examples gallery
 
 `/examples` reads its single catalog from `content/examples.ts`. Each entry
-contains a complete v0.1 source file, its `.prnc` or `.princi` filename,
+contains a complete source file, its `.prnc` or `.princi` filename,
 difficulty, concepts, explanation, deterministic static output, and related
 language-guide links. `components/examples/example-gallery.tsx` provides
 client-side search and category filters; `components/princi-code.tsx` applies
@@ -66,7 +66,7 @@ Princi code.
 
 The gallery examples are built and run locally through the repository's
 Windows compiler during authoring. Keep them synchronized with the Rust source,
-`README.md`, and `docs/v0.1-scope.md` when language behavior changes.
+`README.md`, and `docs/v0.2-scope.md` when language behavior changes.
 
 ## Design system
 
@@ -86,7 +86,7 @@ for navigation, theme preference, copy controls, example filtering, and
 documentation search. Focus rings and selected navigation states remain visible
 in both themes.
 
-The landing page introduces only implemented v0.1 behavior as current. It
+The landing page introduces only implemented v0.2 behavior as current. It
 separates the process-lifetime managed heap from future memory-control ideas,
 shows the class/reference and struct/value distinction, and labels possible
 future work as roadmap rather than shipped capability.
@@ -95,8 +95,9 @@ future work as roadmap rather than shipped capability.
 
 Documentation is Markdown under `content/docs/`, organized by reader task:
 getting started, language guide, compiler, reference, and project. The Language
-Guide has separate v0.1 pages for syntax, types, expressions, control flow,
-classes, constructors, methods, structs, lists, imports, and C interoperability.
+Guide has pages for syntax, types, expressions, control flow, classes,
+constructors, methods, structs, lists, imports, C interoperability, generics,
+interfaces, traits, enums, pattern matching, and `Result` propagation.
 The registry in `content/docs/navigation.ts` is the single source for page paths,
 legacy path aliases, titles, descriptions, sidebar order, breadcrumbs,
 active-page links, previous/next navigation, and GitHub edit links. Add a
@@ -119,7 +120,7 @@ narrow-screen behavior live in `compiler-diagrams.module.css`.
 
 The `/docs` route and `/docs/[...slug]` use the shared shell in
 `components/docs/`. It renders a collapsible section sidebar, breadcrumbs,
-the v0.1 marker, generated page outline, and page navigation. Markdown headings
+the v0.2 marker, generated page outline, and page navigation. Markdown headings
 provide deep-link IDs and the right-side “On this page” list. At tablet/mobile
 widths the section list and outline become keyboard-accessible `<details>`
 drawers.
@@ -197,4 +198,4 @@ at desktop and mobile widths.
 The former `/installation`, `/language`, `/architecture`, and `/roadmap` URLs
 redirect to the matching canonical documentation pages so content does not
 need to be maintained twice. Keep claims aligned with the root `README.md` and
-`docs/v0.1-scope.md`.
+`docs/v0.2-scope.md`.

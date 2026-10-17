@@ -6,14 +6,14 @@ import { publicPageMetadata } from "@/lib/site-metadata";
 
 export const metadata = publicPageMetadata(
   pageTitle("Examples"),
-  "Browse and copy Princi v0.1 programs for functions, control flow, classes, structs, lists, imports, and the limited C FFI.",
+  "Browse and copy Princi v0.2 programs for generics, interfaces, traits, enums, matching, functions, control flow, and the limited C FFI.",
   "/examples",
 );
 
 export default function ExamplesPage() {
   return (
     <DocShell
-      description="Small, complete programs that use the current v0.1 compiler. Search by concept, copy a source file, and follow the language guide for more detail."
+      description="Small, complete programs that use the current v0.2 compiler. Search by concept, copy a source file, and follow the language guide for more detail."
       note="Princi source gallery"
       title="Examples"
     >

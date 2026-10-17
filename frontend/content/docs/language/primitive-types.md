@@ -1,4 +1,4 @@
-Princi v0.1 has five primitive types. A variable annotation, parameter, field, or return declaration names a type directly.
+Princi has five primitive types. A variable annotation, parameter, field, or return declaration names a type directly.
 
 | Type | Source values | Current native representation |
 | --- | --- | --- |
@@ -70,9 +70,9 @@ fn main() {
 
 `Void` is not valid for parameters, fields, list elements, or local value inference.
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-There are no unsigned integer, smaller integer, decimal, character, or nullable types. Numeric conversions must be explicit only if a future language version defines them; v0.1 has no cast syntax. String storage rejects embedded NUL bytes. See [C interoperability](/docs/language/c-ffi) for the separate FFI-only integer and float widths.
+There are no unsigned integer, smaller integer, decimal, character, or nullable types. v0.2 has no cast syntax. String storage rejects embedded NUL bytes. See [C interoperability](/docs/language/c-ffi) for the separate FFI-only integer and float widths.
 
 ## Related topics
 

@@ -29,7 +29,7 @@ export function SiteFooter() {
         </nav>
       </div>
       <div className="page-width footer-bottom">
-        <span><Badge>Princi v0.1</Badge></span>
+        <span><Badge>Princi v0.2</Badge></span>
         <span>Windows x86-64 target</span>
         <Link href="/docs">Documentation</Link>
       </div>

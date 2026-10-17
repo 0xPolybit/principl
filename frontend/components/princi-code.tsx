@@ -12,6 +12,11 @@ const keywords = new Set([
   "in",
   "class",
   "struct",
+  "interface",
+  "trait",
+  "implements",
+  "enum",
+  "match",
   "init",
   "self",
   "import",
@@ -28,6 +33,7 @@ const types = new Set([
   "Int32",
   "Int64",
   "Float64",
+  "Result",
 ]);
 
 type HighlightToken = { text: string; kind?: string };

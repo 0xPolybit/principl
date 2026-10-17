@@ -1,4 +1,4 @@
-//! Resolution for the small, compiler-provided v0.1 module set.
+//! Resolution for the small, compiler-provided standard-module set.
 //!
 //! User files are deliberately not searched yet. This keeps imports independent
 //! of the working directory and source extension while the language has no
@@ -48,7 +48,7 @@ impl ResolvedModules {
     }
 }
 
-/// Resolve imports against the v0.1 standard-module registry.
+/// Resolve imports against the standard-module registry.
 ///
 /// Imports are identified by their canonical module name, never by the source
 /// file extension. Repeated imports are idempotent and retain first-seen order.
@@ -65,7 +65,7 @@ pub fn resolve(source: &SourceFile, program: &Program) -> Result<ResolvedModules
         if import.path.len() != 1 {
             diagnostics.push(Diagnostic::at_source(
                 DiagnosticCode::UnknownModule,
-                "nested module imports are not supported in v0.1; import 'io' or 'math'",
+                "nested module imports are not supported; import 'io' or 'math'",
                 source,
                 import.span,
             ));
@@ -101,7 +101,7 @@ fn unknown_module_diagnostic(
         .map_or(import.span, |identifier| identifier.span);
     Diagnostic::at_source(
         DiagnosticCode::UnknownModule,
-        format!("unknown standard module '{name}'; v0.1 supports 'io' and 'math'"),
+        format!("unknown standard module '{name}'; supported modules are 'io' and 'math'"),
         source,
         span,
     )

@@ -1,4 +1,4 @@
-A struct is a nominal value type made of typed fields. It is stored inline and copied when assigned, passed to a function, or returned. Unlike a class, a struct does not have managed object identity or its own heap allocation.
+A struct is a nominal value type made of typed fields. It is stored inline and copied when assigned, passed to a function, or returned. Unlike a class, a struct does not have managed object identity or its own heap allocation. Structs can be generic and can implement traits.
 
 ~~~princi
 struct Point {
@@ -74,9 +74,13 @@ fn main() {
 
 A struct field can itself contain a class reference or list handle. Copying that field copies the reference, so the referenced class or list remains shared; the enclosing struct is still copied by value.
 
-## Current v0.1 limitations
+## Trait implementations
 
-Structs have no methods, `init` constructors, destructors, inheritance, custom layout attributes, or ownership syntax. Recursive struct fields by value are rejected because they cannot have a finite inline layout. Mutation of a struct field nested beneath a struct value read from a list index is unsupported; update the whole element and assign it back.
+A struct can implement traits when it provides their required methods. Converting a struct to a trait value boxes a copy in process-lifetime managed storage; the original struct remains a value. Structs do not convert to interface values.
+
+## Current v0.2 limitations
+
+Structs have no `init` constructors, destructors, inheritance, custom layout attributes, or ownership syntax. They have no separate inherent-method syntax, but can implement traits. Recursive struct fields by value are rejected because they cannot have a finite inline layout. Mutation of a struct field nested beneath a struct value read from a list index is unsupported; update the whole element and assign it back.
 
 ## Related topics
 

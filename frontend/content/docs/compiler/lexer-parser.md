@@ -8,7 +8,7 @@ The lexer and parser are the first two language front-end stages. They transform
 
 `lexer::lex` scans source text into located `Token` values. Token kinds include identifiers, integer and floating-point literal spellings, decoded string literals, booleans, keywords, operators, punctuation, and end-of-file. Whitespace is skipped; `//` comments continue to the end of a line.
 
-The lexer recognizes the v0.1 keywords and operator spellings documented in [lexical syntax](/docs/reference/lexical-syntax). String literals support a small escape set. Invalid escapes, unterminated strings, malformed exponents, NUL strings, and unexpected characters return source-positioned lexical diagnostics rather than panicking.
+The lexer recognizes the v0.2 keywords and operator spellings documented in [lexical syntax](/docs/reference/lexical-syntax). String literals support a small escape set. Invalid escapes, unterminated strings, malformed exponents, NUL strings, and unexpected characters return source-positioned lexical diagnostics rather than panicking.
 
 ~~~text
 fn main() {
@@ -21,7 +21,7 @@ The lexer returns an error for malformed input instead of passing an invalid tok
 
 ## Parser
 
-`parser::parse` consumes tokens and returns a `ParseResult` containing a `Program` and any syntax diagnostics. It recognizes top-level functions, classes, structs, imports, and `extern "C"` declarations, plus the v0.1 statements and expressions.
+`parser::parse` consumes tokens and returns a `ParseResult` containing a `Program` and any syntax diagnostics. It recognizes generic functions and types, classes, structs, enums, interfaces, traits, imports, `extern "C"` declarations, match patterns, and the supported statements and expressions.
 
 Expressions use a Pratt parser. Binary operators follow the documented precedence; equal-precedence binary operators group left to right, while range expressions cannot chain unless explicitly parenthesized. Calls, member access, and indexing bind most tightly.
 

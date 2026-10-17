@@ -2,9 +2,9 @@ The AST is the parser's structured representation of a Princi source file. Its d
 
 ## Tree shape
 
-At the top level, `Program` contains declarations such as functions, classes, structs, imports, and foreign-function blocks. Function and initializer declarations contain typed parameters and a block. A block contains statements, including variable declarations, assignments, branches, loops, returns, nested blocks, and expression statements.
+At the top level, `Program` contains functions, classes, structs, enums, interfaces, traits, imports, and foreign-function blocks. Generic parameter and bound declarations are retained in their declaration nodes. Function and initializer declarations contain typed parameters and a block. Blocks contain variable declarations, assignments, branches, loops, returns, nested blocks, match statements, and expression statements.
 
-Expressions form their own tree. Nodes represent identifiers, `self`, literals, list literals, named-field construction, calls, member access, indexes, unary and binary expressions, ranges, and parenthesized groups.
+Expressions form their own tree. Nodes represent identifiers, `self`, literals, list literals, named-field construction, calls with optional type arguments, member access, indexes, unary and binary expressions, ranges, `match` expressions and patterns, postfix `?`, and parenthesized groups.
 
 For example, the initializer in this complete program:
 
@@ -34,9 +34,9 @@ The semantic analyzer keeps the parsed AST and records resolved symbols, module 
 source → located tokens → Program(AST) → TypedProgram(AST + symbols + types)
 ~~~
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-The AST models only the current parsed syntax. It has no nodes for enums, `match`, macros, async functions, traits, inheritance, ownership annotations, or raw pointers. Parsed syntax is not itself a guarantee that a feature reaches native code; semantic analysis and backend support define the complete executable boundary.
+The AST models the current v0.2 parsed syntax, including generic declarations, interfaces, traits, enums, and patterns. It has no nodes for macros, async functions, class inheritance, ownership annotations, or raw pointers. Parsed syntax is not itself a guarantee that a feature reaches native code; semantic analysis and backend support define the executable boundary.
 
 ## Related topics
 

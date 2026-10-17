@@ -7,4 +7,4 @@ The global prelude provides two built-ins:
 
 The compiler selects a type-specific runtime formatter after semantic analysis. Internal symbols such as `princi_rt_print_int` are implementation details and are not callable from Princi source.
 
-Lists, classes, structs, and `Void` values are not accepted as print arguments in v0.1.
+Lists, classes, structs, enums, interface/trait values, and `Void` values are not accepted as print arguments in v0.2.

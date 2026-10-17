@@ -1,4 +1,4 @@
-The v0.1 compiler exposes one user-facing command:
+The compiler exposes one user-facing command:
 
 ```text
 princi build <source-file> [-o <output-file>]

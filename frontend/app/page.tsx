@@ -29,7 +29,7 @@ import { publicPageMetadata } from "@/lib/site-metadata";
 
 export const metadata = publicPageMetadata(
   "PrinciPL — Princi Programming Language",
-  "Explore Princi, a statically typed language compiled to native Windows x86-64 programs. Read the v0.1 language guide, installation steps, examples, and compiler architecture.",
+  "Explore PrinciPL 0.2, a statically typed language compiled to native Windows x86-64 programs, with generics, interfaces, traits, enums, and pattern matching.",
   "/",
 );
 
@@ -75,7 +75,12 @@ const shippedCapabilities = [
   {
     title: "Control flow and data",
     description:
-      "if/else, while, integer ranges, reference-oriented classes, value-oriented structs, and List<T>.",
+      "if/else, while, integer ranges, classes, value-oriented structs, List<T>, enums, and exhaustive matching.",
+  },
+  {
+    title: "Generics and behavior",
+    description:
+      "Monomorphized generic functions and types, bounds, interfaces with dynamic dispatch, traits with defaults, and Result-based propagation.",
   },
   {
     title: "Native build and runtime",
@@ -88,7 +93,7 @@ const roadmapAreas = [
   {
     title: "Richer memory model",
     description:
-      "Tracing collection is a future possibility. v0.1 keeps managed allocations until main returns; it does not collect during execution.",
+      "Tracing collection is a future possibility. v0.2 keeps managed allocations until main returns; it does not collect during execution.",
   },
   {
     title: "Ownership and raw memory",
@@ -98,7 +103,7 @@ const roadmapAreas = [
   {
     title: "More targets and language tools",
     description:
-      "Linux, macOS, WebAssembly, package management, richer generics, async, and traits remain deferred.",
+      "Linux, macOS, WebAssembly, package management, async, inheritance, and lower-level memory control remain outside v0.2.",
   },
 ];
 
@@ -108,7 +113,7 @@ export default function Home() {
       <section className="page-width landing-hero">
         <div className="landing-hero-copy">
           <div className="landing-hero-status">
-            <Badge tone="current">Princi v0.1</Badge>
+            <Badge tone="current">Princi v0.2</Badge>
             <span>Windows x86-64</span>
           </div>
           <h1>
@@ -118,7 +123,7 @@ export default function Home() {
           </h1>
           <p className="landing-hero-description">
             PrinciPL is a statically typed, compiled programming language. The
-            v0.1 compiler turns concise, structured source into native Windows
+            v0.2 compiler turns concise, structured source into native Windows
             executables.
           </p>
           <div className="landing-hero-facts">
@@ -191,7 +196,7 @@ export default function Home() {
           <Callout>
             <div className="memory-direction-grid">
               <div>
-                <Badge tone="current">v0.1 today</Badge>
+              <Badge tone="current">v0.2 today</Badge>
                 <p>
                   Strings, classes, and lists use managed allocations that are
                   released when <code>main</code> returns. There is no tracing
@@ -202,7 +207,7 @@ export default function Home() {
                 <Badge tone="roadmap">Longer-term direction</Badge>
                 <p>
                   Progressive memory control is a language philosophy, not a
-                  v0.1 capability. Ownership, borrowing, and raw-memory syntax
+                  v0.2 capability. Ownership, borrowing, and raw-memory syntax
                   are deferred.
                 </p>
               </div>
@@ -214,7 +219,7 @@ export default function Home() {
       <section className="page-width landing-section language-glance">
         <SectionHeading
           title="Language at a glance."
-          description="These examples use syntax that the v0.1 compiler parses, checks, and lowers for its Windows target."
+          description="These examples use syntax supported by the v0.2 compiler and its Windows target."
         />
         <div className="language-sample-grid">
           {languageSamples.map((sample) => (
@@ -234,7 +239,7 @@ export default function Home() {
             title="From source to a Windows executable."
             description="Both source extensions enter the same compiler pipeline and produce the same target format."
           />
-          <ol aria-label="Princi v0.1 compilation pipeline" className="native-pipeline">
+          <ol aria-label="Princi v0.2 compilation pipeline" className="native-pipeline">
             {nativePipeline.map((stage, index) => (
               <li className="native-pipeline-step" key={stage.title}>
                 <span className="pipeline-index">{String(index + 1).padStart(2, "0")}</span>
@@ -256,7 +261,7 @@ export default function Home() {
       <section className="page-width landing-section type-comparison">
         <SectionHeading
           title="Objects for identity. Structs for values."
-          description="The distinction is explicit in v0.1: classes are references, while structs copy their fields."
+          description="Classes are references, while structs copy their fields. Generic declarations can specialize either representation."
         />
         <div className="type-comparison-grid">
           <article className="type-comparison-column">
@@ -266,7 +271,7 @@ export default function Home() {
             </div>
             <p>Assigning a class value shares the same heap object. Instance methods use static dispatch.</p>
             <CodeSample code={classSource} title="Class instance" filename="user.prnc" />
-            <p className="type-caption">No inheritance, virtual dispatch, or method overloading in v0.1.</p>
+            <p className="type-caption">No inheritance, virtual class methods, or method overloading in v0.2.</p>
           </article>
           <article className="type-comparison-column">
             <div className="type-heading">
@@ -275,7 +280,7 @@ export default function Home() {
             </div>
             <p>Assignment, parameters, and returns copy struct fields. A mutable <code>var</code> can update its fields.</p>
             <CodeSample code={structCopySource} title="Struct copy" filename="point.prnc" />
-            <p className="type-caption">Structs have fields only; methods and custom layouts are not supported.</p>
+            <p className="type-caption">Structs are value types; they can implement traits. Custom layouts are not supported.</p>
           </article>
         </div>
         <Link className="text-link text-link-large" href="/language">
@@ -286,8 +291,8 @@ export default function Home() {
       <section className="landing-section shipped-section">
         <div className="page-width">
           <SectionHeading
-            title="What v0.1 actually supports."
-            description="A deliberately bounded native compiler, with documented limits and no feature claims borrowed from the roadmap."
+            title="What v0.2 actually supports."
+            description="A deliberately bounded native compiler, with v0.2 generics, contracts, enums, and documented limitations."
           />
           <div className="shipped-grid">
             {shippedCapabilities.map((feature) => (
@@ -309,7 +314,7 @@ export default function Home() {
       <section className="page-width landing-section roadmap-section">
         <SectionHeading
           title="Future direction, clearly marked."
-          description="These are possible areas beyond v0.1, not features available in the compiler today. No delivery dates are promised."
+          description="These are possible areas beyond v0.2, not features available in the compiler today. No delivery dates are promised."
         />
         <div className="roadmap-list">
           {roadmapAreas.map((area) => (
@@ -323,7 +328,7 @@ export default function Home() {
           ))}
         </div>
         <Link className="text-link text-link-large" href="/roadmap">
-          See the full v0.1 boundary <ArrowUpRight />
+          See the v0.2 scope and current boundary <ArrowUpRight />
         </Link>
       </section>
 

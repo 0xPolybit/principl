@@ -1,4 +1,4 @@
-Every build uses the same ordered stages for `.prnc` and `.princi`. The diagram shows the actual v0.1 path implemented by `compiler::pipeline` and the native backend.
+Every build uses the same ordered stages for `.prnc` and `.princi`. The diagram shows the actual v0.2 path implemented by `compiler::pipeline` and the native backend.
 
 <!-- princi-diagram:compiler-pipeline -->
 
@@ -8,7 +8,7 @@ Every build uses the same ordered stages for `.prnc` and `.princi`. The diagram 
 2. **Lexer.** Source characters become tokens with source locations. Malformed literals and unexpected characters produce lexical diagnostics.
 3. **Parser and AST.** The parser consumes tokens, builds the source-oriented AST, and recovers at syntax boundaries to report errors. A build stops if parser diagnostics were collected.
 4. **Module resolution.** Imports are checked against the fixed, case-sensitive standard registry (`io`, `math`). Resolution does not search files on disk.
-5. **Semantic analysis.** Declarations, scopes, names, calls, assignments, control flow, and types are checked. Success returns a typed representation. Any source errors stop the backend.
+5. **Semantic analysis.** Declarations, scopes, names, calls, assignments, control flow, generic bounds, implementations, matches, and types are checked. Generic specializations are resolved and success returns a typed representation. Any source errors stop the backend.
 
 ## Native stages
 

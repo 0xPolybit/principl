@@ -1,0 +1,104 @@
+trait Printable {
+    fn display() -> String
+
+    fn show() {
+        println(self.display())
+    }
+}
+
+interface Identifiable {
+    fn id() -> Int
+}
+
+class User implements Printable, Identifiable {
+    name: String
+
+    init(name: String) {
+        self.name = name
+    }
+
+    fn display() -> String {
+        return self.name
+    }
+
+    fn id() -> Int {
+        return 7
+    }
+}
+
+class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T {
+        return self.value
+    }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+enum Maybe<T> {
+    Some(T)
+    None
+}
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn describe<T: Printable>(value: T) -> String {
+    return value.display()
+}
+
+fn calculate(value: Int) -> Result<Int, String> {
+    if value < 0 {
+        return Result<Int, String>.Err("value must be positive")
+    }
+
+    return Result<Int, String>.Ok(value * 2)
+}
+
+fn run() -> Result<Int, String> {
+    let value = calculate(21)?
+    return Result<Int, String>.Ok(value)
+}
+
+fn fail() -> Result<Int, String> {
+    return calculate(-1)?
+}
+
+fn main() {
+    let box = Box<Int>(identity(21))
+    let pair = Pair<Int, String>(box.get(), "value")
+    let maybe = Maybe<Int>.Some(pair.first)
+    let user = User("Ada")
+    let named: Printable = user
+    let printable: Printable = user
+    let identifiable: Identifiable = user
+
+    println(describe(user))
+    named.show()
+    println(printable.display())
+    println(identifiable.id())
+
+    match maybe {
+        Some(value) => println(value)
+        None => println("empty")
+    }
+
+    match run() {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+
+    match fail() {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+}

@@ -28,8 +28,17 @@ The span is a half-open UTF-8 byte range internally. `SourceFile` maps it to a c
 | `E0208` | Invalid return | Missing/wrong value for non-`Void` return |
 | `E0209` | Unknown module | Import is not `io` or `math` |
 | `E0210` | Uninitialized variable | Local is read before definite initialization |
+| `E0211` | Invalid interface implementation | Missing or incompatible required interface method |
+| `E0212` | Invalid trait implementation | Missing method or conflicting trait defaults |
+| `E0213` | Generic constraint failure | Type argument does not satisfy a trait or interface bound |
 | `E0299` | Other semantic error | FFI signature contains an unsafe type |
 | `E0301` | Unsupported compiler feature | Feature reaches an unsupported backend path |
+| `E0302` | Generic argument error | Wrong type-argument count or invalid generic type |
+| `E0303` | Generic inference error | A type parameter cannot be inferred from call arguments |
+| `E0304` | Enum pattern/variant error | Unknown variant or malformed payload pattern |
+| `E0305` | Match analysis error | Non-exhaustive match, unreachable arm, or incompatible arm types |
+| `E0306` | Result propagation error | Invalid `?` operand, context, or error type |
+| `E0307` | Generic specialization error | Specialization cannot be completed or expands indefinitely |
 | `E0401` | LLVM/Clang unavailable | Clang cannot be started |
 | `E0403` | Linker unavailable/incompatible | MinGW-w64 GCC missing or wrong target |
 | `E0404` | Linker failure | Native executable link fails |

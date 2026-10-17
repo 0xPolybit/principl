@@ -1,8 +1,8 @@
-PrinciPL (usually called Princi) is a statically typed programming language and compiler project. Its v0.1 compiler is written in Rust, uses LLVM for native code generation, and targets Windows x86-64.
+PrinciPL (usually called Princi) is a statically typed programming language and compiler project. The v0.2 compiler is written in Rust, uses LLVM for native code generation, and targets Windows x86-64.
 
-The language combines a compact procedural core with functions, control flow, classes, value-oriented structs, strings, and the built-in `List<T>` collection. The compiler checks types before generating a native Windows executable.
+The language combines a compact procedural core with generics, classes, value-oriented structs, interfaces, traits, algebraic enums, pattern matching, `Result<T, E>`, and `List<T>`. The compiler checks types before generating a native Windows executable.
 
-> **v0.1 status:** This describes the implementation in this repository today. Linux, macOS, WebAssembly, package management, async, traits, ownership, and raw pointers are not supported targets or language features in v0.1.
+> **v0.2 status:** This describes the implementation in this repository today. The compiler targets Windows x86-64 only. Linux, macOS, WebAssembly, package management, async, inheritance, ownership, and raw pointers are not supported in v0.2.
 
 ## One language, two extensions
 
@@ -24,11 +24,11 @@ princi build hello.prnc -o app.exe
 
 The build requires Windows x86-64 native tooling. Start with [Getting started](/docs/getting-started) for the setup sequence, then follow the detailed [Installation guide](/docs/installation) and [Hello, world](/docs/hello-world) walkthrough.
 
-## What v0.1 can compile
+## What v0.2 can compile
 
-The implemented native subset includes `Int`, `Float`, `Bool`, `String`, typed functions and recursion, local `let`/`var` bindings, arithmetic and boolean expressions, conditionals, loops, classes, field-only structs, `List<T>`, and `print`/`println`. The compiler resolves only its built-in `io` and `math` module names and supports a restricted primitive C ABI declaration syntax.
+The compiler supports `Int`, `Float`, `Bool`, `String`, and `Void`; local `let`/`var`; functions, recursion, control flow, strings, generic functions/classes/structs/enums, generic bounds, interfaces with dynamic dispatch, traits with defaults, enum matching with exhaustiveness checks, `Result<T, E>` and `?`, lists, built-in imports, and a restricted primitive C ABI.
 
-The compiler does not yet implement the broader systems-language features listed on the [v0.1 limitations](/docs/reference/limitations) page. See the repository's [full v0.1 scope](https://github.com/0xPolybit/principl/blob/main/docs/v0.1-scope.md) for precise boundaries.
+The [v0.2 limitations](/docs/reference/limitations) page describes the current boundary. The repository's [canonical v0.2 scope](https://github.com/0xPolybit/principl/blob/main/docs/v0.2-scope.md) records precise semantics and compatibility expectations.
 
 ## Continue
 

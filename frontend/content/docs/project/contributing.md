@@ -19,6 +19,6 @@ npm run lint
 npm run build
 ~~~
 
-Documentation Markdown lives in `frontend/content/docs/`. Add page metadata and its file path to the single registry in `frontend/content/docs/navigation.ts`; the registry supplies sidebar order, routes, breadcrumbs, edit links, and previous/next links. Keep language claims aligned with the root README and `docs/v0.1-scope.md`.
+Documentation Markdown lives in `frontend/content/docs/`. Add page metadata and its file path to the single registry in `frontend/content/docs/navigation.ts`; the registry supplies sidebar order, routes, breadcrumbs, edit links, search entries, and previous/next links. Keep language claims aligned with the root README and canonical `docs/v0.2-scope.md`.
 
 No additional contribution workflow, release schedule, or code-of-conduct policy is defined by this guide.

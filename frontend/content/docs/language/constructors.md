@@ -21,7 +21,7 @@ fn main() {
 
 ## Construction without init
 
-If a class has no `init`, v0.1 provides positional construction using every field in declaration order:
+If a class has no `init`, positional construction initializes every field in declaration order:
 
 ~~~princi
 class Size {
@@ -55,9 +55,9 @@ This form does not call a class `init`; it supplies all fields directly. Use `Ty
 
 Structs have no `init`; `Point(x, y)` uses field declaration order, or use named-field construction. See [Structs](/docs/language/structs).
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
-Only one class constructor is allowed. There is no constructor overloading, default arguments, named constructor parameters, inheritance, delegating constructors, user-defined allocation, or custom destructor. Constructor visibility follows the same all-public/module-visible temporary rule as other members.
+Only one class constructor is allowed. Generic class arguments can be inferred from constructor parameters when every argument is determined; otherwise specify them explicitly. There is no constructor overloading, default arguments, named constructor parameters, inheritance, delegating constructors, user-defined allocation, or custom destructor. Constructor visibility follows the same public/module-visible temporary rule as other members.
 
 ## Related topics
 

@@ -7,7 +7,7 @@ The lexer recognizes identifiers beginning with a Unicode letter or underscore a
 - Boolean literals `true` and `false`.
 - `//` line comments and whitespace.
 
-NUL bytes and `\0` escapes are rejected. The keywords are `fn`, `return`, `let`, `var`, `if`, `else`, `while`, `for`, `in`, `class`, `struct`, `init`, `self`, `import`, and `extern`.
+NUL bytes and `\0` escapes are rejected. Lexer keywords are `fn`, `return`, `let`, `var`, `if`, `else`, `while`, `for`, `in`, `class`, `struct`, `interface`, `trait`, `implements`, `init`, `self`, `import`, and `extern`. `enum` and `match` are contextual identifiers recognized by the parser; `true` and `false` are Boolean literals.
 
 ## Operators and punctuation
 

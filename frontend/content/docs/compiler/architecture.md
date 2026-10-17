@@ -28,9 +28,9 @@ The semantic result contains a `TypedProgram`: the AST, resolved symbols and imp
 
 ## Current target boundary
 
-The compiler has one v0.1 target: Windows x86-64 using the GNU toolchain triple. The backend emits COFF through LLVM/Clang and MinGW-w64 GCC links the executable. `.prnc` and `.princi` reach the same compiler path. See the [compilation pipeline](/docs/compiler/compilation-pipeline), [LLVM backend](/docs/compiler/llvm-backend), and [Windows linking](/docs/compiler/windows-toolchain).
+The compiler has one v0.2 target: Windows x86-64 using the GNU toolchain triple. The backend emits COFF through LLVM/Clang and MinGW-w64 GCC links the executable. `.prnc` and `.princi` reach the same compiler path. The frontend includes generic specialization, bounds, interfaces, traits, enum lowering, and pattern analysis. See the [compilation pipeline](/docs/compiler/compilation-pipeline), [LLVM backend](/docs/compiler/llvm-backend), and [Windows linking](/docs/compiler/windows-toolchain).
 
-## Current v0.1 limitations
+## Current v0.2 limitations
 
 This module map describes the current compiler, not planned subsystems. Imports resolve only built-in names; the runtime uses process-lifetime managed storage rather than a tracing collector; and native output targets Windows x86-64 only. There is no package manager, REPL, alternate target backend, debugger, or IDE integration.
 

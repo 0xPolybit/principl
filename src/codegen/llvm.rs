@@ -562,7 +562,7 @@ impl<'a> IrGenerator<'a> {
         }
 
         let mut ir = format!(
-            "; Princi v0.1 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
+            "; Princi v0.2 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
             crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
         ir.push_str(crate::runtime::windows_x86_64::LIST_RUNTIME);
@@ -2938,7 +2938,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             ExpressionKind::Range { .. } => Err(self.error_with(
                 DiagnosticCode::UnsupportedFeature,
-                "this expression is outside the supported v0.1 LLVM backend",
+                "this expression is outside the supported v0.2 LLVM backend",
                 expression.span,
             )),
             ExpressionKind::Match(matched) => self.emit_match_expression(matched, expression),
@@ -5738,9 +5738,9 @@ fn main() {
         let error = lower(
             "struct Point {\n    x: Int\n    init(x: Int) { self.x = x }\n    fn move() {}\n}\nfn main() {}",
         )
-        .expect_err("struct init and methods are unsupported in v0.1");
+        .expect_err("struct init is unsupported and ordinary struct methods need a trait impl");
         assert!(
-            error.contains("methods on structs are not supported in v0.1"),
+            error.contains("methods on structs are supported only when they implement a trait"),
             "{error}"
         );
     }

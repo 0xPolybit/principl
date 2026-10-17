@@ -19,7 +19,7 @@ const themeInitialization = `(() => {
 export const metadata: Metadata = {
   title: "PrinciPL — Princi Programming Language",
   description:
-    "Explore Princi, a statically typed language compiled to native Windows x86-64 programs. Read the v0.1 language guide, installation steps, examples, and compiler architecture.",
+    "Explore PrinciPL 0.2, a statically typed language compiled to native Windows x86-64 programs, with generics, interfaces, traits, enums, and pattern matching.",
   applicationName: "PrinciPL",
   metadataBase: getMetadataBaseUrl(),
   keywords: [

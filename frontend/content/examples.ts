@@ -166,7 +166,7 @@ fn main() {
     println(greeting)
 }`,
     explanation:
-      "The + operator concatenates two strings and creates a new String value. String interpolation is not part of v0.1.",
+      "The + operator concatenates two strings and creates a new String value. String interpolation is not part of v0.2.",
     output: "Hello, PrinciPL!",
     docs: [{ label: "Strings", href: "/docs/language/strings" }],
   },
@@ -192,7 +192,7 @@ fn main() {
     println(user.name)
 }`,
     explanation:
-      "A class groups typed instance fields. Class values are managed references, and fields are accessible under the v0.1 public-by-default rule.",
+      "A class groups typed instance fields. Class values are managed references, and fields are accessible under the v0.2 public-by-default rule.",
     output: "Ada",
     docs: [{ label: "Classes", href: "/docs/language/classes" }],
   },
@@ -249,7 +249,7 @@ fn main() {
     println(counter.current())
 }`,
     explanation:
-      "Instance methods use self to access the receiver. v0.1 resolves calls statically from the receiver's class type.",
+      "Instance methods use self to access the receiver. Concrete class calls use static dispatch; interface and trait values use dynamic dispatch.",
     output: "2",
     docs: [{ label: "Methods", href: "/docs/language/methods" }],
   },
@@ -313,7 +313,7 @@ fn main() {
     println("Built-in imports resolved")
 }`,
     explanation:
-      "Only the built-in io and math module names resolve in v0.1. Imports do not create namespaces, and math has no exported functions yet.",
+      "Only the built-in io and math module names resolve in v0.2. Imports do not create namespaces, and math has no exported functions yet.",
     output: "Built-in imports resolved",
     docs: [{ label: "Imports", href: "/docs/language/imports" }],
   },
@@ -335,5 +335,158 @@ fn main() {
       "This declares a direct C ABI function using a supported primitive signature. The Windows C runtime supplies abs; managed values and pointers cannot cross this boundary.",
     output: "42",
     docs: [{ label: "C interoperability", href: "/docs/language/c-ffi" }],
+  },
+  {
+    slug: "generic-functions",
+    title: "Generic Functions",
+    difficulty: "Intermediate",
+    category: "Essentials",
+    filename: "identity.prnc",
+    concepts: ["type parameters", "inference", "monomorphization"],
+    source: `fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn main() {
+    println(identity(42))
+    println(identity<String>("hello"))
+}`,
+    explanation:
+      "The first call infers T as Int; the second specifies String explicitly. The compiler emits only the concrete specializations this program uses.",
+    output: `42
+hello`,
+    docs: [{ label: "Generics", href: "/docs/language/generics" }],
+  },
+  {
+    slug: "generic-class-struct",
+    title: "Generic Class and Struct",
+    difficulty: "Intermediate",
+    category: "Data & objects",
+    filename: "pair.princi",
+    concepts: ["Box<T>", "Pair<A, B>", "class references", "struct values"],
+    source: `class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T {
+        return self.value
+    }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+fn main() {
+    let box = Box<Int>(42)
+    let pair = Pair<Int, String>(box.get(), "one")
+    println(pair.first)
+    println(pair.second)
+}`,
+    explanation:
+      "Generic classes specialize reference layouts, while generic structs specialize inline value layouts. Type arguments are explicit here.",
+    output: `42
+one`,
+    docs: [{ label: "Generics", href: "/docs/language/generics" }, { label: "Structs", href: "/docs/language/structs" }],
+  },
+  {
+    slug: "enum-match",
+    title: "Generic Enum and Match",
+    difficulty: "Intermediate",
+    category: "Control flow",
+    filename: "maybe.prnc",
+    concepts: ["enum", "payload", "pattern matching", "exhaustiveness"],
+    source: `enum Maybe<T> {
+    Some(T)
+    None
+}
+
+fn main() {
+    let item = Maybe<Int>.Some(42)
+    match item {
+        Some(value) => println(value)
+        None => println("empty")
+    }
+}`,
+    explanation:
+      "The Some arm binds its payload in an arm-local immutable variable. The match covers both variants, so it is exhaustive.",
+    output: "42",
+    docs: [{ label: "Enums", href: "/docs/language/enums" }, { label: "Pattern matching", href: "/docs/language/match" }],
+  },
+  {
+    slug: "interfaces-and-traits",
+    title: "Interfaces and Traits",
+    difficulty: "Advanced",
+    category: "Data & objects",
+    filename: "named.princi",
+    concepts: ["interface dispatch", "trait default", "trait value"],
+    source: `interface Identifiable {
+    fn id() -> Int
+}
+
+trait Named {
+    fn name() -> String
+
+    fn describe() {
+        println(self.name())
+    }
+}
+
+class User implements Identifiable, Named {
+    value: String
+
+    init(value: String) {
+        self.value = value
+    }
+
+    fn id() -> Int { return 7 }
+    fn name() -> String { return self.value }
+}
+
+fn main() {
+    let user: Identifiable = User("Ada")
+    println(user.id())
+    let named: Named = User("Grace")
+    named.describe()
+}`,
+    explanation:
+      "The interface supplies a pure contract; the trait supplies a default method. Interface and trait values dispatch through the concrete class implementation.",
+    output: `7
+Grace`,
+    docs: [{ label: "Interfaces", href: "/docs/language/interfaces" }, { label: "Traits", href: "/docs/language/traits" }],
+  },
+  {
+    slug: "result-propagation",
+    title: "Result and ?",
+    difficulty: "Advanced",
+    category: "Control flow",
+    filename: "result.prnc",
+    concepts: ["Result<T, E>", "Ok", "Err", "? propagation"],
+    source: `fn calculate(value: Int) -> Result<Int, String> {
+    if value < 0 {
+        return Result<Int, String>.Err("must be positive")
+    }
+    return Result<Int, String>.Ok(value * 2)
+}
+
+fn run() -> Result<Int, String> {
+    let doubled = calculate(21)?
+    return Result<Int, String>.Ok(doubled)
+}
+
+fn main() {
+    match run() {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+}`,
+    explanation:
+      "The postfix ? returns an Err from run with the same error type, or yields the successful Int value. Match handles both Result variants.",
+    output: "42",
+    docs: [{ label: "Result and ?", href: "/docs/language/result" }],
   },
 ];
