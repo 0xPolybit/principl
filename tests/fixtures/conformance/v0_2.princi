@@ -1,0 +1,129 @@
+interface Drawable { fn draw() -> String }
+interface Clickable { fn click() -> Bool }
+
+trait Named {
+    fn name() -> String
+    fn label() -> String {
+        return "named:" + self.name()
+    }
+}
+
+class User implements Drawable, Clickable, Named {
+    value: String
+
+    init(value: String) {
+        self.value = value
+    }
+
+    fn draw() -> String { return "draw:" + self.value }
+    fn click() -> Bool { return true }
+    fn name() -> String { return self.value }
+}
+
+class Box<T> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+
+    fn get() -> T { return self.value }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+enum Maybe<T> {
+    Some(T)
+    None
+}
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn repeat<T>(count: Int, value: T) -> T {
+    if count == 0 {
+        return value
+    }
+    return repeat<T>(count - 1, value)
+}
+
+fn describe<T: Named + Drawable>(value: T) -> Result<String, String> {
+    return Result<String, String>.Ok(value.label() + ":" + value.draw())
+}
+
+fn first<T>(value: Result<List<T>, String>) -> Result<T, String> {
+    let values = value?
+    return Result<T, String>.Ok(identity<T>(values[0]))
+}
+
+fn relay<T>(value: Result<T, String>) -> Result<T, String> {
+    return Result<T, String>.Ok(identity<T>(value?))
+}
+
+fn main() -> Int {
+    let answer = repeat(2, identity<Int>(40) + identity(2))
+    println(answer)
+
+    let user = User("Ada")
+    let drawable: Drawable = user
+    println(drawable.draw())
+
+    match describe(user) {
+        Ok(label) => println(label)
+        Err(error) => println(error)
+    }
+
+    let boxed = Box<Result<List<Int>, String>>(
+        Result<List<Int>, String>.Ok([4, 8])
+    )
+    match boxed.get() {
+        Ok(values) => println(values[1])
+        Err(message) => println(message)
+    }
+
+    let entries: List<Result<Int, String>> = [
+        Result<Int, String>.Ok(13),
+        Result<Int, String>.Err("bad")
+    ]
+    match entries[0] {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+
+    match first(Result<List<Int>, String>.Ok([3, 4])) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match first(Result<List<Int>, String>.Err("propagated")) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+    match relay(Result<Int, String>.Err("nested error")) {
+        Ok(value) => println(value)
+        Err(error) => println(error)
+    }
+
+    let pair = Pair<Box<List<Int>>, String>(Box<List<Int>>([11]), "pair")
+    let maybe = Maybe<Pair<Box<List<Int>>, String>>.Some(pair)
+    match maybe {
+        Some(payload) => println(payload.first.get()[0])
+        None => println("empty")
+    }
+
+    let userResult = Result<User, String>.Ok(user)
+    match userResult {
+        Ok(value) => println(value.name())
+        Err(error) => println(error)
+    }
+
+    let message = match maybe {
+        Some(_) => "some"
+        None => "none"
+    }
+    println(message)
+    return 7
+}

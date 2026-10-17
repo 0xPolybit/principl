@@ -957,6 +957,7 @@ Run all unit, CLI, and fixture-driven checks with:
 
 ```powershell
 cargo test
+cargo test --release
 ```
 
 On Windows with LLVM/Clang and x86-64 MinGW-w64 GCC available, native tests
@@ -976,9 +977,17 @@ $env:PRINCI_REQUIRE_NATIVE_TESTS = "1"
 cargo test
 ```
 
-Fixtures under `tests/fixtures` include a full feature program and identical
-`.prnc`/`.princi` hello programs. Negative fixtures check diagnostic codes and
-that failed builds do not produce executables.
+Fixtures under `tests/fixtures` include unchanged v0.1 programs and a v0.2
+conformance program paired as identical `.prnc` and `.princi` sources. On
+Windows, the v0.2 native conformance test builds both aliases, launches each
+generated executable, and checks stdout, stderr, and the process exit code.
+Negative v0.2 fixtures cover generic arity and bounds, interface and trait
+conformance, enum patterns, match reachability, and invalid `?` propagation;
+they verify the diagnostic code and that failed builds do not produce an
+executable.
+
+See the [v0.2 testing matrix](docs/v0.2-testing-matrix.md) for the feature-by-
+feature parser, semantic, diagnostic, backend, and native coverage map.
 
 ## Diagnostics and toolchain troubleshooting
 

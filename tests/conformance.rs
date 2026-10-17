@@ -55,6 +55,12 @@ fn normalize_newlines(bytes: &[u8]) -> String {
 }
 
 fn generate_llvm_ir(file_name: &str, source_text: &str) -> String {
+    // Mirror the normal compilation unit for these fixtures, which use the
+    // prelude-provided Result<T, E> enum.
+    let source_text = format!(
+        "{source_text}\n\n{}",
+        include_str!("../stdlib/prelude.princi")
+    );
     let source = SourceFile::from_text(file_name, source_text);
     let tokens = lexer::lex(&source).expect("conformance source should lex");
     let parsed = parser::parse(&source, tokens);
@@ -181,6 +187,64 @@ fn negative_fixtures_report_diagnostics_and_never_emit_executables() {
 }
 
 #[test]
+fn v02_negative_fixtures_report_diagnostics_and_never_emit_executables() {
+    for (name, fixture, code) in [
+        (
+            "generic arity.prnc",
+            include_str!("fixtures/invalid/v0_2_generic_arity.prnc"),
+            "E0302",
+        ),
+        (
+            "unsatisfied bound.princi",
+            include_str!("fixtures/invalid/v0_2_unsatisfied_bound.princi"),
+            "E0213",
+        ),
+        (
+            "missing interface method.prnc",
+            include_str!("fixtures/invalid/v0_2_missing_interface_method.prnc"),
+            "E0211",
+        ),
+        (
+            "incompatible interface signature.princi",
+            include_str!("fixtures/invalid/v0_2_interface_signature.princi"),
+            "E0211",
+        ),
+        (
+            "conflicting trait defaults.prnc",
+            include_str!("fixtures/invalid/v0_2_trait_default_conflict.prnc"),
+            "E0212",
+        ),
+        (
+            "unknown enum variant.princi",
+            include_str!("fixtures/invalid/v0_2_unknown_variant.princi"),
+            "E0304",
+        ),
+        (
+            "non exhaustive match.prnc",
+            include_str!("fixtures/invalid/v0_2_non_exhaustive_match.prnc"),
+            "E0305",
+        ),
+        (
+            "unreachable match arm.princi",
+            include_str!("fixtures/invalid/v0_2_unreachable_match.princi"),
+            "E0305",
+        ),
+        (
+            "invalid question mark.prnc",
+            include_str!("fixtures/invalid/v0_2_invalid_question_mark.prnc"),
+            "E0306",
+        ),
+        (
+            "expanding generic specialization.princi",
+            include_str!("fixtures/invalid/v0_2_expanding_specialization.princi"),
+            "E0307",
+        ),
+    ] {
+        reject_fixture(name, fixture, code, false);
+    }
+}
+
+#[test]
 fn positive_conformance_fixtures_keep_both_suffixes_as_exact_aliases() {
     assert_eq!(
         include_str!("fixtures/conformance/v0_1.prnc"),
@@ -191,6 +255,11 @@ fn positive_conformance_fixtures_keep_both_suffixes_as_exact_aliases() {
         include_str!("fixtures/conformance/hello.prnc"),
         include_str!("fixtures/conformance/hello.princi"),
         "hello acceptance fixtures must use identical source text"
+    );
+    assert_eq!(
+        include_str!("fixtures/conformance/v0_2.prnc"),
+        include_str!("fixtures/conformance/v0_2.princi"),
+        "v0.2 conformance fixtures must use identical source text"
     );
 }
 
@@ -204,6 +273,10 @@ fn hello_and_full_conformance_sources_lower_identically_from_both_extensions() {
         (
             include_str!("fixtures/conformance/v0_1.prnc"),
             include_str!("fixtures/conformance/v0_1.princi"),
+        ),
+        (
+            include_str!("fixtures/conformance/v0_2.prnc"),
+            include_str!("fixtures/conformance/v0_2.princi"),
         ),
     ] {
         let prnc_ir = generate_llvm_ir("program.prnc", prnc);
@@ -279,6 +352,68 @@ fn complete_v0_1_program_builds_and_runs_identically_with_both_extensions() {
         assert!(
             build.status.success(),
             "{extension} build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(build.stdout.is_empty(), "successful build should be quiet");
+        assert!(
+            build.stderr.is_empty(),
+            "successful build should not emit diagnostics: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let executable = source.with_extension("exe");
+        assert!(
+            executable.is_file(),
+            "build should produce {}",
+            executable.display()
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated Windows executable should launch");
+        assert_eq!(
+            normalize_newlines(&run.stdout),
+            expected_stdout,
+            "unexpected stdout for .{extension}"
+        );
+        assert_eq!(
+            normalize_newlines(&run.stderr),
+            expected_stderr,
+            "unexpected stderr for .{extension}"
+        );
+        assert_eq!(run.status.code(), Some(expected_exit));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn v02_conformance_builds_and_runs_identically_with_both_extensions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+
+    let prnc = include_str!("fixtures/conformance/v0_2.prnc");
+    let princi = include_str!("fixtures/conformance/v0_2.princi");
+    assert_eq!(
+        prnc, princi,
+        ".prnc and .princi must contain the same program"
+    );
+    let expected_stdout =
+        normalize_newlines(include_str!("fixtures/conformance/v0_2.stdout").as_bytes());
+    let expected_stderr =
+        normalize_newlines(include_str!("fixtures/conformance/v0_2.stderr").as_bytes());
+    let expected_exit = include_str!("fixtures/conformance/v0_2.exitcode")
+        .trim()
+        .parse::<i32>()
+        .expect("fixture exit code should be an integer");
+
+    for (extension, source_text) in [("prnc", prnc), ("princi", princi)] {
+        let dir = TestDir::new();
+        let source = dir.source(&format!("v02-conformance.{extension}"), source_text);
+        let build = dir.build(&source, None);
+        assert!(
+            build.status.success(),
+            "v0.2 .{extension} build failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&build.stdout),
             String::from_utf8_lossy(&build.stderr)
         );
         assert!(build.stdout.is_empty(), "successful build should be quiet");

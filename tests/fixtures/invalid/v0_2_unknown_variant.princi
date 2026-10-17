@@ -1,0 +1,2 @@
+enum State { Ready Waiting }
+fn main() { let state = State.Missing }

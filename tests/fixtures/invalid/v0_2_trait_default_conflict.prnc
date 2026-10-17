@@ -1,0 +1,4 @@
+trait First { fn label() -> String { return "first" } }
+trait Second { fn label() -> String { return "second" } }
+class Button implements First, Second {}
+fn main() {}

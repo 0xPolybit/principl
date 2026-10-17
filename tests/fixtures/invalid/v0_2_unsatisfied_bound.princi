@@ -1,0 +1,3 @@
+trait Named { fn name() -> String }
+fn show<T: Named>(value: T) {}
+fn main() { show(1) }

@@ -1,0 +1,5 @@
+fn expand<T>(value: T) -> Int {
+    let next = expand<List<T>>([value])
+    return next
+}
+fn main() { println(expand(1)) }

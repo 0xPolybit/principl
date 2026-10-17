@@ -1,0 +1,5 @@
+interface Drawable { fn draw() -> String }
+class Button implements Drawable {
+    fn draw() -> Int { return 1 }
+}
+fn main() {}
