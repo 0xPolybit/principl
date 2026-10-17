@@ -1647,7 +1647,13 @@ impl<'a> IrGenerator<'a> {
             ));
         };
         let mut output = Vec::new();
-        for (method_name, trait_name) in &owner_info.default_trait_methods {
+        // `default_trait_methods` is a hash map, so iterating it directly makes
+        // function emission (and the specialization discovery order from those
+        // bodies) vary between compiler processes. Keep the generated module
+        // stable by ordering defaults by method name before lowering them.
+        let mut default_methods = owner_info.default_trait_methods.iter().collect::<Vec<_>>();
+        default_methods.sort_by(|left, right| left.0.cmp(right.0));
+        for (method_name, trait_name) in default_methods {
             let trait_declaration = self
                 .typed
                 .program
@@ -5329,6 +5335,116 @@ fn main() { println(expand(1)) }"#,
         assert!(diagnostic
             .message()
             .contains("cannot be specialized finitely"));
+    }
+
+    #[test]
+    fn reuses_nested_specializations_and_keeps_generic_layouts_and_symbols_stable() {
+        let text = r#"trait Named { fn name() -> String }
+class User implements Named {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+}
+class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+    fn get() -> T { return self.value }
+}
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+enum Maybe<T> { Some(T) None }
+fn identity<T>(value: T) -> T { return value }
+fn labelOf<T: Named>(value: T) -> String { return value.name() }
+fn main() {
+    let intOne = identity<Box<List<Int>>>(Box<List<Int>>([1]))
+    let intTwo = identity<Box<List<Int>>>(Box<List<Int>>([2]))
+    let text = identity<Box<List<String>>>(Box<List<String>>(["v"]))
+    let pair = Pair<Box<List<Int>>, String>(intOne, "pair")
+    let boxedPair = Box<Pair<Box<List<Int>>, String>>(pair)
+    let maybe = Maybe<Pair<Box<List<Int>>, String>>.Some(pair)
+    println(labelOf(User("trait bound")))
+    println(intTwo.get()[0])
+    println(text.get()[0])
+    println(boxedPair.get().first.get()[0])
+    match maybe {
+        Some(item) => println(item.first.get()[0])
+        None => println(0)
+    }
+}"#;
+        let ir = lower(text).expect("nested generic program should lower");
+
+        // The same concrete instantiation reached by two calls is emitted once,
+        // while a different nested type argument remains a separate function.
+        let int_specialization =
+            "define internal ptr @princi_generic_6964656e74697479_gc3_426f78_a1_l1_i";
+        let string_specialization =
+            "define internal ptr @princi_generic_6964656e74697479_gc3_426f78_a1_l1_s";
+        assert_eq!(ir.matches(int_specialization).count(), 1);
+        assert_eq!(ir.matches(string_specialization).count(), 1);
+
+        // Nested class, struct, and enum layouts are concrete and emitted once.
+        assert_eq!(
+            ir.matches("%princi.class.gc3_426f78_a1_l1_i = type { ptr, ptr }")
+                .count(),
+            1
+        );
+        assert_eq!(
+            ir.matches("%princi.class.gc3_426f78_a1_l1_s = type { ptr, ptr }")
+                .count(),
+            1
+        );
+        assert_eq!(
+            ir.matches("%princi.struct.gu4_50616972_a2_gc3_426f78_a1_l1_i_s = type { ptr, ptr }")
+                .count(),
+            1
+        );
+        assert!(ir.contains(
+            "%princi.class.gc3_426f78_a1_gu4_50616972_a2_gc3_426f78_a1_l1_i_s = type { ptr, %princi.struct.gu4_50616972_a2_gc3_426f78_a1_l1_i_s }"
+        ));
+        assert_eq!(
+            ir.matches("%princi.enum.ge5_4d61796265_a1_gu4_50616972_a2_gc3_426f78_a1_l1_i_s = type { i32, { %princi.struct.gu4_50616972_a2_gc3_426f78_a1_l1_i_s }, {  } }")
+                .count(),
+            1
+        );
+
+        // A method made available by `T: Named` resolves against the concrete
+        // class implementation in the specialized function body.
+        assert!(ir.contains("call ptr @princi_method_55736572_6e616d65"));
+        assert_eq!(
+            ir,
+            lower(text).expect("repeated lowering should retain stable symbol order")
+        );
+    }
+
+    #[test]
+    fn emits_trait_default_methods_in_deterministic_order() {
+        let ir = lower(
+            r#"trait Named {
+    fn zeta() -> String { return "z" }
+    fn alpha() -> String { return "a" }
+}
+class User implements Named {}
+fn selected<T: Named>(value: T) -> String { return value.alpha() }
+fn main() { println(selected(User())) }"#,
+        )
+        .expect("generic call through trait defaults should lower");
+        let alpha = ir
+            .find(
+                "define internal ptr @princi_trait_default_c4_55736572_t5_4e616d6564_m5_616c706861",
+            )
+            .expect("alpha default should be emitted");
+        let zeta = ir
+            .find("define internal ptr @princi_trait_default_c4_55736572_t5_4e616d6564_m4_7a657461")
+            .expect("zeta default should be emitted");
+        assert!(
+            alpha < zeta,
+            "trait defaults should be emitted by method name"
+        );
+        assert!(
+            ir.contains("call ptr @princi_trait_default_c4_55736572_t5_4e616d6564_m5_616c706861")
+        );
     }
 
     #[test]
