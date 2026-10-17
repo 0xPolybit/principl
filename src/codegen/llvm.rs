@@ -98,7 +98,7 @@ pub fn compile_native(ir: &str, options: &BuildOptions) -> Result<(), Diagnostic
         })?;
     require_success(
         DiagnosticCode::LlvmFailure,
-        "generated native code failed LLVM verification or Windows object generation; please report this compiler error",
+        "the compiler could not generate a valid native executable; please report this compiler error",
         &emitted,
     )?;
 
@@ -462,8 +462,8 @@ impl<'a> IrGenerator<'a> {
             )
             .ok_or_else(|| {
                 self.error_with(
-                    DiagnosticCode::UnsupportedFeature,
-                    "this generic specialization uses a type that the native backend cannot represent yet",
+                    DiagnosticCode::GenericSpecialization,
+                    format!("cannot generate a native specialization of '{}' for the requested type arguments", request.key.function),
                     request.call_span,
                 )
             })?;
@@ -765,8 +765,11 @@ impl<'a> IrGenerator<'a> {
             .any(|ty| contains_type_parameter(ty))
         {
             return Err(self.error_with(
-                DiagnosticCode::UnsupportedFeature,
-                "could not resolve a generic call to concrete types for native specialization",
+                DiagnosticCode::GenericSpecialization,
+                format!(
+                    "cannot specialize '{}' because one or more type arguments are unresolved",
+                    key.function
+                ),
                 call.call_span,
             ));
         }
@@ -777,9 +780,9 @@ impl<'a> IrGenerator<'a> {
                     > type_arguments_complexity(&ancestor.type_arguments)
             {
                 return Err(self.error_with(
-                    DiagnosticCode::InvalidCall,
+                    DiagnosticCode::GenericSpecialization,
                     format!(
-                        "generic specialization of '{}' expands recursively without a finite set of types",
+                        "generic function '{}' recursively expands its type arguments and cannot be specialized finitely",
                         key.function
                     ),
                     call.call_span,
@@ -791,9 +794,9 @@ impl<'a> IrGenerator<'a> {
         }
         if queued.len() >= MAX_GENERIC_SPECIALIZATIONS {
             return Err(self.error_with(
-                DiagnosticCode::InvalidCall,
+                DiagnosticCode::GenericSpecialization,
                 format!(
-                    "generic program requires more than {MAX_GENERIC_SPECIALIZATIONS} native specializations"
+                    "program requires too many distinct generic specializations (limit: {MAX_GENERIC_SPECIALIZATIONS})"
                 ),
                 call.call_span,
             ));
@@ -1067,16 +1070,16 @@ impl<'a> IrGenerator<'a> {
                 }
                 if mangled_type(&ty).is_none() {
                     return Err(self.error_with(
-                        DiagnosticCode::UnsupportedFeature,
-                        "generic type specialization contains a type the native backend cannot represent",
+                        DiagnosticCode::GenericSpecialization,
+                        format!("cannot generate a native representation for generic type {ty}"),
                         SourceSpan::new(0, 0),
                     ));
                 }
                 if !queued.contains(&ty) && queued.len() >= MAX_GENERIC_TYPE_SPECIALIZATIONS {
                     return Err(self.error_with(
-                        DiagnosticCode::InvalidCall,
+                        DiagnosticCode::GenericSpecialization,
                         format!(
-                            "generic type layout requires more than {MAX_GENERIC_TYPE_SPECIALIZATIONS} concrete specializations"
+                            "program requires too many distinct generic type layouts (limit: {MAX_GENERIC_TYPE_SPECIALIZATIONS})"
                         ),
                         SourceSpan::new(0, 0),
                     ));
@@ -1821,8 +1824,8 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
             ..
         } => specialized_struct_type_name(ty).ok_or_else(|| {
             Diagnostic::at_source(
-                DiagnosticCode::UnsupportedFeature,
-                "this generic struct layout contains a type the native backend cannot represent",
+                DiagnosticCode::GenericSpecialization,
+                format!("cannot generate a native representation for generic struct {ty}"),
                 source,
                 span,
             )
@@ -1832,15 +1835,15 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
             ..
         } => enum_type_name(ty).ok_or_else(|| {
             Diagnostic::at_source(
-                DiagnosticCode::UnsupportedFeature,
-                "this generic enum layout contains a type the native backend cannot represent",
+                DiagnosticCode::GenericSpecialization,
+                format!("cannot generate a native representation for generic enum {ty}"),
                 source,
                 span,
             )
         }),
         Type::GenericInstance { .. } | Type::TypeParameter(_) => Err(Diagnostic::at_source(
-            DiagnosticCode::UnsupportedFeature,
-            "generic type specialization is not implemented for this type in the native backend",
+            DiagnosticCode::GenericSpecialization,
+            format!("cannot generate a native representation for generic type {ty}"),
             source,
             span,
         )),
@@ -2918,8 +2921,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     .unwrap_or(Type::Error),
             ),
             ExpressionKind::GenericReference { .. } => Err(self.error_with(
-                DiagnosticCode::UnsupportedFeature,
-                "generic function specialization is not implemented in the native backend yet",
+                DiagnosticCode::GenericSpecialization,
+                "cannot generate a native specialization for this generic function",
                 expression.span,
             )),
             ExpressionKind::Group(inner) => self.emit_expression(inner),
@@ -4339,18 +4342,19 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     .any(contains_type_parameter)
             {
                 return Err(self.error_with(
-                    DiagnosticCode::UnsupportedFeature,
-                    "could not resolve a generic call to concrete types for native specialization",
+                    DiagnosticCode::GenericSpecialization,
+                    "cannot specialize this generic function because one or more type arguments are unresolved",
                     span,
                 ));
             }
-            let symbol = specialization_symbol(name, &generic_call.type_arguments).ok_or_else(|| {
-                self.error_with(
-                    DiagnosticCode::UnsupportedFeature,
-                    "this generic specialization uses a type that the native backend cannot represent yet",
-                    span,
-                )
-            })?;
+            let symbol =
+                specialization_symbol(name, &generic_call.type_arguments).ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::GenericSpecialization,
+                        "cannot generate a native specialization for the requested type arguments",
+                        span,
+                    )
+                })?;
             self.generic_calls.push(GenericCallRequest {
                 function: name.to_owned(),
                 type_arguments: generic_call.type_arguments,
@@ -5321,8 +5325,10 @@ fn main() { println(expand(1)) }"#,
         );
         let diagnostic = generate_llvm_ir(&analyzed.typed_program, &source)
             .expect_err("expanding recursive specializations must be rejected");
-        assert_eq!(diagnostic.code(), DiagnosticCode::InvalidCall);
-        assert!(diagnostic.message().contains("expands recursively"));
+        assert_eq!(diagnostic.code(), DiagnosticCode::GenericSpecialization);
+        assert!(diagnostic
+            .message()
+            .contains("cannot be specialized finitely"));
     }
 
     #[test]
@@ -5816,16 +5822,13 @@ fn main() {
             .expect("cmd should be available on Windows");
         let error = require_success(
             DiagnosticCode::LlvmFailure,
-            "generated native code failed LLVM verification; please report this compiler error",
+            "the compiler could not generate a valid native executable; please report this compiler error",
             &output,
         )
         .expect_err("failed LLVM status should become a diagnostic");
 
         let rendered = error.to_string();
-        assert!(
-            rendered.contains("internal compiler error[E9002]"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("compiler error[E9002]"), "{rendered}");
         assert!(
             !rendered.contains("internal llvm dump detail"),
             "{rendered}"

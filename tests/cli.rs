@@ -386,20 +386,20 @@ fn invalid_result_propagation_exits_nonzero_without_emitting_an_executable() {
         (
             "wrong-return.prnc",
             "fn read() -> Result<Int, String> { return Result<Int, String>.Ok(1) }\nfn bad() -> Int { return read()? }\nfn main() {}",
-            "E0208",
-            "requires the enclosing function to return Result<T, E>",
+            "E0306",
+            "the function must return Result<T, E>",
         ),
         (
             "wrong-error.princi",
             "fn read() -> Result<Int, Int> { return Result<Int, Int>.Ok(1) }\nfn bad() -> Result<Int, String> { let value = read()?; return Result<Int, String>.Ok(value) }\nfn main() {}",
-            "E0201",
-            "error type must match the enclosing function exactly",
+            "E0306",
+            "cannot propagate error type Int; the enclosing function expects String",
         ),
         (
             "not-result.prnc",
             "fn bad() -> Result<Int, String> { return 1? }\nfn main() {}",
-            "E0201",
-            "requires Result<T, E>, found Int",
+            "E0306",
+            "cannot apply '?' to Int; expected Result<T, E>",
         ),
     ];
 
@@ -418,5 +418,186 @@ fn invalid_result_propagation_exits_nonzero_without_emitting_an_executable() {
         assert!(stderr.contains(expected_message), "{stderr}");
         assert!(!source.with_extension("exe").exists());
         assert!(!stderr.contains("panicked"), "{stderr}");
+    }
+}
+
+#[test]
+fn v02_diagnostic_regressions_are_located_actionable_and_hide_backend_details() {
+    let dir = TestDir::new();
+    let cases = [
+        (
+            "generic-arity.prnc",
+            "fn identity<T>(value: T) -> T { return value }\nfn main() { let item = identity<Int, String>(1) }",
+            "E0302",
+            "'identity' expects 1 generic argument(s), found 2",
+            None,
+        ),
+        (
+            "generic-inference.princi",
+            "fn empty<T>() -> List<T> { return [] }\nfn main() { let values = empty() }",
+            "E0303",
+            "cannot infer generic argument(s) T for 'empty'",
+            None,
+        ),
+        (
+            "trait-bound.prnc",
+            "trait Printable { fn print() }\nfn show<T: Printable>(value: T) {}\nfn main() { show(1) }",
+            "E0213",
+            "type Int does not satisfy trait Printable",
+            Some("required by fn show<T: Printable>"),
+        ),
+        (
+            "missing-interface.princi",
+            "interface Drawable { fn draw(label: String) -> Bool }\nclass Button implements Drawable {}\nfn main() {}",
+            "E0211",
+            "is missing method 'draw' required by interface 'Drawable'",
+            Some("required signature: (String) -> Bool"),
+        ),
+        (
+            "interface-bound-cascade.prnc",
+            "interface Drawable { fn draw() }\nclass Button implements Drawable {}\nfn show<T: Drawable>(value: T) {}\nfn main() { show(Button()) }",
+            "E0211",
+            "is missing method 'draw' required by interface 'Drawable'",
+            Some("required signature: () -> Void"),
+        ),
+        (
+            "interface-value-cascade.princi",
+            "interface Drawable { fn draw() }\nclass Button implements Drawable {}\nfn render(value: Drawable) {}\nfn main() { render(Button()) }",
+            "E0211",
+            "is missing method 'draw' required by interface 'Drawable'",
+            Some("required signature: () -> Void"),
+        ),
+        (
+            "interface-signature.princi",
+            "interface Drawable { fn draw(label: String) -> Bool }\nclass Button implements Drawable { fn draw() {} }\nfn main() {}",
+            "E0211",
+            "expected (String) -> Bool, found () -> Void",
+            None,
+        ),
+        (
+            "trait-default-conflict.prnc",
+            "trait First { fn draw() {} }\ntrait Second { fn draw() {} }\nclass Button implements First, Second {}\nfn main() {}",
+            "E0212",
+            "conflicting default method 'draw'",
+            Some("implement 'draw' on 'Button' to resolve the conflict"),
+        ),
+        (
+            "enum-unknown-variant.princi",
+            "enum State { Ready }\nfn main() { let state = State.Missing }",
+            "E0304",
+            "enum 'State' has no variant 'Missing'",
+            None,
+        ),
+        (
+            "enum-payload-count.prnc",
+            "enum State { Failed(String) }\nfn main() { let state = State.Failed() }",
+            "E0304",
+            "variant 'State.Failed' expects 1 payload value(s), found 0",
+            None,
+        ),
+        (
+            "enum-payload-type.princi",
+            "enum State { Failed(Int) }\nfn main() { let state = State.Failed(\"offline\") }",
+            "E0304",
+            "payload 1 of variant 'State.Failed' expects Int, found String",
+            None,
+        ),
+        (
+            "non-exhaustive.princi",
+            "enum State { Ready Waiting }\nfn main() { let state = State.Ready; match state { Ready => println(1) } }",
+            "E0305",
+            "missing variant: State.Waiting",
+            None,
+        ),
+        (
+            "unknown-pattern.prnc",
+            "enum State { Ready Waiting }\nfn main() { let state = State.Ready; match state { Missing => println(1) } }",
+            "E0304",
+            "enum 'State' has no variant 'Missing'",
+            None,
+        ),
+        (
+            "unreachable-arm.prnc",
+            "enum State { Ready }\nfn main() { let state = State.Ready; match state { _ => println(1) Ready => println(2) } }",
+            "E0305",
+            "unreachable match arm",
+            None,
+        ),
+        (
+            "match-result-type.princi",
+            "fn main() { let value = match true { true => 1 false => \"no\" } }",
+            "E0305",
+            "match arm has type String, but earlier arms have type Int",
+            None,
+        ),
+        (
+            "result-question.prnc",
+            "fn bad(value: Int) -> Int { return value? }\nfn main() {}",
+            "E0306",
+            "cannot apply '?' to Int; expected Result<T, E>",
+            None,
+        ),
+        (
+            "result-function-context.princi",
+            "fn read() -> Result<Int, String> { return Result<Int, String>.Ok(1) }\nfn bad() -> Int { return read()? }\nfn main() {}",
+            "E0306",
+            "cannot propagate an error from a function returning Int",
+            None,
+        ),
+        (
+            "result-error-type.princi",
+            "fn read() -> Result<Int, Int> { return Result<Int, Int>.Ok(1) }\nfn bad() -> Result<Int, String> { let value = read()?; return Result<Int, String>.Ok(value) }\nfn main() {}",
+            "E0306",
+            "cannot propagate error type Int; the enclosing function expects String",
+            None,
+        ),
+        (
+            "specialization.princi",
+            "fn expand<T>(value: T) -> Int { let next = expand<List<T>>([value]); return next }\nfn main() { println(expand(1)) }",
+            "E0307",
+            "cannot be specialized finitely",
+            None,
+        ),
+    ];
+
+    for (name, program, code, message, note) in cases {
+        let source = dir.0.join(name);
+        fs::write(&source, program).expect("invalid Princi program should be written");
+        let result = dir
+            .compiler()
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("compiler process should start");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{name} unexpectedly compiled");
+        assert_eq!(
+            stderr.matches("error[E").count(),
+            1,
+            "{name}: redundant diagnostic cascade: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("error[{code}]")),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(message), "{name}: {stderr}");
+        assert!(
+            stderr.contains(&format!("{name}:")),
+            "{name}: missing location: {stderr}"
+        );
+        assert!(
+            stderr.contains('^'),
+            "{name}: missing source caret: {stderr}"
+        );
+        if let Some(note) = note {
+            assert!(stderr.contains(note), "{name}: missing context: {stderr}");
+        }
+        assert!(!stderr.contains("LLVM"), "{name}: {stderr}");
+        assert!(!stderr.contains("monomorph"), "{name}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{name}: {stderr}");
+        assert!(
+            !source.with_extension("exe").exists(),
+            "{name} emitted an exe"
+        );
     }
 }

@@ -61,7 +61,7 @@ An invalid FFI type is a semantic failure (`E0299`), so it stops before LLVM/lin
 
 ## Failure behavior
 
-The CLI returns a nonzero process status for build errors. Normal malformed source does not print a Rust backtrace. The binary catches an unexpected panic at its outer boundary and reports a generic `E9001` internal compiler error; LLVM verification/native emission failures are labeled separately as `E9002`. Error details are kept concise in ordinary output.
+The CLI returns a nonzero process status for build errors. Normal malformed source does not print a Rust backtrace. The binary catches an unexpected panic at its outer boundary and reports a generic `E9001` internal compiler error. If the compiler cannot produce a valid native executable, `E9002` reports a concise compiler error and suppresses raw LLVM verifier output.
 
 ## Related topics
 

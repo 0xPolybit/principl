@@ -775,7 +775,8 @@ signatures must match. Generic functions remain monomorphized, so a bound call
 lowers against the concrete specialization; no erased generic dispatch is
 introduced. Interface bounds accept conforming classes, while trait bounds
 accept conforming classes and structs. Failed checks produce a short diagnostic
-such as `type Int does not satisfy required trait 'Named'`. Generic traits,
+such as `type Int does not satisfy trait Named`, with the generic declaration
+shown as a secondary `required by` note. Generic traits,
 associated types, and conditional or negative bounds are unsupported.
 
 ### Cross-feature compatibility (v0.2 development)
@@ -1002,13 +1003,23 @@ initialization. In the v0.2 work, `E0211` identifies invalid interface
 conformance and `E0212` identifies invalid trait implementations, missing
 methods, and default-method ambiguities. `E0213` reports invalid generic
 bounds or a concrete type that does not satisfy a required interface or trait.
+Bound diagnostics include a short `required by` note when the generic
+declaration is known. `E0302` reports incorrect generic argument counts,
+`E0303` reports arguments that could not be inferred, `E0304` reports enum
+variant and payload errors, `E0305` reports match errors (including
+exhaustiveness, unreachable arms, and incompatible result types), `E0306`
+covers invalid `?` propagation, and `E0307` reports generic specialization
+failures. When a malformed generic call or enum construction already explains
+the problem, the checker avoids generating follow-up type errors from that
+same invalid value.
 
 Toolchain errors are separate from source errors: `E0401` means LLVM/Clang is
 missing, `E0403` means the Windows MinGW linker is missing or targets the wrong
 platform, and `E0404` means linking failed. Install LLVM/Clang with LLVM IR and
 X86 support and x86-64 MinGW-w64 GCC, or point `PRINCI_CLANG` and `PRINCI_CC` at
-those tools. A generated-IR failure is reported as an internal compiler error
-(`E9002`); set `PRINCI_KEEP_INTERMEDIATES=1` to preserve its `.ll` input for
+those tools. `E9002` reports that the compiler could not produce a valid native
+executable; raw LLVM verifier output is suppressed from the normal diagnostic.
+Set `PRINCI_KEEP_INTERMEDIATES=1` to preserve intermediate files for
 investigation. Unexpected compiler failures use `E9001` and exit non-zero
 without exposing a Rust panic or backtrace.
 

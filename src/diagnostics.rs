@@ -25,6 +25,12 @@ pub enum DiagnosticCode {
     GenericConstraint,
     Semantic,
     UnsupportedFeature,
+    GenericArgument,
+    GenericInference,
+    EnumPattern,
+    MatchAnalysis,
+    ResultPropagation,
+    GenericSpecialization,
     InternalCompiler,
     LlvmUnavailable,
     LlvmFailure,
@@ -56,6 +62,12 @@ impl DiagnosticCode {
             Self::GenericConstraint => "E0213",
             Self::Semantic => "E0299",
             Self::UnsupportedFeature => "E0301",
+            Self::GenericArgument => "E0302",
+            Self::GenericInference => "E0303",
+            Self::EnumPattern => "E0304",
+            Self::MatchAnalysis => "E0305",
+            Self::ResultPropagation => "E0306",
+            Self::GenericSpecialization => "E0307",
             Self::InternalCompiler => "E9001",
             Self::LlvmUnavailable => "E0401",
             Self::LlvmFailure => "E9002",
@@ -67,7 +79,8 @@ impl DiagnosticCode {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::InternalCompiler | Self::LlvmFailure => "internal compiler error",
+            Self::InternalCompiler => "internal compiler error",
+            Self::LlvmFailure => "compiler error",
             Self::LlvmUnavailable
             | Self::LinkerUnavailable
             | Self::LinkerFailure
@@ -90,6 +103,7 @@ pub struct Diagnostic {
     message: String,
     location: Option<SourceLocation>,
     excerpt: Option<SourceExcerpt>,
+    notes: Vec<String>,
 }
 
 impl Diagnostic {
@@ -104,6 +118,7 @@ impl Diagnostic {
             message: message.into(),
             location: None,
             excerpt: None,
+            notes: Vec::new(),
         }
     }
 
@@ -122,6 +137,7 @@ impl Diagnostic {
             message: message.into(),
             location: Some(location),
             excerpt: None,
+            notes: Vec::new(),
         }
     }
 
@@ -141,7 +157,14 @@ impl Diagnostic {
                 caret_column,
                 caret_width,
             }),
+            notes: Vec::new(),
         }
+    }
+
+    /// Attach concise secondary context without expanding the primary error.
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
     }
 
     pub fn unsupported_extension(extension: &str) -> Self {
@@ -194,6 +217,9 @@ impl fmt::Display for Diagnostic {
                 self.code.as_str(),
                 self.message
             )?;
+        }
+        for note in &self.notes {
+            write!(f, "\n\n    = note: {note}")?;
         }
         Ok(())
     }
@@ -306,6 +332,38 @@ mod tests {
         assert_eq!(
             Diagnostic::new("missing input").to_string(),
             "princi: error[E0001]: missing input"
+        );
+    }
+
+    #[test]
+    fn formats_secondary_notes_without_changing_the_primary_source_excerpt() {
+        let source = SourceFile::from_text("example.prnc", "show(value)");
+        let span = SourceSpan::new(5, 10);
+        let error = Diagnostic::at_source(
+            DiagnosticCode::GenericConstraint,
+            "type Int does not satisfy trait Printable",
+            &source,
+            span,
+        )
+        .with_note("required by fn show<T: Printable>");
+
+        assert!(error
+            .to_string()
+            .contains("example.prnc:1:6: error[E0213]: type Int does not satisfy trait Printable"));
+        assert!(error
+            .to_string()
+            .ends_with("    = note: required by fn show<T: Printable>"));
+    }
+
+    #[test]
+    fn generated_native_code_failures_do_not_expose_llvm_as_the_user_error() {
+        assert_eq!(
+            Diagnostic::coded(
+                DiagnosticCode::LlvmFailure,
+                "the compiler could not generate a valid native executable"
+            )
+            .to_string(),
+            "princi: compiler error[E9002]: the compiler could not generate a valid native executable"
         );
     }
 }

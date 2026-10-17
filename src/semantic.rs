@@ -297,6 +297,7 @@ struct PendingGenericBoundCheck {
     parameters: Vec<GenericTypeParameter>,
     arguments: Vec<Type>,
     span: SourceSpan,
+    required_by: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +333,7 @@ struct Analyzer<'a> {
     result_propagations: HashMap<SourceSpan, ResultPropagation>,
     return_result_wrappings: HashMap<SourceSpan, Type>,
     pending_generic_bound_checks: Vec<PendingGenericBoundCheck>,
+    invalid_contract_implementations: HashSet<(String, String)>,
     contracts_validated: bool,
     diagnostics: Vec<Diagnostic>,
 }
@@ -373,6 +375,7 @@ impl<'a> Analyzer<'a> {
             result_propagations: HashMap::new(),
             return_result_wrappings: HashMap::new(),
             pending_generic_bound_checks: Vec::new(),
+            invalid_contract_implementations: HashSet::new(),
             contracts_validated: false,
             diagnostics: Vec::new(),
         }
@@ -387,7 +390,12 @@ impl<'a> Analyzer<'a> {
         self.contracts_validated = true;
         let pending_checks = std::mem::take(&mut self.pending_generic_bound_checks);
         for check in pending_checks {
-            self.validate_generic_arguments(&check.parameters, &check.arguments, check.span);
+            self.validate_generic_arguments(
+                &check.parameters,
+                &check.arguments,
+                check.span,
+                &check.required_by,
+            );
         }
         self.validate_inline_value_layouts(program);
         self.check_declaration_bodies(program);
@@ -1009,25 +1017,31 @@ impl<'a> Analyzer<'a> {
                         let required_signature = interface_info.methods.get(name);
                         match (required_signature, owner_info.methods.get(name)) {
                             (Some(expected), Some(actual)) if expected == actual => {}
-                            (Some(_), Some(_)) => {
-                                self.error_with(
+                            (Some(expected), Some(actual)) => {
+                                self.error_with_note(
                                     DiagnosticCode::InvalidInterface,
                                     format!(
-                                        "method '{}.{}' has an incompatible signature for interface '{}'",
-                                        owner.name.name, name, reference.name
+                                        "method '{}.{}' does not match interface '{}': expected {}, found {}",
+                                        owner.name.name,
+                                        name,
+                                        reference.name,
+                                        function_signature(expected),
+                                        function_signature(actual)
                                     ),
                                     self.method_span(owner, name).unwrap_or(reference.span),
+                                    format!("required by interface '{}'", reference.name),
                                 );
                                 conforms = false;
                             }
-                            (Some(_), None) => {
-                                self.error_with(
+                            (Some(expected), None) => {
+                                self.error_with_note(
                                     DiagnosticCode::InvalidInterface,
                                     format!(
-                                        "type '{}' does not implement required method '{}.{}'",
-                                        owner.name.name, reference.name, name
+                                        "type '{}' is missing method '{}' required by interface '{}'",
+                                        owner.name.name, name, reference.name
                                     ),
                                     reference.span,
+                                    format!("required signature: {}", function_signature(expected)),
                                 );
                                 conforms = false;
                             }
@@ -1037,6 +1051,9 @@ impl<'a> Analyzer<'a> {
                 }
                 if conforms {
                     implemented_interfaces.push(reference.name.clone());
+                } else {
+                    self.invalid_contract_implementations
+                        .insert((owner.name.name.clone(), reference.name.clone()));
                 }
             }
 
@@ -1083,14 +1100,19 @@ impl<'a> Analyzer<'a> {
                 let selected_signature = if let Some(explicit) = explicit {
                     for (trait_name, expected, _, _) in methods {
                         if explicit != expected {
-                            self.error_with(
+                            self.error_with_note(
                                 DiagnosticCode::InvalidTrait,
                                 format!(
-                                    "method '{}.{}' has an incompatible signature for trait '{}'",
-                                    owner.name.name, method_name, trait_name
+                                    "method '{}.{}' does not match trait '{}': expected {}, found {}",
+                                    owner.name.name,
+                                    method_name,
+                                    trait_name,
+                                    function_signature(expected),
+                                    function_signature(explicit)
                                 ),
                                 self.method_span(owner, method_name)
                                     .unwrap_or(owner.name.span),
+                                format!("required by trait '{}'", trait_name),
                             );
                         }
                     }
@@ -1101,25 +1123,34 @@ impl<'a> Analyzer<'a> {
                         .map(|(name, _, _, _)| name.as_str())
                         .collect::<Vec<_>>()
                         .join("', '");
-                    self.error_with(
+                    self.error_with_note(
                         DiagnosticCode::InvalidTrait,
                         format!(
-                            "ambiguous default method '{}': traits '{}' provide it; implement the method explicitly",
+                            "conflicting default method '{}': traits '{}' provide it",
                             method_name, providers
                         ),
                         defaults[1].3,
+                        format!(
+                            "implement '{}' on '{}' to resolve the conflict",
+                            method_name, owner.name.name
+                        ),
                     );
                     None
                 } else if let Some((trait_name, signature, _, _)) = defaults.first() {
                     for (required_trait, expected, _, _) in methods {
                         if signature != expected {
-                            self.error_with(
+                            self.error_with_note(
                                 DiagnosticCode::InvalidTrait,
                                 format!(
-                                    "default method '{}.{}' has an incompatible signature for trait '{}'",
-                                    trait_name, method_name, required_trait
+                                    "default method '{}.{}' does not match trait '{}': expected {}, found {}",
+                                    trait_name,
+                                    method_name,
+                                    required_trait,
+                                    function_signature(expected),
+                                    function_signature(signature)
                                 ),
                                 self.method_span(owner, method_name).unwrap_or(owner.name.span),
+                                format!("required by trait '{}'", required_trait),
                             );
                         }
                     }
@@ -1130,14 +1161,15 @@ impl<'a> Analyzer<'a> {
                 };
 
                 if selected_signature.is_none() && defaults.is_empty() && explicit.is_none() {
-                    for (trait_name, _, _, span) in methods {
-                        self.error_with(
+                    for (trait_name, required, _, span) in methods {
+                        self.error_with_note(
                             DiagnosticCode::InvalidTrait,
                             format!(
-                                "type '{}' does not implement required method '{}.{}'",
-                                owner.name.name, trait_name, method_name
+                                "type '{}' is missing method '{}' required by trait '{}'",
+                                owner.name.name, method_name, trait_name
                             ),
                             *span,
+                            format!("required signature: {}", function_signature(required)),
                         );
                     }
                 }
@@ -1179,6 +1211,9 @@ impl<'a> Analyzer<'a> {
                 }
                 if conforms {
                     implemented_traits.push(reference.name.clone());
+                } else {
+                    self.invalid_contract_implementations
+                        .insert((owner.name.name.clone(), reference.name.clone()));
                 }
             }
             if let Some(info) = self.types.get_mut(&owner.name.name) {
@@ -1485,7 +1520,8 @@ impl<'a> Analyzer<'a> {
 
         if let Some(expected) = expected_arity {
             if args.len() != expected {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::GenericArgument,
                     format!(
                         "type '{}' expects {expected} generic argument(s), found {}",
                         reference.name,
@@ -1541,7 +1577,16 @@ impl<'a> Analyzer<'a> {
                         Type::Enum(_) => GenericTypeConstructor::Enum(name.to_owned()),
                         _ => return Type::Error,
                     };
-                    self.validate_generic_arguments(&info.type_parameters, args, reference.span);
+                    let required_by = format!(
+                        "type {}",
+                        generic_declaration(&reference.name, &info.type_parameters)
+                    );
+                    self.validate_generic_arguments(
+                        &info.type_parameters,
+                        args,
+                        reference.span,
+                        &required_by,
+                    );
                     Type::generic_instance(constructor, args.to_vec())
                 }
             }
@@ -1553,6 +1598,7 @@ impl<'a> Analyzer<'a> {
         parameters: &[GenericTypeParameter],
         arguments: &[Type],
         span: SourceSpan,
+        required_by: &str,
     ) {
         if !self.contracts_validated {
             self.pending_generic_bound_checks
@@ -1560,6 +1606,7 @@ impl<'a> Analyzer<'a> {
                     parameters: parameters.to_vec(),
                     arguments: arguments.to_vec(),
                     span,
+                    required_by: required_by.to_owned(),
                 });
             return;
         }
@@ -1567,6 +1614,7 @@ impl<'a> Analyzer<'a> {
             if argument.is_error() {
                 continue;
             }
+            let mut unsatisfied = Vec::new();
             for bound in &parameter.bounds {
                 let Some(bound_info) = self.types.get(bound) else {
                     continue;
@@ -1574,17 +1622,39 @@ impl<'a> Analyzer<'a> {
                 if self.type_satisfies_bound(argument, bound) {
                     continue;
                 }
+                if argument.nominal_name().is_some_and(|name| {
+                    self.invalid_contract_implementations
+                        .contains(&(name.to_owned(), bound.clone()))
+                }) {
+                    continue;
+                }
                 let kind = if bound_info.is_interface {
                     "interface"
                 } else {
                     "trait"
                 };
-                self.error_with(
-                    DiagnosticCode::GenericConstraint,
-                    format!("type {argument} does not satisfy required {kind} '{bound}'"),
-                    span,
-                );
+                unsatisfied.push((kind, bound.as_str()));
             }
+            if unsatisfied.is_empty() {
+                continue;
+            }
+            let message = if unsatisfied.len() == 1 {
+                let (kind, bound) = unsatisfied[0];
+                format!("type {argument} does not satisfy {kind} {bound}")
+            } else {
+                let bounds = unsatisfied
+                    .iter()
+                    .map(|(kind, bound)| format!("{kind} {bound}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("type {argument} does not satisfy bounds: {bounds}")
+            };
+            self.error_with_note(
+                DiagnosticCode::GenericConstraint,
+                message,
+                span,
+                format!("required by {required_by}"),
+            );
         }
     }
 
@@ -2177,7 +2247,7 @@ impl<'a> Analyzer<'a> {
             .cloned()
         else {
             self.error_with(
-                DiagnosticCode::InvalidMember,
+                DiagnosticCode::EnumPattern,
                 format!("enum '{type_name}' has no variant '{}'", variant_name.name),
                 variant_name.span,
             );
@@ -2188,7 +2258,7 @@ impl<'a> Analyzer<'a> {
         };
         if variant.payload.len() != arguments.len() {
             self.error_with(
-                DiagnosticCode::InvalidCall,
+                DiagnosticCode::EnumPattern,
                 format!(
                     "variant '{}.{}' expects {} payload value(s), found {}",
                     type_name,
@@ -2198,6 +2268,10 @@ impl<'a> Analyzer<'a> {
                 ),
                 span,
             );
+            for argument in arguments {
+                self.check_expression(argument, None);
+            }
+            return Type::Error;
         }
         let substitutions =
             type_substitutions(&info.type_parameters, enum_type.generic_arguments());
@@ -2206,7 +2280,28 @@ impl<'a> Analyzer<'a> {
                 .payload
                 .get(index)
                 .map(|ty| substitute_type(ty, &substitutions));
-            self.check_expression(argument, expected.as_ref());
+            let Some(expected) = expected else {
+                self.check_expression(argument, None);
+                continue;
+            };
+            let actual =
+                self.check_expression(argument, is_list_literal(argument).then_some(&expected));
+            if actual.is_error()
+                || self.record_contract_conversion(&expected, &actual, argument.span)
+                || expected.accepts(&actual)
+            {
+                continue;
+            }
+            self.error_with(
+                DiagnosticCode::EnumPattern,
+                format!(
+                    "payload {} of variant '{}.{}' expects {expected}, found {actual}",
+                    index + 1,
+                    type_name,
+                    variant.name
+                ),
+                argument.span,
+            );
         }
         enum_type.clone()
     }
@@ -2220,60 +2315,67 @@ impl<'a> Analyzer<'a> {
         let mut covered_literals = HashSet::new();
         let mut covered_partial_patterns = HashSet::new();
         let mut has_catch_all = false;
+        let mut has_invalid_pattern = false;
 
         for arm in &matched.arms {
             self.scopes = before.clone();
             self.push_scope();
-            if has_catch_all
+            let already_unreachable = has_catch_all
                 || self.patterns_already_exhaustive(
                     &value_type,
                     &covered_variants,
                     &covered_literals,
-                )
-            {
+                );
+            if already_unreachable {
                 self.error_with(
-                    DiagnosticCode::Semantic,
-                    "unreachable match arm",
+                    DiagnosticCode::MatchAnalysis,
+                    "unreachable match arm; earlier patterns already cover every value",
                     arm.pattern.span,
                 );
             }
 
+            let diagnostics_before_pattern = self.diagnostics.len();
             let coverage = self.check_pattern(&arm.pattern, &value_type);
-            match &coverage {
-                PatternCoverage::CatchAll => has_catch_all = true,
-                PatternCoverage::EnumVariant { index, complete } => {
-                    if covered_variants.contains(index) {
-                        self.error_with(
-                            DiagnosticCode::Semantic,
-                            "unreachable match arm; enum variant was already covered",
-                            arm.pattern.span,
-                        );
-                    } else if *complete {
-                        covered_variants.insert(*index);
-                    } else if !covered_partial_patterns.insert(pattern_fingerprint(&arm.pattern)) {
-                        self.error_with(
-                            DiagnosticCode::Semantic,
-                            "unreachable match arm; pattern was already covered",
-                            arm.pattern.span,
-                        );
+            has_invalid_pattern |= self.diagnostics.len() != diagnostics_before_pattern;
+            if !already_unreachable {
+                match &coverage {
+                    PatternCoverage::CatchAll => has_catch_all = true,
+                    PatternCoverage::EnumVariant { index, complete } => {
+                        if covered_variants.contains(index) {
+                            self.error_with(
+                                DiagnosticCode::MatchAnalysis,
+                                "unreachable match arm; enum variant was already covered",
+                                arm.pattern.span,
+                            );
+                        } else if *complete {
+                            covered_variants.insert(*index);
+                        } else if !covered_partial_patterns
+                            .insert(pattern_fingerprint(&arm.pattern))
+                        {
+                            self.error_with(
+                                DiagnosticCode::MatchAnalysis,
+                                "unreachable match arm; pattern was already covered",
+                                arm.pattern.span,
+                            );
+                        }
                     }
-                }
-                PatternCoverage::Literal(key) => {
-                    if !covered_literals.insert(key.clone()) {
-                        self.error_with(
-                            DiagnosticCode::Semantic,
-                            "unreachable match arm; literal was already covered",
-                            arm.pattern.span,
-                        );
+                    PatternCoverage::Literal(key) => {
+                        if !covered_literals.insert(key.clone()) {
+                            self.error_with(
+                                DiagnosticCode::MatchAnalysis,
+                                "unreachable match arm; literal was already covered",
+                                arm.pattern.span,
+                            );
+                        }
                     }
-                }
-                PatternCoverage::Partial(key) => {
-                    if !covered_partial_patterns.insert(key.clone()) {
-                        self.error_with(
-                            DiagnosticCode::Semantic,
-                            "unreachable match arm; pattern was already covered",
-                            arm.pattern.span,
-                        );
+                    PatternCoverage::Partial(key) => {
+                        if !covered_partial_patterns.insert(key.clone()) {
+                            self.error_with(
+                                DiagnosticCode::MatchAnalysis,
+                                "unreachable match arm; pattern was already covered",
+                                arm.pattern.span,
+                            );
+                        }
                     }
                 }
             }
@@ -2287,7 +2389,15 @@ impl<'a> Analyzer<'a> {
             };
             if let Some(previous) = result_type.as_ref() {
                 if !previous.is_error() && !arm_type.is_error() {
-                    self.require_type(previous, &arm_type, arm.span, "match arm result");
+                    if !previous.accepts(&arm_type) {
+                        self.error_with(
+                            DiagnosticCode::MatchAnalysis,
+                            format!(
+                                "match arm has type {arm_type}, but earlier arms have type {previous}"
+                            ),
+                            arm.span,
+                        );
+                    }
                 }
                 if previous.is_error() {
                     result_type = Some(arm_type.clone());
@@ -2305,7 +2415,8 @@ impl<'a> Analyzer<'a> {
                 "match expression must contain at least one arm",
                 span,
             );
-        } else if !value_type.is_error()
+        } else if !has_invalid_pattern
+            && !value_type.is_error()
             && !has_catch_all
             && !self.match_is_exhaustive(&value_type, &covered_variants, &covered_literals)
         {
@@ -2320,7 +2431,7 @@ impl<'a> Analyzer<'a> {
                 ),
                 _ => format!("non-exhaustive match for type {value_type}; add a wildcard arm"),
             };
-            self.error_with(DiagnosticCode::Semantic, message, span);
+            self.error_with(DiagnosticCode::MatchAnalysis, message, span);
         }
 
         // A binding is definitely initialized after a match only when every
@@ -2355,7 +2466,7 @@ impl<'a> Analyzer<'a> {
                     {
                         if !variant.payload.is_empty() {
                             self.error_with(
-                                DiagnosticCode::InvalidCall,
+                                DiagnosticCode::EnumPattern,
                                 format!(
                                     "variant '{}.{}' requires {} payload pattern(s)",
                                     enum_type.nominal_name().unwrap_or("enum"),
@@ -2378,7 +2489,7 @@ impl<'a> Analyzer<'a> {
                         .is_some_and(char::is_uppercase)
                     {
                         self.error_with(
-                            DiagnosticCode::InvalidMember,
+                            DiagnosticCode::EnumPattern,
                             format!(
                                 "enum '{}' has no variant '{}'",
                                 enum_type.nominal_name().unwrap_or("<unknown>"),
@@ -2412,7 +2523,7 @@ impl<'a> Analyzer<'a> {
                     .find(|(_, variant)| variant.name == name.name)
                 else {
                     self.error_with(
-                        DiagnosticCode::InvalidMember,
+                        DiagnosticCode::EnumPattern,
                         format!(
                             "enum '{}' has no variant '{}'",
                             enum_type.nominal_name().unwrap_or("<unknown>"),
@@ -2424,7 +2535,7 @@ impl<'a> Analyzer<'a> {
                 };
                 if variant.payload.len() != payload.len() {
                     self.error_with(
-                        DiagnosticCode::InvalidCall,
+                        DiagnosticCode::EnumPattern,
                         format!(
                             "variant '{}.{}' expects {} payload pattern(s), found {}",
                             enum_type.nominal_name().unwrap_or("enum"),
@@ -2627,35 +2738,33 @@ impl<'a> Analyzer<'a> {
         }
         let Some((success_type, error_type)) = self.result_components(&result_type) else {
             self.error_with(
-                DiagnosticCode::TypeMismatch,
-                format!("postfix '?' requires Result<T, E>, found {result_type}"),
+                DiagnosticCode::ResultPropagation,
+                format!("cannot apply '?' to {result_type}; expected Result<T, E>"),
                 span,
             );
             return Type::Error;
         };
         let Some(enclosing_result_type) = self.current_return_type.clone() else {
             self.error_with(
-                DiagnosticCode::InvalidReturn,
-                "postfix '?' is only valid inside a Result-returning function",
+                DiagnosticCode::ResultPropagation,
+                "postfix '?' can only be used inside a function returning Result<T, E>",
                 span,
             );
             return Type::Error;
         };
         let Some((_, enclosing_error_type)) = self.result_components(&enclosing_result_type) else {
             self.error_with(
-                DiagnosticCode::InvalidReturn,
-                format!(
-                    "postfix '?' requires the enclosing function to return Result<T, E>, found {enclosing_result_type}"
-                ),
+                DiagnosticCode::ResultPropagation,
+                format!("cannot propagate an error from a function returning {enclosing_result_type}; the function must return Result<T, E>"),
                 span,
             );
             return Type::Error;
         };
         if error_type != enclosing_error_type {
             self.error_with(
-                DiagnosticCode::TypeMismatch,
+                DiagnosticCode::ResultPropagation,
                 format!(
-                    "postfix '?' error type must match the enclosing function exactly: expected {enclosing_error_type}, found {error_type}"
+                    "cannot propagate error type {error_type}; the enclosing function expects {enclosing_error_type}"
                 ),
                 span,
             );
@@ -3240,7 +3349,8 @@ impl<'a> Analyzer<'a> {
             return Type::Error;
         };
         if arguments.len() != info.type_parameters.len() {
-            self.error(
+            self.error_with(
+                DiagnosticCode::GenericArgument,
                 format!(
                     "type '{name}' expects {} generic argument(s), found {}",
                     info.type_parameters.len(),
@@ -3253,7 +3363,12 @@ impl<'a> Analyzer<'a> {
         if arguments.iter().any(Type::is_error) {
             return Type::Error;
         }
-        self.validate_generic_arguments(&info.type_parameters, arguments, span);
+        self.validate_generic_arguments(
+            &info.type_parameters,
+            arguments,
+            span,
+            &format!("type {}", generic_declaration(name, &info.type_parameters)),
+        );
         if arguments.is_empty() {
             return info.ty;
         }
@@ -3277,7 +3392,8 @@ impl<'a> Analyzer<'a> {
     ) -> (FunctionType, Option<Vec<Type>>) {
         if signature.type_parameters.is_empty() {
             if !explicit_arguments.is_empty() {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::GenericArgument,
                     format!("'{name}' does not declare generic parameters"),
                     call_span,
                 );
@@ -3286,9 +3402,14 @@ impl<'a> Analyzer<'a> {
         }
 
         let mut substitutions = HashMap::new();
+        let required_by = format!(
+            "fn {}",
+            generic_declaration(name, &signature.type_parameters)
+        );
         if !explicit_arguments.is_empty() {
             if explicit_arguments.len() != signature.type_parameters.len() {
-                self.error(
+                self.error_with(
+                    DiagnosticCode::GenericArgument,
                     format!(
                         "'{name}' expects {} generic argument(s), found {}",
                         signature.type_parameters.len(),
@@ -3303,6 +3424,15 @@ impl<'a> Analyzer<'a> {
                 .zip(explicit_arguments.iter())
             {
                 substitutions.insert(parameter.id, argument.clone());
+            }
+            if explicit_arguments.len() != signature.type_parameters.len() {
+                for parameter in signature
+                    .type_parameters
+                    .iter()
+                    .skip(explicit_arguments.len())
+                {
+                    substitutions.insert(parameter.id, Type::Error);
+                }
             }
         } else {
             let diagnostic_checkpoint = self.diagnostics.len();
@@ -3320,16 +3450,23 @@ impl<'a> Analyzer<'a> {
                 );
             }
         }
-        for parameter in &signature.type_parameters {
-            if !substitutions.contains_key(&parameter.id) {
-                self.error(
-                    format!(
-                        "cannot infer generic type argument '{}' for '{name}'; provide explicit type arguments",
-                        parameter.name
-                    ),
-                    call_span,
-                );
-                substitutions.insert(parameter.id, Type::Error);
+        let unresolved = signature
+            .type_parameters
+            .iter()
+            .filter(|parameter| !substitutions.contains_key(&parameter.id))
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            let unresolved_names = unresolved.join(", ");
+            self.error_with(
+                DiagnosticCode::GenericInference,
+                format!(
+                    "cannot infer generic argument(s) {unresolved_names} for '{name}' from the provided arguments; add explicit type arguments"
+                ),
+                call_span,
+            );
+            for parameter in &signature.type_parameters {
+                substitutions.entry(parameter.id).or_insert(Type::Error);
             }
         }
         let type_arguments = signature
@@ -3338,7 +3475,12 @@ impl<'a> Analyzer<'a> {
             .map(|parameter| substitutions[&parameter.id].clone())
             .collect::<Vec<_>>();
         if validate_bounds {
-            self.validate_generic_arguments(&signature.type_parameters, &type_arguments, call_span);
+            self.validate_generic_arguments(
+                &signature.type_parameters,
+                &type_arguments,
+                call_span,
+                &required_by,
+            );
         }
         let specialized = substitute_function_type(signature, &substitutions);
         (
@@ -3603,6 +3745,16 @@ impl<'a> Analyzer<'a> {
             };
             implementations.iter().any(|name| name == contract_name)
         });
+        if !conforms
+            && self
+                .invalid_contract_implementations
+                .contains(&(class_name.to_owned(), contract_name.to_owned()))
+        {
+            // The implementation declaration already explains why this value
+            // is not conforming; avoid repeating the same failure as a type
+            // mismatch at every use site.
+            return true;
+        }
         if conforms {
             self.contract_conversions.insert(span, expected.clone());
         }
@@ -3673,6 +3825,39 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .push(Diagnostic::at_source(code, message, self.source, span));
     }
+
+    fn error_with_note(
+        &mut self,
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        span: SourceSpan,
+        note: impl Into<String>,
+    ) {
+        self.diagnostics
+            .push(Diagnostic::at_source(code, message, self.source, span).with_note(note));
+    }
+}
+
+fn generic_declaration(name: &str, parameters: &[GenericTypeParameter]) -> String {
+    if parameters.is_empty() {
+        return name.to_owned();
+    }
+    let parameters = parameters
+        .iter()
+        .map(|parameter| {
+            if parameter.bounds.is_empty() {
+                parameter.name.clone()
+            } else {
+                format!("{}: {}", parameter.name, parameter.bounds.join(" + "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}<{parameters}>")
+}
+
+fn function_signature(signature: &FunctionType) -> String {
+    Type::Function(signature.clone()).to_string()
 }
 
 fn type_substitutions(
@@ -4154,9 +4339,9 @@ fn main() {
         );
         assert!(has_message(
             &result,
-            "does not implement required method 'Named.name'"
+            "is missing method 'name' required by interface 'Named'"
         ));
-        assert!(has_message(&result, "incompatible signature"));
+        assert!(has_message(&result, "does not match interface 'Named'"));
         assert!(has_message(&result, "listed more than once"));
         assert!(has_message(&result, "unknown interface 'Absent'"));
         assert!(has_message(&result, "is not an interface"));
@@ -4259,18 +4444,15 @@ fn main() {
     let value = Required()
 }"#,
         );
-        assert!(has_message(&result, "ambiguous default method 'speak'"));
+        assert!(has_message(&result, "conflicting default method 'speak'"));
         assert!(has_message(
             &result,
-            "does not implement required method 'Required.run'"
+            "is missing method 'run' required by trait 'Required'"
         ));
         assert!(has_message(&result, "unknown interface 'Absent' or trait"));
         assert!(has_message(&result, "is not an interface or trait"));
         assert!(has_message(&result, "listed more than once in implements"));
-        assert!(has_message(
-            &result,
-            "incompatible signature for trait 'Required'"
-        ));
+        assert!(has_message(&result, "does not match trait 'Required'"));
         assert!(has_message(
             &result,
             "trait 'Required' cannot be instantiated"
@@ -4883,7 +5065,7 @@ fn main() {
         let result = analyze_text("class Empty<T> {}\nfn main() { let empty = Empty() }");
         assert!(has_message(
             &result,
-            "cannot infer generic type argument 'T' for 'Empty'; provide explicit type arguments"
+            "cannot infer generic argument(s) T for 'Empty' from the provided arguments"
         ));
     }
 
@@ -4933,7 +5115,7 @@ fn main() {
         );
         assert!(has_message(
             &result,
-            "cannot infer generic type argument 'T' for 'empty'"
+            "cannot infer generic argument(s) T for 'empty' from the provided arguments"
         ));
 
         let duplicate_error = analyze_text(
@@ -5053,35 +5235,92 @@ fn main() {
 
         assert!(has_message(
             &result,
-            "type Int does not satisfy required trait 'Named'"
+            "type Int does not satisfy trait Named"
         ));
         assert!(has_message(
             &result,
-            "type User does not satisfy required trait 'Tagged'"
+            "type User does not satisfy trait Tagged"
         ));
         assert!(has_message(
             &result,
-            "type User does not satisfy required interface 'Drawable'"
+            "type User does not satisfy interface Drawable"
         ));
         assert!(has_message(
             &result,
             "type parameter 'T' has no method 'name'; add a bound that declares it"
         ));
-        assert!(has_message(
-            &result,
-            "type T does not satisfy required trait 'Named'"
-        ));
+        assert!(has_message(&result, "type T does not satisfy trait Named"));
         assert_eq!(
             result
                 .diagnostics
                 .iter()
                 .filter(|diagnostic| diagnostic
                     .message()
-                    .contains("type Int does not satisfy required trait 'Named'"))
+                    .contains("type Int does not satisfy trait Named"))
                 .count(),
             3,
             "the function argument and class/struct generic instances should be checked"
         );
+    }
+
+    #[test]
+    fn v02_diagnostics_keep_specific_codes_locations_and_secondary_context() {
+        let cases = [
+            (
+                "fn identity<T>(value: T) -> T { return value }\nfn main() { let item = identity<Int, String>(1) }",
+                DiagnosticCode::GenericArgument,
+                "'identity' expects 1 generic argument(s), found 2",
+            ),
+            (
+                "fn empty<T>() -> List<T> { return [] }\nfn main() { let values = empty() }",
+                DiagnosticCode::GenericInference,
+                "cannot infer generic argument(s) T for 'empty'",
+            ),
+            (
+                "trait Printable { fn print() }\nfn show<T: Printable>(value: T) {}\nfn main() { show(1) }",
+                DiagnosticCode::GenericConstraint,
+                "type Int does not satisfy trait Printable",
+            ),
+            (
+                "interface Drawable { fn draw(label: String) -> Bool }\nclass Button implements Drawable {}\nfn main() {}",
+                DiagnosticCode::InvalidInterface,
+                "type 'Button' is missing method 'draw' required by interface 'Drawable'",
+            ),
+            (
+                "enum State { Ready Waiting }\nfn main() { let state = State.Ready; match state { Ready => println(1) } }",
+                DiagnosticCode::MatchAnalysis,
+                "non-exhaustive match for type State; missing variant: State.Waiting",
+            ),
+            (
+                "fn bad(value: Int) -> Int { return value? }\nfn main() {}",
+                DiagnosticCode::ResultPropagation,
+                "cannot apply '?' to Int; expected Result<T, E>",
+            ),
+        ];
+
+        for (program, expected_code, expected_message) in cases {
+            let result = analyze_text(program);
+            let diagnostic = result
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code() == expected_code)
+                .unwrap_or_else(|| panic!("missing {expected_code:?}: {:?}", messages(&result)));
+            let rendered = diagnostic.to_string();
+            assert!(rendered.contains(expected_message), "{rendered}");
+            assert!(rendered.contains("semantic.prnc:"), "{rendered}");
+            assert!(
+                rendered.contains('\n') && rendered.contains('^'),
+                "{rendered}"
+            );
+            if expected_code == DiagnosticCode::GenericConstraint {
+                assert!(
+                    rendered.contains("= note: required by fn show<T: Printable>"),
+                    "{rendered}"
+                );
+            }
+            assert!(!rendered.contains("LLVM"), "{rendered}");
+            assert!(!rendered.contains("monomorph"), "{rendered}");
+        }
     }
 
     #[test]
@@ -5255,15 +5494,15 @@ fn main() {}"#,
         );
         assert!(has_message(
             &result,
-            "postfix '?' requires the enclosing function to return Result<T, E>"
+            "the function must return Result<T, E>"
         ));
         assert!(has_message(
             &result,
-            "postfix '?' error type must match the enclosing function exactly"
+            "cannot propagate error type Int; the enclosing function expects String"
         ));
         assert!(has_message(
             &result,
-            "postfix '?' requires Result<T, E>, found Int"
+            "cannot apply '?' to Int; expected Result<T, E>"
         ));
     }
 
@@ -5285,7 +5524,11 @@ fn main() {
         assert!(has_message(&result, "has no variant 'Missing'"));
         assert!(has_message(&result, "expects 1 payload value(s), found 0"));
         assert!(has_message(&result, "expects 0 payload value(s), found 1"));
-        assert!(has_message(&result, "expected Int, found String"));
+        assert!(
+            has_message(&result, "expects Int, found String"),
+            "{:?}",
+            messages(&result)
+        );
         assert!(has_message(
             &result,
             "recursive enum payloads do not have a finite value layout"
@@ -5379,7 +5622,7 @@ fn main() {
         assert!(has_message(&result, "unreachable match arm"));
         assert!(has_message(
             &result,
-            "expected Int, found String (match arm result)"
+            "match arm has type String, but earlier arms have type Int"
         ));
         assert!(has_message(
             &result,
