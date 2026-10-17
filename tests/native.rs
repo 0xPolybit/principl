@@ -1311,3 +1311,176 @@ fn main() {
     assert_eq!(run.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&run.stdout).contains("FFI Int32 argument out of range"));
 }
+
+#[cfg(windows)]
+#[test]
+fn nested_generics_enums_results_and_contract_values_interoperate() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"interface Drawable { fn draw() -> String }
+interface Entity { fn id() -> Int }
+trait Printable { fn label() -> String }
+
+class User implements Drawable, Entity, Printable {
+    value: String
+    key: Int
+
+    init(value: String, key: Int) {
+        self.value = value
+        self.key = key
+    }
+
+    fn draw() -> String { return self.value }
+    fn id() -> Int { return self.key }
+    fn label() -> String { return self.value }
+}
+
+struct Point implements Printable {
+    value: String
+    fn label() -> String { return self.value }
+}
+
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+
+enum IOError { Failed(String) }
+enum Maybe<T> { Some(T) None }
+
+class Box<T> {
+    value: T
+    init(value: T) { self.value = value }
+    fn get() -> T { return self.value }
+}
+
+class Repository<T: Entity> {
+    value: T
+    init(value: T) { self.value = value }
+    fn get() -> T { return self.value }
+}
+
+fn identity<T>(value: T) -> T { return value }
+fn copyPair<A, B>(pair: Pair<A, B>) -> Pair<A, B> { return pair }
+
+fn process<T: Printable>(value: T) -> Result<Int, String> {
+    if value.label() == "Ada" {
+        return Result<Int, String>.Ok(1)
+    }
+    return Result<Int, String>.Err(value.label())
+}
+
+fn firstOrError(value: Result<List<Int>, String>) -> Result<Int, String> {
+    let items = value?
+    return Result<Int, String>.Ok(items[0])
+}
+
+fn echo<T, E>(value: Result<T, E>) -> Result<T, E> {
+    let item = value?
+    return Result<T, E>.Ok(item)
+}
+
+fn labelResult(value: Result<Printable, String>) -> Result<String, String> {
+    let item = value?
+    return Result<String, String>.Ok(item.label())
+}
+
+fn render(value: Result<Drawable, String>) -> Result<String, String> {
+    let item = value?
+    return Result<String, String>.Ok(item.draw())
+}
+
+fn showIntResult(value: Result<Int, String>) {
+    match value {
+        Ok(item) => println(item)
+        Err(message) => println(message)
+    }
+}
+
+fn main() {
+    let user = User("Ada", 7)
+    let first = identity<User>(user)
+    let selected = identity<User>(first)
+
+    let drawables: List<Drawable> = [selected]
+    drawables.add(identity<Drawable>(drawables[0]))
+    println(drawables[1].draw())
+
+    let repository = Repository<User>(user)
+    println(repository.get().id())
+
+    let numbers: List<Result<Int, String>> = [
+        Result<Int, String>.Ok(42),
+        Result<Int, String>.Err("bad")
+    ]
+    showIntResult(numbers[0])
+    showIntResult(firstOrError(Result<List<Int>, String>.Ok([5, 8])))
+    showIntResult(firstOrError(Result<List<Int>, String>.Err("empty")))
+
+    let nested = Box<Result<User, IOError>>(Result<User, IOError>.Ok(user))
+    match nested.get() {
+        Ok(item) => println(item.label())
+        Err(_) => println("io error")
+    }
+
+    let point = Point { value: "point" }
+    let pair = copyPair(Pair<Result<User, IOError>, Point>(nested.get(), point))
+    match pair.first {
+        Ok(item) => println(item.label())
+        Err(_) => println("pair error")
+    }
+    println(pair.second.label())
+
+    let maybes: List<Maybe<User>> = [Maybe<User>.Some(user)]
+    match maybes[0] {
+        Some(item) => println(item.label())
+        None => println("none")
+    }
+
+    let printables: List<Printable> = [point]
+    println(printables[0].label())
+    let traitResults: List<Result<Printable, String>> = [
+        Result<Printable, String>.Ok(point)
+    ]
+    match labelResult(traitResults[0]) {
+        Ok(message) => println(message)
+        Err(message) => println(message)
+    }
+
+    let interfaceResults: List<Result<Drawable, String>> = [
+        Result<Drawable, String>.Ok(drawables[0])
+    ]
+    match render(interfaceResults[0]) {
+        Ok(message) => println(message)
+        Err(message) => println(message)
+    }
+    match render(Result<Drawable, String>.Err("no drawable")) {
+        Ok(message) => println(message)
+        Err(message) => println(message)
+    }
+
+    let retained: List<Result<Drawable, String>> = []
+    var index = 0
+    while index < 256 {
+        let temporary = User("retained", index)
+        retained.add(Result<Drawable, String>.Ok(temporary))
+        index += 1
+    }
+    match retained[255] {
+        Ok(item) => println(item.draw())
+        Err(message) => println(message)
+    }
+
+    showIntResult(process(user))
+    showIntResult(echo<Int, String>(Result<Int, String>.Ok(99)))
+}
+"#;
+
+    let expected = "Ada\n7\n42\n5\nempty\nAda\nAda\npoint\nAda\npoint\npoint\nAda\nno drawable\nretained\n1\n99\n";
+    for extension in ["prnc", "princi"] {
+        let stdout = dir.build_and_run(&format!("cross-feature.{extension}"), source);
+        assert_eq!(stdout, expected);
+    }
+}

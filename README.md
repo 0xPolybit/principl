@@ -505,8 +505,8 @@ work described below. Bounded generics for functions, classes, and structs are
 implemented. The v0.2 work also supports algebraic enum declarations,
 generic enum types, variant construction, and by-value movement through local
 variables, function parameters, and returns. Enum pattern matching and
-exhaustiveness checking are implemented as described below; `?` propagation
-remains planned.
+exhaustiveness checking, the prelude `Result<T, E>`, and postfix `?`
+propagation are implemented as described below.
 
 Enums use named variants with optional positional payloads:
 
@@ -777,6 +777,46 @@ introduced. Interface bounds accept conforming classes, while trait bounds
 accept conforming classes and structs. Failed checks produce a short diagnostic
 such as `type Int does not satisfy required trait 'Named'`. Generic traits,
 associated types, and conditional or negative bounds are unsupported.
+
+### Cross-feature compatibility (v0.2 development)
+
+Generic arguments compose recursively across the currently supported types.
+Examples include `List<Result<Int, String>>`,
+`Result<List<Int>, String>`, `Box<Result<User, IOError>>`, and
+`Pair<Result<User, IOError>, Point>`. Generic classes and structs receive one
+deterministic native specialization for each concrete type argument set used;
+repeated uses reuse that specialization. Generic functions follow the same
+monomorphized model.
+
+Enums, including `Maybe<T>` and the prelude `Result<T, E>`, use the ordinary
+tagged value representation regardless of their generic payloads. Payloads can
+contain primitives, structs, class references, Strings, Lists, other enums,
+and interface or trait values. `List<T>` stores a value copy of each element;
+inline structs/enums are copied, while pointers embedded in them and the
+data/vtable pair of a contract value are copied as part of the value. For
+example, `List<Drawable>` and `List<Result<Drawable, String>>` preserve the
+concrete dispatch table through indexing, function calls, and pattern matching.
+
+Interface and trait values retain their dispatch table across locals,
+parameters, return values, fields, lists, and enum payloads where the semantic
+type is supported. A struct converted to a trait value is boxed as a copy, as
+described above. Generic bounds are checked at specialization time; bounded
+generic calls are monomorphized and do not erase the concrete type.
+
+The current runtime uses process-lifetime managed allocation. It does not
+collect individual unreachable values or traverse references in Lists,
+structs, or enum payloads. This is safe for the supported v0.2 value model
+because managed allocations are not reclaimed while Princi code is running;
+all registered allocations are released together when the program exits.
+Consequently, nested managed references and interface/trait dispatch data stay
+valid through copies and list growth. Long-running programs can retain
+unreachable allocations until shutdown; a tracing collector is still future
+work.
+
+Postfix `?` works with generic `Result<T, E>` values and nested payload types.
+It returns the original error payload without conversion, so the enclosing
+function's error type must match exactly. It does not introduce a separate
+representation for `Result` or bypass ordinary enum matching and typing.
 
 ```princi
 class Box<T> {
