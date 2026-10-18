@@ -1,11 +1,94 @@
-# PrinciPL
+<p align="center">
+  <img src="frontend/app/icon.svg" alt="PrinciPL logo" width="96" height="96" />
+</p>
 
-PrinciPL is a statically typed programming language compiled to native Windows
-x86-64 executables. **Princi 0.2.0** is implemented in Rust and uses LLVM IR,
-Clang, and MinGW-w64 for native code generation and linking. The language
-combines concise procedural syntax with generic types, classes, structs,
-interfaces, traits, algebraic enums, pattern matching, and `Result`-based error
-propagation.
+<h1 align="center">PrinciPL</h1>
+
+<p align="center">
+  <strong>Structure when you need it. Simplicity when you don't.</strong><br />
+  A statically typed programming language compiled to native Windows x86-64 executables.
+</p>
+
+<p align="center">
+  <a href="https://github.com/0xPolybit/principl/actions/workflows/ci.yml"><img alt="Compiler CI" src="https://github.com/0xPolybit/principl/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
+  <a href="docs/v0.2-scope.md"><img alt="Compiler version 0.2.0" src="https://img.shields.io/badge/compiler-v0.2.0-557a63" /></a>
+  <a href="docs/v0.2-scope.md"><img alt="Target: Windows x86-64" src="https://img.shields.io/badge/target-Windows%20x86--64-557a63" /></a>
+  <a href="docs/v0.2-scope.md"><img alt="Source extensions: .prnc and .princi" src="https://img.shields.io/badge/source-.prnc%20%2F%20.princi-557a63" /></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/0xPolybit/principl/releases">Published Windows releases</a> ·
+  <a href="docs/v0.2-scope.md">Language scope</a> ·
+  <a href="frontend/">Website source</a>
+</p>
+
+PrinciPL 0.2.0 is implemented in Rust and uses LLVM IR, Clang, and MinGW-w64
+to build native Windows x86-64 programs. It combines concise procedural syntax
+with generic types, classes, structs, interfaces, traits, algebraic enums,
+pattern matching, and `Result`-based error propagation.
+
+> The compiler and language currently target Windows x86-64 only. The
+> `.prnc` and `.princi` extensions are interchangeable aliases for the same
+> source language.
+
+## At a glance
+
+- **Static types:** compile-time checks for values, calls, generic bounds, and
+  enum matches.
+- **Native builds:** compile a source file to a Windows `.exe` with one command.
+- **Structured code:** functions, classes, value-oriented structs, interfaces,
+  traits, and generic types.
+- **Explicit outcomes:** algebraic enums, exhaustive `match`, `Result<T, E>`,
+  and `?` error propagation.
+- **Automatic storage lifetime:** managed allocations are retained until the
+  process exits; v0.2 does not include a tracing garbage collector.
+
+## Quick start
+
+Install a published Windows build from the [GitHub Releases page](https://github.com/0xPolybit/principl/releases),
+or install the compiler from this source checkout after installing stable Rust:
+
+> Release downloads correspond to the tag shown on the selected release. This
+> README documents the v0.2.0 source in this repository; check the release tag
+> to confirm the version of a packaged compiler.
+
+```powershell
+git clone https://github.com/0xPolybit/principl.git
+cd principl
+cargo install --path .
+```
+
+To compile Princi programs, also install LLVM/Clang and x86-64 MinGW-w64 as
+described in [Windows setup](#windows-setup). Save this program as `hello.prnc`
+or `hello.princi`:
+
+```princi
+fn main() {
+    println("Hello from PrinciPL!")
+}
+```
+
+Build and launch it in PowerShell:
+
+```powershell
+princi build hello.prnc
+.\hello.exe
+```
+
+Use `princi build hello.princi` for the alias extension, or pass `-o app.exe`
+to choose the output path. The rest of this README documents the v0.2 feature
+boundary, toolchain, architecture, and tests.
+
+## Contents
+
+- [v0.2 feature highlights](#v02-feature-highlights)
+- [Windows setup](#windows-setup)
+- [Install and build the compiler](#install-and-build-the-compiler)
+- [Examples](#examples)
+- [Compiler architecture](#compiler-architecture)
+- [Tests and validation](#tests-and-validation)
+- [Current language boundaries](#current-language-boundaries)
 
 ## v0.2 compiler contract
 
@@ -274,7 +357,19 @@ The compiler finds `clang` and `gcc` on `PATH` by default. Set
 incompatible tools produce diagnostics. The prebuilt compiler installer does
 not bundle LLVM or MinGW-w64.
 
-## Build and install the compiler
+## Install and build the compiler
+
+### Install a published Windows build
+
+Download `Princi-Setup-<version>-x64.exe` or the portable ZIP from the
+[GitHub Releases page](https://github.com/0xPolybit/principl/releases). The
+installer can add `princi` to the current user's `PATH` and add a **Build with
+Princi** Explorer action for both source extensions. Open a new terminal after
+installing. Release artifacts use the version shown on that release page.
+Neither package includes LLVM/Clang or MinGW-w64; install those separately as
+described in [Windows setup](#windows-setup).
+
+### Build from source
 
 ```powershell
 git clone https://github.com/0xPolybit/principl.git
@@ -292,8 +387,7 @@ cargo install --path .
 ```
 
 If `princi` is not found, add `%USERPROFILE%\.cargo\bin` to `PATH` and open a
-new terminal. A Windows installer and portable archive are published on the
-[GitHub Releases page](https://github.com/0xPolybit/principl/releases).
+new terminal.
 
 ## Examples
 
