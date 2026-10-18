@@ -76,7 +76,7 @@ A struct field can itself contain a class reference or list handle. Copying that
 
 ## Trait implementations
 
-A struct can implement traits when it provides their required methods. Converting a struct to a trait value boxes a copy in process-lifetime managed storage; the original struct remains a value. Structs do not convert to interface values.
+A struct can implement traits when it provides their required methods. Struct methods are available through trait implementations and have read-only `self` in v0.2. Converting a struct to a trait value boxes a copy in process-lifetime managed storage; the original struct remains a value. Structs do not convert to interface values.
 
 ## Current v0.2 limitations
 

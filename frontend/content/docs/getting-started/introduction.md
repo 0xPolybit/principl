@@ -28,6 +28,24 @@ The build requires Windows x86-64 native tooling. Start with [Getting started](/
 
 The compiler supports `Int`, `Float`, `Bool`, `String`, and `Void`; local `let`/`var`; functions, recursion, control flow, strings, generic functions/classes/structs/enums, generic bounds, interfaces with dynamic dispatch, traits with defaults, enum matching with exhaustiveness checks, `Result<T, E>` and `?`, lists, built-in imports, and a restricted primitive C ABI.
 
+## What's new in v0.2
+
+v0.2 adds compile-time generics, behavioral contracts, algebraic data, and
+explicit error propagation while preserving the v0.1 build workflow and
+language features:
+
+| Addition | What it provides |
+| --- | --- |
+| [Generics and bounds](/docs/language/generics) | Generic functions, classes, structs, and enums; argument inference; monomorphization; trait and interface constraints. |
+| [Interfaces](/docs/language/interfaces) | Required method contracts and runtime dispatch for class values. |
+| [Traits](/docs/language/traits) | Required methods, default implementations, trait values, and class/struct implementations. |
+| [Enums and matching](/docs/language/enums) | Generic payload enums plus scoped destructuring and exhaustiveness-checked [`match`](/docs/language/match). |
+| [`Result<T, E>` and `?`](/docs/language/result) | A prelude enum and postfix propagation for functions with an exactly matching error type. |
+
+These additions do not change the target: Princi still builds Windows x86-64
+executables only. The [limitations reference](/docs/reference/limitations)
+lists unsupported combinations and features.
+
 The [v0.2 limitations](/docs/reference/limitations) page describes the current boundary. The repository's [canonical v0.2 scope](https://github.com/0xPolybit/principl/blob/main/docs/v0.2-scope.md) records precise semantics and compatibility expectations.
 
 ## Continue

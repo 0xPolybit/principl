@@ -56,6 +56,12 @@ fn main() {
 
 Unary `+` and `-` accept `Int` or `Float` values.
 
+The postfix `?` operator unwraps a `Result<T, E>` on success and returns its
+error from the enclosing compatible `Result` function. It binds more tightly
+than binary operators, so `load()? + 1` adds one to the success value. Its
+error type must exactly match the enclosing function's error type; see
+[Result and error propagation](/docs/language/result).
+
 ## Assignment operators
 
 Assignments are statements. `=` replaces the target value; `+=`, `-=`, and `*=` update mutable targets. `+=` follows the same type rules as `+`, so it also concatenates strings. No `/=` or `%=` operator is defined.
@@ -74,7 +80,7 @@ Targets must be mutable. Collection element mutation follows the rules on [Lists
 
 ## Precedence
 
-From lowest to highest: `..`, `||`, `&&`, equality, comparisons, addition/subtraction, multiplication/division/remainder, unary operators, and calls/member access/indexing. Binary operators associate left-to-right. Ranges cannot be chained without parentheses.
+From lowest to highest: `..`, `||`, `&&`, equality, comparisons, addition/subtraction, multiplication/division/remainder, unary operators, and postfix operations such as calls, member access, indexing, and `?`. Binary operators associate left-to-right. Ranges cannot be chained without parentheses.
 
 ~~~princi
 fn main() {

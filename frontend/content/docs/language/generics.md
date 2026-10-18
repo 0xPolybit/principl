@@ -19,6 +19,13 @@ fn main() {
 
 Inference uses call arguments only; it does not use the expected result type. If a type parameter cannot be resolved from arguments, provide it explicitly. A generic function compiles only for concrete specializations used by the program. Repeated equivalent calls share one specialization; recursive calls with the same types are supported. Expanding recursion is diagnosed rather than allowed to specialize indefinitely.
 
+The backend caches specializations by function and concrete type arguments, so
+`identity<Int>(1)` and `identity<Int>(2)` share generated code while
+`identity<String>("one")` uses a separate specialization. Internal names are
+deterministic compiler details. Each build is limited to 512 distinct generic
+function specializations and 512 generic type layouts; exceeding either limit
+produces a diagnostic.
+
 ## Generic classes and structs
 
 Generic type arguments are explicit at type references and construction sites. Constructor inference is available only when its parameter types determine all type arguments:
@@ -53,23 +60,58 @@ The same type syntax nests: `Box<List<Int>>`, `List<Box<String>>`, and `Pair<Box
 
 ## Bounds
 
-Generic functions, classes, and structs can require declared traits or interfaces. Use `+` for multiple bounds:
+Generic functions, classes, and structs can require declared traits or interfaces. Use `+` for multiple bounds. Every bound must be satisfied by the same concrete type argument:
 
 ~~~princi
 trait Named {
     fn name() -> String
 }
 
-fn show<T: Named>(value: T) {
-    println(value.name())
+interface Drawable {
+    fn draw() -> String
+}
+
+fn describe<T: Named + Drawable>(value: T) -> String {
+    return value.name() + ":" + value.draw()
+}
+
+class User implements Named, Drawable {
+    value: String
+
+    init(value: String) {
+        self.value = value
+    }
+
+    fn name() -> String { return self.value }
+    fn draw() -> String { return "portrait" }
+}
+
+fn main() {
+    println(describe(User("Ada")))
 }
 ~~~
 
 At specialization, each concrete argument must implement every required contract. A generic parameter can call only methods guaranteed by its bounds. Interface bounds require a conforming class; trait bounds accept conforming classes or structs.
 
+Bounds can also be declared on generic class and struct types:
+
+~~~princi
+class Repository<T: Named> {
+    value: T
+
+    init(value: T) {
+        self.value = value
+    }
+}
+
+struct NamedValue<T: Named> {
+    value: T
+}
+~~~
+
 ## Current v0.2 limitations
 
-Methods cannot declare their own type parameters; methods on a generic class can use that class's parameters. Traits and interfaces cannot be generic and bounds cannot take type arguments. Generic function inference does not use a result context, and enum variant construction requires explicit generic arguments. There is no runtime generic reflection, specialization syntax, associated type, higher-kinded type, or variadic generic.
+Methods cannot declare their own type parameters; methods on a generic class can use that class's parameters. Traits and interfaces cannot be generic and bounds cannot take type arguments. Generic function inference does not use a result context, and enum variant construction requires explicit generic arguments. Generic code is monomorphized rather than runtime-erased. There is no runtime generic reflection, user-written specialization syntax, associated type, higher-kinded type, or variadic generic.
 
 ## Related topics
 

@@ -33,7 +33,7 @@ The `Named` contract requires `name`; `describe` is inherited as a default imple
 
 If two implemented traits provide the same default method and the concrete type does not define that method itself, the compiler reports an ambiguity. Define the method on the concrete type to choose behavior explicitly. There is no implicit trait precedence.
 
-Trait-typed values reuse the runtime dispatch representation used by interface values. Converting a struct to a trait value boxes a copy in managed process-lifetime storage; class values retain their normal reference semantics.
+Trait-typed values reuse the runtime dispatch representation used by interface values. They can be used in locals, function parameters and returns, fields, and lists where the concrete value satisfies the trait. Converting a struct to a trait value boxes a copy in managed process-lifetime storage; class values retain their normal reference semantics. Structs do not convert to interface values.
 
 ## Current v0.2 limitations
 
