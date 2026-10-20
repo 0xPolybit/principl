@@ -89,6 +89,7 @@ boundary, toolchain, architecture, and tests.
 - [Compiler architecture](#compiler-architecture)
 - [Tests and validation](#tests-and-validation)
 - [Current language boundaries](#current-language-boundaries)
+- [Roadmap beyond v0.2](#roadmap-beyond-v02)
 
 ## v0.2 compiler contract
 
@@ -451,11 +452,11 @@ internal failures return `E9001` instead of a Rust panic trace.
 
 ## Roadmap beyond v0.2
 
-The v0.2 boundary is defined in [`docs/v0.2-scope.md`](docs/v0.2-scope.md).
-Potential future work may include broader platform support, richer memory
-management, additional generic abstractions, and module/package facilities.
-These are directions only; none should be described as implemented or promised
-until separately designed, built, and tested.
+PrinciPL v0.2.0 remains the current release. The planned v0.3 scope focuses on
+async programming and structured concurrency, conservative OS-thread
+synchronization, and project/module/package tooling. It preserves the current
+Windows x86-64 target and the standalone `.prnc` / `.princi` build workflow.
+These features are not available in v0.2. See the [canonical v0.3 scope](docs/v0.3-scope.md) for boundaries, compatibility expectations, and the tentative v0.4/v0.5 memory-system research areas.
 
 ## Website development
 

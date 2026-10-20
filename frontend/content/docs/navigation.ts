@@ -100,7 +100,7 @@ export const docsSections: DocsSection[] = [
   {
     title: "Project",
     pages: [
-      page("Project", "project/roadmap", "Roadmap", "Areas intentionally deferred beyond v0.2."),
+      page("Project", "project/roadmap", "Roadmap", "Planned v0.3 concurrency and project tooling; current v0.2 boundaries and later memory research."),
       page("Project", "project/contributing", "Contributing", "Build, test, and change the compiler and website."),
     ],
   },
