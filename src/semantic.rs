@@ -1699,6 +1699,13 @@ impl<'a> Analyzer<'a> {
                 Declaration::Function(function)
                     if self.accepted_functions.contains(&function.span) =>
                 {
+                    if function.is_async {
+                        self.error_with(
+                            DiagnosticCode::UnsupportedFeature,
+                            "async functions are recognized by the frontend but async execution is not implemented yet",
+                            function.name.span,
+                        );
+                    }
                     let signature = self.function_signatures[&function.span].clone();
                     self.check_routine(&function.parameters, &function.body, &signature, None);
                 }
@@ -1933,6 +1940,14 @@ impl<'a> Analyzer<'a> {
                 self.check_expression(expression, None);
             }
             StatementKind::Block(block) => self.check_block(block, true),
+            StatementKind::TaskScope(block) => {
+                self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "task scopes are recognized by the frontend but async execution is not implemented yet",
+                    statement.span,
+                );
+                self.check_block(block, true);
+            }
         }
     }
 
@@ -2686,6 +2701,17 @@ impl<'a> Analyzer<'a> {
             ExpressionKind::Unary { operator, operand } => {
                 let operand_type = self.check_expression(operand, None);
                 self.unary_result(*operator, &operand_type, expression.span)
+            }
+            ExpressionKind::Await(operand)
+            | ExpressionKind::Spawn(operand)
+            | ExpressionKind::ThreadSpawn(operand) => {
+                self.check_expression(operand, None);
+                self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "async and thread expressions are recognized by the frontend but execution is not implemented yet",
+                    expression.span,
+                );
+                Type::Error
             }
             ExpressionKind::Try(operand) => self.check_try_expression(operand, expression.span),
             ExpressionKind::Binary {
@@ -5804,6 +5830,30 @@ fn main() {
         assert!(has_message(
             &result,
             "external C functions must be called directly"
+        ));
+    }
+
+    #[test]
+    fn async_frontend_constructs_fail_cleanly_before_codegen() {
+        let result = analyze_text(
+            "async fn work() -> Int { return 1 }\nasync fn main() {\n scope {\n  let task = spawn work()\n  let value = await task\n }\n}",
+        );
+
+        assert!(result.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::UnsupportedFeature
+                && diagnostic.location().is_some()
+        }));
+        assert!(has_message(
+            &result,
+            "async functions are recognized by the frontend but async execution is not implemented yet"
+        ));
+        assert!(has_message(
+            &result,
+            "task scopes are recognized by the frontend but async execution is not implemented yet"
+        ));
+        assert!(has_message(
+            &result,
+            "async and thread expressions are recognized by the frontend but execution is not implemented yet"
         ));
     }
 }

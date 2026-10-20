@@ -2759,6 +2759,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.emit_block_contents(block)?;
                 self.pop_scope();
             }
+            StatementKind::TaskScope(_) => {
+                return Err(self.error_with(
+                    DiagnosticCode::UnsupportedFeature,
+                    "task scopes cannot be compiled until async execution is implemented",
+                    statement.span,
+                ));
+            }
         }
         Ok(())
     }
@@ -2905,6 +2912,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     )),
                 }
             }
+            ExpressionKind::Await(_)
+            | ExpressionKind::Spawn(_)
+            | ExpressionKind::ThreadSpawn(_) => Err(self.error_with(
+                DiagnosticCode::UnsupportedFeature,
+                "async and thread expressions cannot be compiled until their runtime is implemented",
+                expression.span,
+            )),
             ExpressionKind::Try(operand) => self.emit_try_expression(operand, expression),
             ExpressionKind::Binary {
                 left,

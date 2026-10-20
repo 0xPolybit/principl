@@ -23,6 +23,11 @@ pub enum TokenKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
     Fn,
+    Async,
+    Await,
+    Spawn,
+    Scope,
+    Thread,
     Return,
     Let,
     Var,
@@ -132,6 +137,11 @@ impl<'a> Lexer<'a> {
         let text = &self.source.text()[start..self.offset];
         let kind = match text {
             "fn" => TokenKind::Keyword(Keyword::Fn),
+            "async" => TokenKind::Keyword(Keyword::Async),
+            "await" => TokenKind::Keyword(Keyword::Await),
+            "spawn" => TokenKind::Keyword(Keyword::Spawn),
+            "scope" => TokenKind::Keyword(Keyword::Scope),
+            "thread" => TokenKind::Keyword(Keyword::Thread),
             "return" => TokenKind::Keyword(Keyword::Return),
             "let" => TokenKind::Keyword(Keyword::Let),
             "var" => TokenKind::Keyword(Keyword::Var),
@@ -443,13 +453,18 @@ mod tests {
     #[test]
     fn recognizes_keywords_and_keeps_other_words_as_identifiers() {
         let tokens = kinds(
-            "fn return let var if else while for match in class struct interface trait implements init self import extern true false enum function",
+            "fn async await spawn scope thread return let var if else while for match in class struct interface trait implements init self import extern true false enum function",
         );
 
         assert_eq!(
             tokens,
             vec![
                 TokenKind::Keyword(Keyword::Fn),
+                TokenKind::Keyword(Keyword::Async),
+                TokenKind::Keyword(Keyword::Await),
+                TokenKind::Keyword(Keyword::Spawn),
+                TokenKind::Keyword(Keyword::Scope),
+                TokenKind::Keyword(Keyword::Thread),
                 TokenKind::Keyword(Keyword::Return),
                 TokenKind::Keyword(Keyword::Let),
                 TokenKind::Keyword(Keyword::Var),

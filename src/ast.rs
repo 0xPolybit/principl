@@ -76,6 +76,7 @@ pub struct ExternalFunctionDeclaration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDeclaration {
+    pub is_async: bool,
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameterDeclaration>,
     pub parameters: Vec<Parameter>,
@@ -182,6 +183,7 @@ pub enum StatementKind {
     Return(Option<Expression>),
     Expression(Expression),
     Block(Block),
+    TaskScope(Block),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +303,9 @@ pub enum ExpressionKind {
         operator: UnaryOperator,
         operand: Box<Expression>,
     },
+    Await(Box<Expression>),
+    Spawn(Box<Expression>),
+    ThreadSpawn(Box<Expression>),
     Try(Box<Expression>),
     Binary {
         left: Box<Expression>,

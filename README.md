@@ -458,6 +458,37 @@ synchronization, and project/module/package tooling. It preserves the current
 Windows x86-64 target and the standalone `.prnc` / `.princi` build workflow.
 These features are not available in v0.2. See the [canonical v0.3 scope](docs/v0.3-scope.md) for boundaries, compatibility expectations, and the tentative v0.4/v0.5 memory-system research areas.
 
+### v0.3 async syntax foundation
+
+The frontend now recognizes the planned async/concurrency forms:
+
+```princi
+async fn fetch() -> String {
+    return "ready"
+}
+
+async fn main() {
+    let value = await fetch()
+
+    scope {
+        let first = spawn fetch()
+        println(await first)
+    }
+}
+```
+
+`async fn` is currently recognized for top-level functions. `await` is a prefix
+expression at unary precedence: it applies to the next call/member/index
+expression, before surrounding binary operators. It is accepted only inside
+an `async fn`. `scope { ... }` is parsed as a task-scope statement. The
+reserved OS-thread form is `thread spawn worker(args)`.
+
+This is parser/AST groundwork only. Async functions, `await`, `spawn`, task
+scopes, and thread spawning do not have runtime or LLVM support yet; attempting
+to build programs that use them produces an unsupported-feature diagnostic.
+The current v0.2 release remains synchronous. `.prnc` and `.princi` accept the
+same syntax and produce the same AST.
+
 ## Website development
 
 The independent Next.js website lives in `/frontend`:

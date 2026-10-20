@@ -318,6 +318,37 @@ fn ffi_rejects_managed_values_before_native_linking() {
 }
 
 #[test]
+fn async_syntax_is_identical_but_not_compiled_for_both_extensions_yet() {
+    let dir = TestDir::new();
+    let source_text = "async fn work() -> Int { return 1 }\nasync fn main() { scope { let task = spawn work()\n let value = await task } }";
+
+    for name in ["async.prnc", "async.princi"] {
+        let source = dir.source(name);
+        fs::write(&source, source_text).expect("async source should be written");
+        let output_path = source.with_extension("exe");
+        let result = dir
+            .compiler()
+            .arg("build")
+            .arg(&source)
+            .output()
+            .expect("CLI process should start");
+
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("error[E0301]"), "{stderr}");
+        assert!(
+            stderr.contains("async execution is not implemented yet"),
+            "{stderr}"
+        );
+        assert!(
+            !output_path.exists(),
+            "unsupported async source must not produce {}",
+            output_path.display()
+        );
+    }
+}
+
+#[test]
 fn common_user_errors_have_stable_codes_and_no_internal_trace() {
     let dir = TestDir::new();
     let cases = [

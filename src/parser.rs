@@ -31,6 +31,7 @@ pub fn parse(source: &SourceFile, mut tokens: Vec<Token>) -> ParseResult {
         eof,
         cursor: 0,
         diagnostics: Vec::new(),
+        in_async_function: false,
     }
     .parse_program()
 }
@@ -41,6 +42,7 @@ struct Parser<'a> {
     eof: Token,
     cursor: usize,
     diagnostics: Vec<Diagnostic>,
+    in_async_function: bool,
 }
 
 impl Parser<'_> {
@@ -73,7 +75,12 @@ impl Parser<'_> {
 
     fn parse_declaration(&mut self) -> Result<Declaration, Diagnostic> {
         match self.current().kind {
-            TokenKind::Keyword(Keyword::Fn) => self.parse_function().map(Declaration::Function),
+            TokenKind::Keyword(Keyword::Fn) => {
+                self.parse_function(false).map(Declaration::Function)
+            }
+            TokenKind::Keyword(Keyword::Async) => {
+                self.parse_async_function().map(Declaration::Function)
+            }
             TokenKind::Keyword(Keyword::Class) => self
                 .parse_type_declaration(TypeDeclarationKind::Class)
                 .map(Declaration::Class),
@@ -239,8 +246,22 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_function(&mut self) -> Result<FunctionDeclaration, Diagnostic> {
+    fn parse_async_function(&mut self) -> Result<FunctionDeclaration, Diagnostic> {
         let start = self.advance().location.span.start;
+        self.expect_keyword(Keyword::Fn, "expected 'fn' after 'async'")?;
+        self.parse_function_after_fn(start, true)
+    }
+
+    fn parse_function(&mut self, is_async: bool) -> Result<FunctionDeclaration, Diagnostic> {
+        let start = self.advance().location.span.start;
+        self.parse_function_after_fn(start, is_async)
+    }
+
+    fn parse_function_after_fn(
+        &mut self,
+        start: usize,
+        is_async: bool,
+    ) -> Result<FunctionDeclaration, Diagnostic> {
         let name = self.expect_identifier("expected function name")?;
         let type_parameters = self.parse_type_parameters()?;
         let parameters = self.parse_parameters()?;
@@ -249,10 +270,14 @@ impl Parser<'_> {
         } else {
             None
         };
-        let body = self.parse_block()?;
+        let previous_async_context = std::mem::replace(&mut self.in_async_function, is_async);
+        let body_result = self.parse_block();
+        self.in_async_function = previous_async_context;
+        let body = body_result?;
         let span = SourceSpan::new(start, body.span.end);
 
         Ok(FunctionDeclaration {
+            is_async,
             name,
             type_parameters,
             parameters,
@@ -554,7 +579,7 @@ impl Parser<'_> {
 
     fn parse_class_member(&mut self) -> Result<ClassMember, Diagnostic> {
         match self.current().kind {
-            TokenKind::Keyword(Keyword::Fn) => self.parse_function().map(ClassMember::Method),
+            TokenKind::Keyword(Keyword::Fn) => self.parse_function(false).map(ClassMember::Method),
             TokenKind::Keyword(Keyword::Init) => {
                 self.parse_initializer().map(ClassMember::Initializer)
             }
@@ -640,6 +665,7 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::While) => self.parse_while_statement(),
             TokenKind::Keyword(Keyword::For) => self.parse_for_statement(),
             TokenKind::Keyword(Keyword::Return) => self.parse_return_statement(),
+            TokenKind::Keyword(Keyword::Scope) => self.parse_task_scope_statement(),
             TokenKind::Punctuation(Punctuation::LeftBrace) => {
                 let block = self.parse_block()?;
                 self.finish_statement()?;
@@ -817,6 +843,16 @@ impl Parser<'_> {
         })
     }
 
+    fn parse_task_scope_statement(&mut self) -> Result<Statement, Diagnostic> {
+        let start = self.advance().location.span.start;
+        let body = self.parse_block()?;
+        self.finish_statement()?;
+        Ok(Statement {
+            span: SourceSpan::new(start, body.span.end),
+            kind: StatementKind::TaskScope(body),
+        })
+    }
+
     fn parse_expression(&mut self) -> Result<Expression, Diagnostic> {
         self.parse_expression_bp(RANGE_PRECEDENCE, true)
     }
@@ -916,6 +952,41 @@ impl Parser<'_> {
         &mut self,
         allow_construction: bool,
     ) -> Result<Expression, Diagnostic> {
+        let prefix_keyword = self.current().kind.clone();
+        if matches!(prefix_keyword, TokenKind::Keyword(Keyword::Await)) {
+            let keyword = self.advance();
+            if !self.in_async_function {
+                return Err(Diagnostic::at_source(
+                    DiagnosticCode::Syntax,
+                    "'await' is only allowed inside an async function",
+                    self.source,
+                    keyword.location.span,
+                ));
+            }
+            let operand = self.parse_expression_bp(PREFIX_PRECEDENCE, allow_construction)?;
+            return Ok(Expression {
+                span: SourceSpan::new(keyword.location.span.start, operand.span.end),
+                kind: ExpressionKind::Await(Box::new(operand)),
+            });
+        }
+        if matches!(prefix_keyword, TokenKind::Keyword(Keyword::Spawn)) {
+            let keyword = self.advance();
+            let operand = self.parse_expression_bp(PREFIX_PRECEDENCE, allow_construction)?;
+            return Ok(Expression {
+                span: SourceSpan::new(keyword.location.span.start, operand.span.end),
+                kind: ExpressionKind::Spawn(Box::new(operand)),
+            });
+        }
+        if matches!(prefix_keyword, TokenKind::Keyword(Keyword::Thread)) {
+            let keyword = self.advance();
+            self.expect_keyword(Keyword::Spawn, "expected 'spawn' after 'thread'")?;
+            let operand = self.parse_expression_bp(PREFIX_PRECEDENCE, allow_construction)?;
+            return Ok(Expression {
+                span: SourceSpan::new(keyword.location.span.start, operand.span.end),
+                kind: ExpressionKind::ThreadSpawn(Box::new(operand)),
+            });
+        }
+
         let operator = match self.current().kind {
             TokenKind::Operator(Operator::Plus) => Some(UnaryOperator::Positive),
             TokenKind::Operator(Operator::Minus) => Some(UnaryOperator::Negative),
@@ -1478,6 +1549,7 @@ impl Parser<'_> {
             self.current().kind,
             TokenKind::Keyword(
                 Keyword::Fn
+                    | Keyword::Async
                     | Keyword::Class
                     | Keyword::Struct
                     | Keyword::Interface
@@ -1506,6 +1578,10 @@ impl Parser<'_> {
                 | TokenKind::Keyword(
                     Keyword::Let
                         | Keyword::Var
+                        | Keyword::Await
+                        | Keyword::Spawn
+                        | Keyword::Thread
+                        | Keyword::Scope
                         | Keyword::If
                         | Keyword::While
                         | Keyword::For
@@ -2433,5 +2509,118 @@ fn main() {
             function.body.statements[1].kind,
             StatementKind::For(_)
         ));
+    }
+
+    #[test]
+    fn parses_async_functions_and_async_main() {
+        let result = parse_text(
+            "async.prnc",
+            "async fn fetch() -> String { return \"user\" }\nasync fn main() { let user = await fetch() }",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let [Declaration::Function(fetch), Declaration::Function(main)] =
+            result.program.declarations.as_slice()
+        else {
+            panic!("expected two function declarations");
+        };
+        assert!(fetch.is_async);
+        assert!(main.is_async);
+        let StatementKind::Variable(variable) = &main.body.statements[0].kind else {
+            panic!("expected local variable");
+        };
+        assert!(matches!(
+            variable.initializer.as_ref().map(|expression| &expression.kind),
+            Some(ExpressionKind::Await(operand))
+                if matches!(operand.kind, ExpressionKind::Call { .. })
+        ));
+    }
+
+    #[test]
+    fn await_binds_to_postfix_expression_and_nests_in_calls_and_conditions() {
+        let result = parse_text(
+            "await-precedence.princi",
+            "async fn main() {\n let value = process(await fetch(), await await fetch())\n if await isReady() { println(value) }\n}",
+        );
+        let main = only_function(&result);
+        let StatementKind::Variable(variable) = &main.body.statements[0].kind else {
+            panic!("expected variable declaration");
+        };
+        let Some(Expression {
+            kind: ExpressionKind::Call { arguments, .. },
+            ..
+        }) = variable.initializer.as_ref()
+        else {
+            panic!("expected process call");
+        };
+        assert!(matches!(arguments[0].kind, ExpressionKind::Await(_)));
+        let ExpressionKind::Await(nested) = &arguments[1].kind else {
+            panic!("expected outer await");
+        };
+        assert!(matches!(nested.kind, ExpressionKind::Await(_)));
+
+        let StatementKind::If(if_statement) = &main.body.statements[1].kind else {
+            panic!("expected if statement");
+        };
+        assert!(matches!(
+            if_statement.condition.kind,
+            ExpressionKind::Await(_)
+        ));
+    }
+
+    #[test]
+    fn parses_spawn_task_scopes_and_reserved_thread_spawn() {
+        let result = parse_text(
+            "concurrency.prnc",
+            "async fn main() {\n scope {\n  let first = spawn work(1)\n  let second = spawn work(2)\n  println(await first)\n  println(await second)\n }\n let native = thread spawn work(3)\n}",
+        );
+        let main = only_function(&result);
+        let StatementKind::TaskScope(scope) = &main.body.statements[0].kind else {
+            panic!("expected task scope");
+        };
+        let StatementKind::Variable(first) = &scope.statements[0].kind else {
+            panic!("expected first spawned task binding");
+        };
+        assert!(matches!(
+            first.initializer.as_ref().map(|expression| &expression.kind),
+            Some(ExpressionKind::Spawn(operand))
+                if matches!(operand.kind, ExpressionKind::Call { .. })
+        ));
+        let StatementKind::Variable(native) = &main.body.statements[1].kind else {
+            panic!("expected reserved thread spawn binding");
+        };
+        assert!(matches!(
+            native.initializer.as_ref().map(|expression| &expression.kind),
+            Some(ExpressionKind::ThreadSpawn(operand))
+                if matches!(operand.kind, ExpressionKind::Call { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_await_in_sync_functions_and_malformed_concurrency_syntax() {
+        let result = parse_text(
+            "invalid-async.prnc",
+            "fn main() {\n let value = await fetch()\n let worker = thread fetch()\n}\nasync main() {}",
+        );
+        assert!(result.diagnostics.len() >= 3, "{:?}", result.diagnostics);
+        assert!(result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("only allowed inside an async function")));
+        assert!(result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("expected 'spawn' after 'thread'")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("expected 'fn' after 'async'")));
+    }
+
+    #[test]
+    fn async_frontend_has_identical_ast_for_both_source_extensions() {
+        let text = "async fn main() { scope { let task = spawn work()\n let value = await task } }";
+        let prnc = parse_text("async.prnc", text);
+        let princi = parse_text("async.princi", text);
+        assert!(prnc.diagnostics.is_empty(), "{:?}", prnc.diagnostics);
+        assert!(princi.diagnostics.is_empty(), "{:?}", princi.diagnostics);
+        assert_eq!(prnc.program, princi.program);
     }
 }
