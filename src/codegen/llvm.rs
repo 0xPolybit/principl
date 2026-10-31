@@ -1822,6 +1822,15 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
             arguments,
         } if arguments.len() == 1 => Ok("ptr".to_owned()),
         Type::GenericInstance {
+            constructor: GenericTypeConstructor::Task,
+            ..
+        } => Err(Diagnostic::at_source(
+            DiagnosticCode::UnsupportedFeature,
+            "Task<T> requires the async runtime and has no native representation yet",
+            source,
+            span,
+        )),
+        Type::GenericInstance {
             constructor: GenericTypeConstructor::Class(_),
             ..
         } => Ok("ptr".to_owned()),

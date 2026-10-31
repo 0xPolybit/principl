@@ -31,7 +31,6 @@ pub fn parse(source: &SourceFile, mut tokens: Vec<Token>) -> ParseResult {
         eof,
         cursor: 0,
         diagnostics: Vec::new(),
-        in_async_function: false,
     }
     .parse_program()
 }
@@ -42,7 +41,6 @@ struct Parser<'a> {
     eof: Token,
     cursor: usize,
     diagnostics: Vec<Diagnostic>,
-    in_async_function: bool,
 }
 
 impl Parser<'_> {
@@ -270,10 +268,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        let previous_async_context = std::mem::replace(&mut self.in_async_function, is_async);
-        let body_result = self.parse_block();
-        self.in_async_function = previous_async_context;
-        let body = body_result?;
+        let body = self.parse_block()?;
         let span = SourceSpan::new(start, body.span.end);
 
         Ok(FunctionDeclaration {
@@ -955,14 +950,6 @@ impl Parser<'_> {
         let prefix_keyword = self.current().kind.clone();
         if matches!(prefix_keyword, TokenKind::Keyword(Keyword::Await)) {
             let keyword = self.advance();
-            if !self.in_async_function {
-                return Err(Diagnostic::at_source(
-                    DiagnosticCode::Syntax,
-                    "'await' is only allowed inside an async function",
-                    self.source,
-                    keyword.location.span,
-                ));
-            }
             let operand = self.parse_expression_bp(PREFIX_PRECEDENCE, allow_construction)?;
             return Ok(Expression {
                 span: SourceSpan::new(keyword.location.span.start, operand.span.end),
@@ -2596,15 +2583,12 @@ fn main() {
     }
 
     #[test]
-    fn rejects_await_in_sync_functions_and_malformed_concurrency_syntax() {
+    fn parses_await_for_semantic_context_and_rejects_malformed_concurrency_syntax() {
         let result = parse_text(
             "invalid-async.prnc",
             "fn main() {\n let value = await fetch()\n let worker = thread fetch()\n}\nasync main() {}",
         );
-        assert!(result.diagnostics.len() >= 3, "{:?}", result.diagnostics);
-        assert!(result.diagnostics.iter().any(|diagnostic| diagnostic
-            .message()
-            .contains("only allowed inside an async function")));
+        assert_eq!(result.diagnostics.len(), 2, "{:?}", result.diagnostics);
         assert!(result.diagnostics.iter().any(|diagnostic| diagnostic
             .message()
             .contains("expected 'spawn' after 'thread'")));
@@ -2612,6 +2596,19 @@ fn main() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message().contains("expected 'fn' after 'async'")));
+        let Declaration::Function(main) = &result.program.declarations[0] else {
+            panic!("expected parser to preserve the synchronous function");
+        };
+        let StatementKind::Variable(variable) = &main.body.statements[0].kind else {
+            panic!("expected local variable");
+        };
+        assert!(matches!(
+            variable
+                .initializer
+                .as_ref()
+                .map(|expression| &expression.kind),
+            Some(ExpressionKind::Await(_))
+        ));
     }
 
     #[test]

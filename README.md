@@ -483,11 +483,18 @@ expression, before surrounding binary operators. It is accepted only inside
 an `async fn`. `scope { ... }` is parsed as a task-scope statement. The
 reserved OS-thread form is `thread spawn worker(args)`.
 
-This is parser/AST groundwork only. Async functions, `await`, `spawn`, task
-scopes, and thread spawning do not have runtime or LLVM support yet; attempting
-to build programs that use them produces an unsupported-feature diagnostic.
-The current v0.2 release remains synchronous. `.prnc` and `.princi` accept the
-same syntax and produce the same AST.
+The semantic frontend now represents a call to `async fn f() -> T` as
+`Task<T>`, while the function body still returns `T`. `await` accepts only
+`Task<T>`, yields `T`, and is rejected outside an async function. `Task<T>` is a
+reserved compiler core generic, including `Task<Void>`; it is not implicitly
+converted to `T`. `spawn` requires a `Task<T>` in an async function, and a task
+scope introduces a lexical block. The reserved `thread spawn` form is parsed
+but not yet semantically implemented.
+
+Async execution and Task values still have no runtime or LLVM representation.
+The compiler type-checks these constructs but stops before LLVM with an
+unsupported-feature diagnostic. The current v0.2 release remains synchronous.
+`.prnc` and `.princi` accept the same syntax and produce the same AST.
 
 ## Website development
 

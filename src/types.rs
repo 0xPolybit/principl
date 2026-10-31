@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// A resolved Princi type. `String`, `Class`, and `List` are managed-reference
+/// A resolved Princi type. `String`, `Class`, `List`, and `Task` are managed-reference
 /// types; they are distinct from inline values such as structs. An `Interface`
 /// value is an inline pair containing a managed class reference and a dispatch
 /// table reference. A `Trait` value uses the same pair; class values keep their
@@ -46,6 +46,7 @@ pub struct GenericTypeParameter {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GenericTypeConstructor {
     List,
+    Task,
     Class(String),
     Struct(String),
     Enum(String),
@@ -55,14 +56,31 @@ pub enum GenericTypeConstructor {
 pub struct FunctionType {
     pub type_parameters: Vec<GenericTypeParameter>,
     pub parameters: Vec<Type>,
+    /// The source-level result type is `T`; calling an async function produces
+    /// the compiler-managed `Task<T>` handle instead.
+    pub is_async: bool,
     pub return_type: Box<Type>,
 }
 
 impl FunctionType {
     pub fn new(parameters: Vec<Type>, return_type: Type) -> Self {
+        Self::with_async(Vec::new(), parameters, return_type, false)
+    }
+
+    pub fn asynchronous(parameters: Vec<Type>, return_type: Type) -> Self {
+        Self::with_async(Vec::new(), parameters, return_type, true)
+    }
+
+    pub fn with_async(
+        type_parameters: Vec<GenericTypeParameter>,
+        parameters: Vec<Type>,
+        return_type: Type,
+        is_async: bool,
+    ) -> Self {
         Self {
-            type_parameters: Vec::new(),
+            type_parameters,
             parameters,
+            is_async,
             return_type: Box::new(return_type),
         }
     }
@@ -72,10 +90,25 @@ impl FunctionType {
         parameters: Vec<Type>,
         return_type: Type,
     ) -> Self {
-        Self {
-            type_parameters,
-            parameters,
-            return_type: Box::new(return_type),
+        Self::with_async(type_parameters, parameters, return_type, false)
+    }
+
+    pub fn generic_async(
+        type_parameters: Vec<GenericTypeParameter>,
+        parameters: Vec<Type>,
+        return_type: Type,
+    ) -> Self {
+        Self::with_async(type_parameters, parameters, return_type, true)
+    }
+
+    /// Result observed by a call expression, distinct from the source-level
+    /// function result used to check `return` statements in async bodies.
+    pub fn call_result_type(&self) -> Type {
+        let result = self.return_type.as_ref().clone();
+        if self.is_async {
+            Type::task(result)
+        } else {
+            result
         }
     }
 }
@@ -85,6 +118,13 @@ impl Type {
         Self::GenericInstance {
             constructor: GenericTypeConstructor::List,
             arguments: vec![element],
+        }
+    }
+
+    pub fn task(result: Type) -> Self {
+        Self::GenericInstance {
+            constructor: GenericTypeConstructor::Task,
+            arguments: vec![result],
         }
     }
 
@@ -168,6 +208,13 @@ impl Type {
         match (self, actual) {
             (Type::Error, _) | (_, Type::Error) => true,
             (Type::Any, Type::Void) | (Type::Void, Type::Any) => false,
+            (
+                Type::Any,
+                Type::GenericInstance {
+                    constructor: GenericTypeConstructor::Task,
+                    ..
+                },
+            ) => false,
             (Type::Any, _) => true,
             (_, Type::Any) => false,
             (
@@ -206,7 +253,9 @@ impl Type {
             || matches!(
                 self,
                 Type::GenericInstance {
-                    constructor: GenericTypeConstructor::List | GenericTypeConstructor::Class(_),
+                    constructor: GenericTypeConstructor::List
+                        | GenericTypeConstructor::Task
+                        | GenericTypeConstructor::Class(_),
                     ..
                 }
             )
@@ -233,6 +282,7 @@ impl fmt::Display for Type {
             } => {
                 let name = match constructor {
                     GenericTypeConstructor::List => "List",
+                    GenericTypeConstructor::Task => "Task",
                     GenericTypeConstructor::Class(name)
                     | GenericTypeConstructor::Struct(name)
                     | GenericTypeConstructor::Enum(name) => name,
@@ -254,11 +304,19 @@ impl fmt::Display for Type {
                         display_generic_parameters(&function.type_parameters)
                     )
                 };
-                write!(
-                    formatter,
-                    "{generic_parameters}({parameters}) -> {}",
-                    function.return_type
-                )
+                if function.is_async {
+                    write!(
+                        formatter,
+                        "async {generic_parameters}({parameters}) -> {}",
+                        function.return_type
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "{generic_parameters}({parameters}) -> {}",
+                        function.return_type
+                    )
+                }
             }
             Type::Range(element) => write!(formatter, "Range<{element}>"),
             Type::Any => formatter.write_str("Any"),
@@ -367,5 +425,37 @@ mod tests {
         assert!(!maybe.is_struct());
         assert!(!maybe.is_managed_reference());
         assert!(!Type::Enum("Direction".to_owned()).is_managed_reference());
+    }
+
+    #[test]
+    fn task_types_are_managed_and_async_signatures_expose_task_results() {
+        let task = Type::task(Type::Int);
+        assert_eq!(task.to_string(), "Task<Int>");
+        assert!(task.is_managed_reference());
+        assert!(!Type::Int.accepts(&task));
+        assert!(!Type::Any.accepts(&task));
+        assert!(task.accepts(&Type::task(Type::Int)));
+
+        let parameter = super::GenericTypeParameter {
+            id: 7,
+            name: "T".to_owned(),
+            bounds: Vec::new(),
+        };
+        let signature = FunctionType::generic_async(
+            vec![parameter.clone()],
+            vec![Type::TypeParameter(parameter.clone())],
+            Type::TypeParameter(parameter),
+        );
+        assert!(signature.is_async);
+        assert_eq!(
+            signature.call_result_type(),
+            Type::task(Type::TypeParameter(super::GenericTypeParameter {
+                id: 7,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+            }))
+        );
+        assert_eq!(Type::Function(signature).to_string(), "async <T>(T) -> T");
+        assert_eq!(Type::task(Type::Void).to_string(), "Task<Void>");
     }
 }

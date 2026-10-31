@@ -337,7 +337,7 @@ fn async_syntax_is_identical_but_not_compiled_for_both_extensions_yet() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(stderr.contains("error[E0301]"), "{stderr}");
         assert!(
-            stderr.contains("async execution is not implemented yet"),
+            stderr.contains("async functions are type-checked but cannot be compiled"),
             "{stderr}"
         );
         assert!(

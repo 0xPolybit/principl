@@ -332,6 +332,7 @@ struct Analyzer<'a> {
     contract_conversions: HashMap<SourceSpan, Type>,
     result_propagations: HashMap<SourceSpan, ResultPropagation>,
     return_result_wrappings: HashMap<SourceSpan, Type>,
+    current_is_async: bool,
     pending_generic_bound_checks: Vec<PendingGenericBoundCheck>,
     invalid_contract_implementations: HashSet<(String, String)>,
     contracts_validated: bool,
@@ -374,6 +375,7 @@ impl<'a> Analyzer<'a> {
             contract_conversions: HashMap::new(),
             result_propagations: HashMap::new(),
             return_result_wrappings: HashMap::new(),
+            current_is_async: false,
             pending_generic_bound_checks: Vec::new(),
             invalid_contract_implementations: HashSet::new(),
             contracts_validated: false,
@@ -731,6 +733,7 @@ impl<'a> Analyzer<'a> {
                 &function.type_parameters,
                 &function.parameters,
                 function.return_type.as_ref(),
+                function.is_async,
             );
             self.globals.insert(
                 function.name.name.clone(),
@@ -1398,6 +1401,7 @@ impl<'a> Analyzer<'a> {
             &method.type_parameters,
             &method.parameters,
             method.return_type.as_ref(),
+            method.is_async,
         );
         if let Some(info) = self.types.get_mut(&owner.name.name) {
             info.methods
@@ -1425,7 +1429,7 @@ impl<'a> Analyzer<'a> {
             return;
         }
 
-        let signature = self.function_signature(&[], &initializer.parameters, None);
+        let signature = self.function_signature(&[], &initializer.parameters, None, false);
         if let Some(info) = self.types.get_mut(&owner.name.name) {
             info.initializer = Some(signature.clone());
         }
@@ -1457,6 +1461,7 @@ impl<'a> Analyzer<'a> {
         type_parameter_declarations: &[TypeParameterDeclaration],
         parameters: &[crate::ast::Parameter],
         return_type: Option<&crate::ast::TypeReference>,
+        is_async: bool,
     ) -> FunctionType {
         let type_parameters = self.declare_type_parameters(type_parameter_declarations);
         self.push_type_parameters(&type_parameters);
@@ -1468,7 +1473,7 @@ impl<'a> Analyzer<'a> {
             .map(|type_reference| self.resolve_type_reference(type_reference, true))
             .unwrap_or(Type::Void);
         self.pop_type_parameters();
-        FunctionType::generic(type_parameters, parameters, return_type)
+        FunctionType::with_async(type_parameters, parameters, return_type, is_async)
     }
 
     fn resolve_type_reference(
@@ -1480,7 +1485,10 @@ impl<'a> Analyzer<'a> {
         let arguments = type_reference
             .arguments
             .iter()
-            .map(|argument| self.resolve_type_reference(argument, false))
+            .enumerate()
+            .map(|(index, argument)| {
+                self.resolve_type_reference(argument, type_reference.name == "Task" && index == 0)
+            })
             .collect::<Vec<_>>();
 
         let ty = if let Some(parameter) = active_parameter {
@@ -1514,7 +1522,7 @@ impl<'a> Analyzer<'a> {
     fn resolve_named_type(&mut self, reference: &crate::ast::TypeReference, args: &[Type]) -> Type {
         let expected_arity = match reference.name.as_str() {
             "Int" | "Float" | "Bool" | "String" | "Void" | "Int32" | "Int64" | "Float64" => Some(0),
-            "List" => Some(1),
+            "List" | "Task" => Some(1),
             name => self.types.get(name).map(|info| info.type_parameters.len()),
         };
 
@@ -1558,6 +1566,7 @@ impl<'a> Analyzer<'a> {
                     Type::list(args[0].clone())
                 }
             }
+            "Task" => Type::task(args[0].clone()),
             name => {
                 let Some(info) = self.types.get(name).cloned() else {
                     let message = if self.declared_type_parameter_names.contains(name) {
@@ -1699,13 +1708,6 @@ impl<'a> Analyzer<'a> {
                 Declaration::Function(function)
                     if self.accepted_functions.contains(&function.span) =>
                 {
-                    if function.is_async {
-                        self.error_with(
-                            DiagnosticCode::UnsupportedFeature,
-                            "async functions are recognized by the frontend but async execution is not implemented yet",
-                            function.name.span,
-                        );
-                    }
                     let signature = self.function_signatures[&function.span].clone();
                     self.check_routine(&function.parameters, &function.body, &signature, None);
                 }
@@ -1810,6 +1812,7 @@ impl<'a> Analyzer<'a> {
             .current_return_type
             .replace(*signature.return_type.clone());
         let previous_type = std::mem::replace(&mut self.current_type, owner.clone());
+        let previous_async = std::mem::replace(&mut self.current_is_async, signature.is_async);
         self.push_type_parameters(&signature.type_parameters);
         self.push_scope();
 
@@ -1842,6 +1845,7 @@ impl<'a> Analyzer<'a> {
         self.pop_type_parameters();
         self.current_return_type = previous_return;
         self.current_type = previous_type;
+        self.current_is_async = previous_async;
     }
 
     fn check_block(&mut self, block: &Block, introduce_scope: bool) {
@@ -1941,11 +1945,13 @@ impl<'a> Analyzer<'a> {
             }
             StatementKind::Block(block) => self.check_block(block, true),
             StatementKind::TaskScope(block) => {
-                self.error_with(
-                    DiagnosticCode::UnsupportedFeature,
-                    "task scopes are recognized by the frontend but async execution is not implemented yet",
-                    statement.span,
-                );
+                if !self.current_is_async {
+                    self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "task scopes are only valid inside an async function",
+                        statement.span,
+                    );
+                }
                 self.check_block(block, true);
             }
         }
@@ -2702,13 +2708,67 @@ impl<'a> Analyzer<'a> {
                 let operand_type = self.check_expression(operand, None);
                 self.unary_result(*operator, &operand_type, expression.span)
             }
-            ExpressionKind::Await(operand)
-            | ExpressionKind::Spawn(operand)
-            | ExpressionKind::ThreadSpawn(operand) => {
+            ExpressionKind::Await(operand) => {
+                let operand_type = self.check_expression(operand, None);
+                if !self.current_is_async {
+                    self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "'await' is only valid inside an async function",
+                        expression.span,
+                    );
+                    Type::Error
+                } else if operand_type.is_error() {
+                    Type::Error
+                } else {
+                    match operand_type {
+                        Type::GenericInstance {
+                            constructor: GenericTypeConstructor::Task,
+                            arguments,
+                        } if arguments.len() == 1 => arguments[0].clone(),
+                        other => {
+                            self.error_with(
+                                DiagnosticCode::TypeMismatch,
+                                format!("'await' requires Task<T>, found {other}"),
+                                operand.span,
+                            );
+                            Type::Error
+                        }
+                    }
+                }
+            }
+            ExpressionKind::Spawn(operand) => {
+                let operand_type = self.check_expression(operand, None);
+                if !self.current_is_async {
+                    self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "'spawn' is only valid inside an async function",
+                        expression.span,
+                    );
+                    Type::Error
+                } else if operand_type.is_error() {
+                    Type::Error
+                } else if matches!(
+                    &operand_type,
+                    Type::GenericInstance {
+                        constructor: GenericTypeConstructor::Task,
+                        arguments
+                    } if arguments.len() == 1
+                ) {
+                    operand_type
+                } else {
+                    self.error_with(
+                        DiagnosticCode::TypeMismatch,
+                        format!("'spawn' requires Task<T>, found {operand_type}"),
+                        operand.span,
+                    );
+                    Type::Error
+                }
+            }
+            ExpressionKind::ThreadSpawn(operand) => {
                 self.check_expression(operand, None);
                 self.error_with(
                     DiagnosticCode::UnsupportedFeature,
-                    "async and thread expressions are recognized by the frontend but execution is not implemented yet",
+                    "OS-thread spawning is reserved but not implemented yet",
                     expression.span,
                 );
                 Type::Error
@@ -3129,7 +3189,7 @@ impl<'a> Analyzer<'a> {
                         self.expression_types
                             .insert(callee.span, Type::Function(signature.clone()));
                         self.check_call_arguments(&name.name, &signature, arguments, call_span);
-                        *signature.return_type
+                        signature.call_result_type()
                     }
                     Some(GlobalSymbol::ExternalFunction(_)) => {
                         self.error(
@@ -3253,7 +3313,7 @@ impl<'a> Analyzer<'a> {
                             arguments,
                             call_span,
                         );
-                        return *signature.return_type;
+                        return signature.call_result_type();
                     }
                     Some(GlobalSymbol::ExternalFunction(external)) => {
                         let signature = external.princi_signature();
@@ -3265,7 +3325,7 @@ impl<'a> Analyzer<'a> {
                             arguments,
                             call_span,
                         );
-                        return *signature.return_type;
+                        return signature.call_result_type();
                     }
                     None => {
                         self.expression_types.insert(callee.span, Type::Error);
@@ -3293,7 +3353,7 @@ impl<'a> Analyzer<'a> {
                         call_span,
                     );
                     self.check_call_arguments("function value", &signature, arguments, call_span);
-                    *signature.return_type
+                    signature.call_result_type()
                 }
                 Type::Error => {
                     for argument in arguments {
@@ -3323,7 +3383,7 @@ impl<'a> Analyzer<'a> {
                     call_span,
                 );
                 self.check_call_arguments("function value", &signature, arguments, call_span);
-                *signature.return_type
+                signature.call_result_type()
             }
             Type::Error => {
                 for argument in arguments {
@@ -3510,9 +3570,11 @@ impl<'a> Analyzer<'a> {
         }
         let specialized = substitute_function_type(signature, &substitutions);
         (
-            FunctionType::new(
+            FunctionType::with_async(
+                Vec::new(),
                 specialized.parameters,
                 specialized.return_type.as_ref().clone(),
+                specialized.is_async,
             ),
             Some(type_arguments),
         )
@@ -3935,7 +3997,7 @@ fn substitute_function_type(
     signature: &FunctionType,
     substitutions: &HashMap<u32, Type>,
 ) -> FunctionType {
-    FunctionType::generic(
+    FunctionType::with_async(
         signature.type_parameters.clone(),
         signature
             .parameters
@@ -3943,6 +4005,7 @@ fn substitute_function_type(
             .map(|ty| substitute_type(ty, substitutions))
             .collect(),
         substitute_type(&signature.return_type, substitutions),
+        signature.is_async,
     )
 }
 
@@ -4015,7 +4078,16 @@ fn ungroup_kind(mut kind: &ExpressionKind) -> &ExpressionKind {
 fn is_reserved_type_name(name: &str) -> bool {
     matches!(
         name,
-        "Int" | "Float" | "Bool" | "String" | "Void" | "List" | "Int32" | "Int64" | "Float64"
+        "Int"
+            | "Float"
+            | "Bool"
+            | "String"
+            | "Void"
+            | "List"
+            | "Task"
+            | "Int32"
+            | "Int64"
+            | "Float64"
     )
 }
 
@@ -5834,26 +5906,212 @@ fn main() {
     }
 
     #[test]
-    fn async_frontend_constructs_fail_cleanly_before_codegen() {
+    fn async_calls_have_task_results_and_await_extracts_the_value_type() {
         let result = analyze_text(
-            "async fn work() -> Int { return 1 }\nasync fn main() {\n scope {\n  let task = spawn work()\n  let value = await task\n }\n}",
+            "async fn answer() -> Int { return 42 }\nasync fn main() {\n let task = answer()\n let explicit: Task<Int> = answer()\n let value = await answer()\n}",
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+
+        let task = variable(&result, "main", 0);
+        let explicit = variable(&result, "main", 1);
+        let value = variable(&result, "main", 2);
+        assert_eq!(
+            result.typed_program.variable_type(task),
+            Some(&Type::task(Type::Int))
+        );
+        assert_eq!(
+            result.typed_program.variable_type(explicit),
+            Some(&Type::task(Type::Int))
+        );
+        assert_eq!(result.typed_program.variable_type(value), Some(&Type::Int));
+        let awaited = value.initializer.as_ref().unwrap();
+        assert_eq!(
+            result.typed_program.expression_type(awaited),
+            Some(&Type::Int)
+        );
+        assert!(matches!(
+            result.typed_program.symbols.global("answer"),
+            Some(super::GlobalSymbol::Function(signature))
+                if signature.is_async
+                    && signature.return_type.as_ref() == &Type::Int
+                    && signature.call_result_type() == Type::task(Type::Int)
+        ));
+    }
+
+    #[test]
+    fn await_checks_task_type_async_context_and_prevents_implicit_unwrapping() {
+        let result = analyze_text(
+            "async fn answer() -> Int { return 42 }\nfn takes(value: Int) {}\nasync fn badTask() { let value = await 42 }\nfn syncBad() { let value = await answer() }\nfn main() { let value: Int = answer(); takes(answer()) }",
         );
 
-        assert!(result.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::UnsupportedFeature
-                && diagnostic.location().is_some()
-        }));
+        assert!(has_message(&result, "'await' requires Task<T>, found Int"));
         assert!(has_message(
             &result,
-            "async functions are recognized by the frontend but async execution is not implemented yet"
+            "'await' is only valid inside an async function"
+        ));
+        assert!(has_message(&result, "expected Int, found Task<Int>"));
+    }
+
+    #[test]
+    fn task_core_type_supports_nested_results_lists_void_and_generic_async_functions() {
+        let result = analyze_text(
+            r#"enum Result<T, E> { Ok(T) Err(E) }
+interface Entity { fn id() -> Int }
+trait Named { fn name() -> String }
+class User implements Entity, Named {
+    fn id() -> Int { return 7 }
+    fn name() -> String { return "user" }
+}
+struct Point { x: Int }
+class IOError {}
+enum Maybe<T> { Some(T) None }
+async fn answer() -> Int { return 42 }
+async fn nested() -> Task<Int> { return answer() }
+async fn list() -> List<Point> { return [Point(3)] }
+async fn maybe() -> Maybe<User> { return Maybe<User>.Some(User()) }
+async fn entity() -> Entity { return User() }
+async fn named() -> Named { return User() }
+async fn load<T: Entity + Named>() -> Result<T, IOError> { return Result<T, IOError>.Err(IOError()) }
+async fn display<T: Named>(value: T) -> String { return value.name() }
+async fn parse() -> Result<Int, String> { return Result<Int, String>.Ok(5) }
+async fn useParse() -> Result<Int, String> {
+    let parsed = await parse()
+    let value = parsed?
+    return Result<Int, String>.Ok(value)
+}
+fn accept(
+    a: Task<Int>,
+    b: Task<Task<Int>>,
+    c: Task<List<Point>>,
+    d: Task<Maybe<User>>,
+    e: Task<Result<Int, String>>,
+    f: Task<Void>,
+    g: Task<String>
+) {}
+async fn noValue() {}
+async fn main() {
+    let a = answer()
+    let b = nested()
+    let c = list()
+    let d = maybe()
+    let e = useParse()
+    let f: Task<Void> = noValue()
+    let userTask = load<User>()
+    let userResult = await userTask
+    let entityTask = entity()
+    let entityValue = await entityTask
+    let namedTask = named()
+    let namedValue = await namedTask
+    let nameTask = display(User())
+    let name = await nameTask
+    accept(a, b, c, d, e, f, nameTask)
+}"#,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 0)),
+            Some(&Type::task(Type::Int))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 1)),
+            Some(&Type::task(Type::task(Type::Int)))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 2)),
+            Some(&Type::task(Type::list(Type::Struct("Point".to_owned()))))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 4)),
+            Some(&Type::task(Type::generic_instance(
+                GenericTypeConstructor::Enum("Result".to_owned()),
+                vec![Type::Int, Type::String]
+            )))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 5)),
+            Some(&Type::task(Type::Void))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 6)),
+            Some(&Type::task(Type::generic_instance(
+                GenericTypeConstructor::Enum("Result".to_owned()),
+                vec![
+                    Type::Class("User".to_owned()),
+                    Type::Class("IOError".to_owned())
+                ]
+            )))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 7)),
+            Some(&Type::generic_instance(
+                GenericTypeConstructor::Enum("Result".to_owned()),
+                vec![
+                    Type::Class("User".to_owned()),
+                    Type::Class("IOError".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 12)),
+            Some(&Type::task(Type::String))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 9)),
+            Some(&Type::Interface("Entity".to_owned()))
+        );
+        assert_eq!(
+            result
+                .typed_program
+                .variable_type(variable(&result, "main", 11)),
+            Some(&Type::Trait("Named".to_owned()))
+        );
+    }
+
+    #[test]
+    fn task_type_rejects_invalid_arity_and_void_payloads_except_void_tasks() {
+        let result = analyze_text(
+            "class Task<T> {}\nfn no_args(value: Task) {}\nfn too_many(value: Task<Int, String>) {}\nfn list_void(value: Task<List<Void>>) {}\nfn ok(value: Task<Void>) {}\nfn main() {}",
+        );
+        assert!(has_message(
+            &result,
+            "duplicate or reserved declaration 'Task'"
         ));
         assert!(has_message(
             &result,
-            "task scopes are recognized by the frontend but async execution is not implemented yet"
+            "type 'Task' expects 1 generic argument(s), found 0"
         ));
         assert!(has_message(
             &result,
-            "async and thread expressions are recognized by the frontend but execution is not implemented yet"
+            "type 'Task' expects 1 generic argument(s), found 2"
         ));
+        assert!(has_message(
+            &result,
+            "Void is only valid as a function return type"
+        ));
+        assert!(!result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("Void is only valid as a function return type")
+            && diagnostic
+                .location()
+                .is_some_and(|location| location.line == 5)));
     }
 }
