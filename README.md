@@ -485,14 +485,23 @@ child of the active scope. The reserved `thread spawn worker(args)` form is
 parsed but does not have thread runtime behavior.
 
 Calling `async fn f() -> T` creates a cold `Task<T>`; the body runs when the
-task is awaited or spawned. Tasks use opaque runtime handles, managed result
-storage, Windows fibers, and a deterministic FIFO cooperative scheduler.
-Awaiting suspends the current fiber until the awaited task completes. Exiting a
-scope joins its spawned children. Async `main` uses a generated native wrapper
-to initialize the runtime, schedule and await the entry task, return an `Int`
-as the process status when present, shut down fibers, and then release managed
-storage. Existing synchronous `fn main()` and `fn main() -> Int` entry points
-keep their prior behavior. `.prnc` and `.princi` remain exact aliases.
+task is awaited or spawned. Each async function is lowered to a task-creation
+wrapper and a resumable callback. The callback uses an explicit managed frame
+with a resume program counter, parameters, locals, and intermediate expression
+values. At an incomplete `await`, it records the continuation point and returns
+to the deterministic FIFO cooperative scheduler. When the awaited task
+completes, the scheduler requeues the callback, which resumes from that point.
+This is stackless state-machine lowering; values held across suspension,
+including managed references, are kept in the frame. Frame slots are currently
+conservative rather than minimized by a liveness pass, and the runtime assumes
+no deterministic destructors. Async generic functions use the existing
+monomorphization path, producing one frame and callback per used specialization.
+
+Exiting a task scope joins its spawned children. Async `main` uses a generated
+native wrapper to initialize the runtime, run the entry task, return an `Int`
+as the process status when present, shut down the scheduler, and then release
+managed storage. Existing synchronous `fn main()` and `fn main() -> Int` entry
+points keep their prior behavior. `.prnc` and `.princi` remain exact aliases.
 
 This is the initial single-threaded runtime foundation, not the complete v0.3
 concurrency roadmap. Timers, cancellation, OS threads, channels, synchronization

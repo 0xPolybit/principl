@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::{
@@ -2235,6 +2237,46 @@ struct IrValue {
     operand: String,
 }
 
+#[derive(Debug, Clone)]
+struct AsyncFrameBuilder {
+    name: String,
+    fields: Vec<String>,
+    parameter_slots: Vec<String>,
+    resume_states: Vec<(u32, String)>,
+}
+
+impl AsyncFrameBuilder {
+    fn new(name: String, parameter_types: Vec<String>) -> Self {
+        let mut fields = vec!["i32".to_owned()];
+        let parameter_slots = parameter_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                fields.push(ty.clone());
+                format!("%princi.frame.slot.{}", index + 1)
+            })
+            .collect();
+        Self {
+            name,
+            fields,
+            parameter_slots,
+            resume_states: Vec::new(),
+        }
+    }
+
+    fn push_slot(&mut self, ty: &str) -> String {
+        let index = self.fields.len();
+        self.fields.push(ty.to_owned());
+        format!("%princi.frame.slot.{index}")
+    }
+
+    fn add_resume_state(&mut self, label: String) -> u32 {
+        let state = self.resume_states.len() as u32 + 1;
+        self.resume_states.push((state, label));
+        state
+    }
+}
+
 struct FunctionEmitter<'a, 'pool> {
     typed: &'a TypedProgram,
     source: &'a SourceFile,
@@ -2249,6 +2291,7 @@ struct FunctionEmitter<'a, 'pool> {
     terminated: bool,
     async_task: Option<String>,
     task_scopes: Vec<String>,
+    async_frame: Option<Rc<RefCell<AsyncFrameBuilder>>>,
 }
 
 impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
@@ -2272,6 +2315,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             terminated: false,
             async_task: None,
             task_scopes: Vec::new(),
+            async_frame: None,
         }
     }
 
@@ -2453,7 +2497,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let strings = self.strings;
         let generic_calls = self.generic_calls;
         let callback_symbol = format!("{symbol}_async_body");
-        let arguments_type = format!("%princi.async.args.{callback_symbol}");
+        let frame_type = format!("%princi.async.frame.{callback_symbol}");
 
         let mut argument_types = Vec::new();
         let mut wrapper_parameters = Vec::new();
@@ -2471,25 +2515,44 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             argument_types.push(llvm_ty.clone());
             wrapper_parameters.push(format!("{llvm_ty} %arg{index}"));
         }
-        if argument_types.is_empty() {
-            argument_types.push("i8".to_owned());
-        }
-
-        let mut output = format!(
-            "{arguments_type} = type {{ {} }}\n",
-            argument_types.join(", ")
-        );
+        let frame = Rc::new(RefCell::new(AsyncFrameBuilder::new(
+            frame_type.clone(),
+            argument_types.clone(),
+        )));
         let linkage = if internal { "internal " } else { "" };
+        let result_size = if signature.return_type.as_ref() == &Type::Void {
+            "0".to_owned()
+        } else {
+            "%princi.result.size".to_owned()
+        };
+        let mut emitter = FunctionEmitter::new(typed, source, strings, generic_calls);
+        emitter.async_frame = Some(frame.clone());
+        let body = emitter.emit_routine(
+            &callback_symbol,
+            display_name,
+            name_span,
+            routine_parameters,
+            body,
+            signature,
+            owner.clone(),
+            true,
+            Some(&frame_type),
+        )?;
+
+        let layout = frame.borrow().fields.join(", ");
+        let context_end = "%princi.frame.end";
+        let context_size = "%princi.frame.size";
+        let mut output = format!("{frame_type} = type {{ {layout} }}\n");
         output.push_str(&format!(
-            "define {linkage}ptr @{symbol}({}) {{\nentry:\n  %princi.args = alloca {arguments_type}, align 8\n",
+            "define {linkage}ptr @{symbol}({}) {{\nentry:\n  %princi.args = alloca {frame_type}, align 8\n  %princi.pc.slot = getelementptr inbounds {frame_type}, ptr %princi.args, i32 0, i32 0\n  store i32 0, ptr %princi.pc.slot\n",
             wrapper_parameters.join(", ")
         ));
-
         let mut argument_index = 0;
         if owner.is_some() {
             let slot = format!("%princi.arg.slot.{argument_index}");
             output.push_str(&format!(
-                "  {slot} = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 {argument_index}\n  store {} %self, ptr {slot}\n",
+                "  {slot} = getelementptr inbounds {frame_type}, ptr %princi.args, i32 0, i32 {}\n  store {} %self, ptr {slot}\n",
+                argument_index + 1,
                 argument_types[argument_index]
             ));
             argument_index += 1;
@@ -2497,46 +2560,25 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         for (index, _) in routine_parameters.iter().enumerate() {
             let slot = format!("%princi.arg.slot.{argument_index}");
             output.push_str(&format!(
-                "  {slot} = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 {argument_index}\n  store {} %arg{index}, ptr {slot}\n",
+                "  {slot} = getelementptr inbounds {frame_type}, ptr %princi.args, i32 0, i32 {}\n  store {} %arg{index}, ptr {slot}\n",
+                argument_index + 1,
                 argument_types[argument_index]
             ));
             argument_index += 1;
         }
-        if routine_parameters.is_empty() && owner.is_none() {
-            output.push_str(&format!(
-                "  %princi.empty.args = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 0\n  store i8 0, ptr %princi.empty.args\n"
-            ));
-        }
-        let context_end = format!("%princi.context.end");
-        let context_size = format!("%princi.context.size");
         output.push_str(&format!(
-            "  {context_end} = getelementptr {arguments_type}, ptr null, i32 1\n  {context_size} = ptrtoint ptr {context_end} to i64\n"
+            "  {context_end} = getelementptr {frame_type}, ptr null, i32 1\n  {context_size} = ptrtoint ptr {context_end} to i64\n"
         ));
-        let result_size = if signature.return_type.as_ref() == &Type::Void {
-            "0".to_owned()
-        } else {
+        if signature.return_type.as_ref() != &Type::Void {
             let result_type = llvm_type(&signature.return_type, name_span, source)?;
             output.push_str(&format!(
                 "  %princi.result.end = getelementptr {result_type}, ptr null, i32 1\n  %princi.result.size = ptrtoint ptr %princi.result.end to i64\n"
             ));
-            "%princi.result.size".to_owned()
-        };
+        }
         output.push_str(&format!(
             "  %princi.task = call ptr @{}(ptr @{callback_symbol}, i64 {result_size}, ptr %princi.args, i64 {context_size})\n  ret ptr %princi.task\n}}\n\n",
             crate::runtime::windows_x86_64_async::create_function()
         ));
-
-        let body = FunctionEmitter::new(typed, source, strings, generic_calls).emit_routine(
-            &callback_symbol,
-            display_name,
-            name_span,
-            routine_parameters,
-            body,
-            signature,
-            owner,
-            true,
-            Some(&arguments_type),
-        )?;
         output.push_str(&body);
         Ok(output)
     }
@@ -2612,18 +2654,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
 
         self.push_scope();
-        if let Some(args_type) = async_args_type {
+        if async_args_type.is_some() {
+            let Some(frame) = self.async_frame.as_ref() else {
+                return Err(self.error_with(
+                    DiagnosticCode::InternalCompiler,
+                    INTERNAL_CODEGEN_MESSAGE,
+                    name_span,
+                ));
+            };
+            let parameter_slots = frame.borrow().parameter_slots.clone();
             let mut context_index = 0;
             if let Some(owner) = owner {
-                let self_type = llvm_type(&owner, name_span, self.source)?;
-                let slot = self.fresh_value();
-                let value = self.fresh_value();
-                self.instruction(&format!(
-                    "{slot} = getelementptr inbounds {args_type}, ptr %princi.context, i32 0, i32 {context_index}"
-                ));
-                self.instruction(&format!("{value} = load {self_type}, ptr {slot}"));
-                let address = self.allocate(&self_type);
-                self.instruction(&format!("store {self_type} {value}, ptr {address}"));
+                let address = parameter_slots[context_index].clone();
                 self.bind("self", LocalBinding { address, ty: owner });
                 context_index += 1;
             }
@@ -2633,18 +2675,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     .parameter_type(parameter)
                     .cloned()
                     .unwrap_or_else(|| signature.parameters[index].clone());
-                let ty_name = llvm_type(&ty, parameter.type_reference.span, self.source)?;
-                let slot = self.fresh_value();
-                let value = self.fresh_value();
-                self.instruction(&format!(
-                    "{slot} = getelementptr inbounds {args_type}, ptr %princi.context, i32 0, i32 {context_index}"
-                ));
-                self.instruction(&format!("{value} = load {ty_name}, ptr {slot}"));
-                let address = self.allocate(&ty_name);
-                self.instruction(&format!("store {ty_name} {value}, ptr {address}"));
+                let address = parameter_slots[context_index].clone();
                 self.bind(&parameter.name.name, LocalBinding { address, ty });
                 context_index += 1;
             }
+            let root_scope = self.allocate("%princi.rt.scope");
+            self.instruction(&format!(
+                "call void @{}(ptr {root_scope})",
+                crate::runtime::windows_x86_64_async::scope_enter_function()
+            ));
+            self.task_scopes.push(root_scope);
         } else {
             if let Some(owner) = owner {
                 let self_type = if owner.is_struct() {
@@ -2721,10 +2761,34 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             symbol,
             llvm_parameters.join(", ")
         );
-        for allocation in self.allocas {
-            output.push_str("  ");
-            output.push_str(&allocation);
-            output.push('\n');
+        if let Some(frame) = self.async_frame.as_ref() {
+            let frame = frame.borrow();
+            for (index, _) in frame.fields.iter().enumerate() {
+                if index == 0 {
+                    output.push_str(&format!(
+                        "  %princi.frame.pc = getelementptr inbounds {}, ptr %princi.context, i32 0, i32 0\n",
+                        frame.name
+                    ));
+                } else {
+                    output.push_str(&format!(
+                        "  %princi.frame.slot.{index} = getelementptr inbounds {}, ptr %princi.context, i32 0, i32 {index}\n",
+                        frame.name
+                    ));
+                }
+            }
+            output.push_str(
+                "  %princi.resume.pc = load i32, ptr %princi.frame.pc\n  switch i32 %princi.resume.pc, label %princi.async.start [\n",
+            );
+            for (state, label) in &frame.resume_states {
+                output.push_str(&format!("    i32 {state}, label %{label}\n"));
+            }
+            output.push_str("  ]\nprinci.async.start:\n");
+        } else {
+            for allocation in self.allocas {
+                output.push_str("  ");
+                output.push_str(&allocation);
+                output.push('\n');
+            }
         }
         output.push_str(&self.output);
         output.push_str("}\n");
@@ -2758,9 +2822,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     .transpose()?;
                 let address = self.allocate(&ty_name);
                 if let Some(initializer) = initializer {
+                    let initializer_operand =
+                        self.value_operand(&initializer, variable.name.span)?;
                     self.instruction(&format!(
                         "store {ty_name} {}, ptr {address}",
-                        initializer.operand
+                        initializer_operand
                     ));
                 }
                 self.bind(&variable.name.name, LocalBinding { address, ty });
@@ -2771,7 +2837,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 {
                     self.emit_list_index_assignment(assignment, object, index)?;
                 } else {
-                    let (address, ty) = match ungroup_kind(&assignment.target.kind) {
+                    let (target_address, ty) = match ungroup_kind(&assignment.target.kind) {
                         ExpressionKind::Identifier(identifier) => {
                             let binding = self.lookup(&identifier.name).ok_or_else(|| {
                                 self.error(
@@ -2794,10 +2860,28 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                             ));
                         }
                     };
+                    // A member address may be computed before an awaited RHS.
+                    // Store it in the async frame so the resumed callback can
+                    // reload it instead of using a pre-suspension SSA value.
+                    let address_slot = if self.async_frame.is_some() {
+                        let slot = self.allocate("ptr");
+                        self.instruction(&format!("store ptr {target_address}, ptr {slot}"));
+                        Some(slot)
+                    } else {
+                        None
+                    };
                     let value = self.emit_expression(&assignment.value)?;
+                    let value_operand = self.value_operand(&value, assignment.value.span)?;
+                    let address = if let Some(slot) = address_slot {
+                        let address = self.fresh_value();
+                        self.instruction(&format!("{address} = load ptr, ptr {slot}"));
+                        address
+                    } else {
+                        target_address
+                    };
                     let ty_name = llvm_type(&ty, assignment.target.span, self.source)?;
                     let stored = if assignment.operator == AssignmentOperator::Assign {
-                        value.operand
+                        value_operand.clone()
                     } else {
                         let previous = self.fresh_value();
                         self.instruction(&format!("{previous} = load {ty_name}, ptr {address}"));
@@ -2807,7 +2891,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                                 self.instruction(&format!(
                                     "{combined} = call ptr @{}(ptr {previous}, ptr {})",
                                     crate::runtime::windows_x86_64::string_concat_function(),
-                                    value.operand
+                                    value_operand
                                 ));
                                 combined
                             }
@@ -2822,7 +2906,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                                     })?;
                                 self.instruction(&format!(
                                     "{result} = {instruction} {ty_name} {previous}, {}",
-                                    value.operand
+                                    value_operand
                                 ));
                                 result
                             }
@@ -2833,12 +2917,14 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             StatementKind::If(if_statement) => {
                 let condition = self.emit_expression(&if_statement.condition)?;
+                let condition_operand =
+                    self.value_operand(&condition, if_statement.condition.span)?;
                 let then_label = self.fresh_label("if.then");
                 let else_label = self.fresh_label("if.else");
                 let merge_label = self.fresh_label("if.end");
                 self.terminate(&format!(
                     "br i1 {}, label %{then_label}, label %{else_label}",
-                    condition.operand
+                    condition_operand
                 ));
 
                 self.label(&then_label);
@@ -2867,9 +2953,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.terminate(&format!("br label %{condition_label}"));
                 self.label(&condition_label);
                 let condition = self.emit_expression(&while_statement.condition)?;
+                let condition_operand =
+                    self.value_operand(&condition, while_statement.condition.span)?;
                 self.terminate(&format!(
                     "br i1 {}, label %{body_label}, label %{end_label}",
-                    condition.operand
+                    condition_operand
                 ));
                 self.label(&body_label);
                 self.push_scope();
@@ -2890,18 +2978,14 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 };
                 let start_value = self.emit_expression(start)?;
                 let end_value = self.emit_expression(end)?;
+                let start_operand = self.value_operand(&start_value, start.span)?;
+                let end_operand = self.value_operand(&end_value, end.span)?;
                 let start_slot = self.allocate("i64");
                 let end_slot = self.allocate("i64");
-                self.instruction(&format!(
-                    "store i64 {}, ptr {start_slot}",
-                    start_value.operand
-                ));
-                self.instruction(&format!("store i64 {}, ptr {end_slot}", end_value.operand));
+                self.instruction(&format!("store i64 {}, ptr {start_slot}", start_operand));
+                self.instruction(&format!("store i64 {end_operand}, ptr {end_slot}"));
                 let index_slot = self.allocate("i64");
-                self.instruction(&format!(
-                    "store i64 {}, ptr {index_slot}",
-                    start_value.operand
-                ));
+                self.instruction(&format!("store i64 {}, ptr {index_slot}", start_operand));
 
                 let condition_label = self.fresh_label("for.cond");
                 let body_label = self.fresh_label("for.body");
@@ -2959,15 +3043,17 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                         value
                     };
                     if self.async_task.is_some() {
-                        self.emit_store_async_result(&value.ty, &value.operand, statement.span)?;
-                        self.emit_async_scope_unwind();
+                        let result = self.value_operand(&value, statement.span)?;
+                        self.emit_store_async_result(&value.ty, &result, statement.span)?;
+                        self.emit_async_scope_unwind(statement.span)?;
                         self.terminate("ret void");
                     } else {
                         let ty_name = llvm_type(&value.ty, statement.span, self.source)?;
-                        self.terminate(&format!("ret {ty_name} {}", value.operand));
+                        let result = self.value_operand(&value, statement.span)?;
+                        self.terminate(&format!("ret {ty_name} {result}"));
                     }
                 } else {
-                    self.emit_async_scope_unwind();
+                    self.emit_async_scope_unwind(statement.span)?;
                     self.terminate("ret void");
                 }
             }
@@ -2998,10 +3084,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.pop_scope();
                 self.task_scopes.pop();
                 if !self.terminated {
-                    self.instruction(&format!(
-                        "call void @{}(ptr {scope})",
-                        crate::runtime::windows_x86_64_async::scope_exit_function()
-                    ));
+                    self.emit_async_scope_exit(&scope, statement.span)?;
                 }
             }
         }
@@ -3010,10 +3093,45 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
     fn emit_expression(&mut self, expression: &Expression) -> Result<IrValue, Diagnostic> {
         let value = self.emit_expression_raw(expression)?;
-        let Some(target) = self.typed.contract_conversion(expression.span).cloned() else {
-            return Ok(value);
+        let value = if let Some(target) = self.typed.contract_conversion(expression.span).cloned() {
+            self.emit_contract_conversion(value, target, expression.span)?
+        } else {
+            value
         };
-        self.emit_contract_conversion(value, target, expression.span)
+        if self.async_frame.is_none()
+            || value.ty == Type::Void
+            || value.operand.starts_with("%princi.frame.slot.")
+        {
+            return Ok(value);
+        }
+        let llvm_ty = llvm_type(&value.ty, expression.span, self.source)?;
+        let address = self.allocate(&llvm_ty);
+        self.instruction(&format!("store {llvm_ty} {}, ptr {address}", value.operand));
+        Ok(IrValue {
+            ty: value.ty,
+            operand: address,
+        })
+    }
+
+    fn value_operand(&mut self, value: &IrValue, span: SourceSpan) -> Result<String, Diagnostic> {
+        if self.async_frame.is_none() || !value.operand.starts_with("%princi.frame.slot.") {
+            return Ok(value.operand.clone());
+        }
+        let llvm_ty = llvm_type(&value.ty, span, self.source)?;
+        let loaded = self.fresh_value();
+        self.instruction(&format!("{loaded} = load {llvm_ty}, ptr {}", value.operand));
+        Ok(loaded)
+    }
+
+    fn async_resume_state(&mut self, label: &str, span: SourceSpan) -> Result<u32, Diagnostic> {
+        let frame = self.async_frame.as_ref().ok_or_else(|| {
+            self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                span,
+            )
+        })?;
+        Ok(frame.borrow_mut().add_resume_state(label.to_owned()))
     }
 
     fn emit_store_async_result(
@@ -3039,13 +3157,39 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         Ok(())
     }
 
-    fn emit_async_scope_unwind(&mut self) {
+    fn emit_async_scope_unwind(&mut self, span: SourceSpan) -> Result<(), Diagnostic> {
         for scope in self.task_scopes.iter().rev().cloned().collect::<Vec<_>>() {
-            self.instruction(&format!(
-                "call void @{}(ptr {scope})",
-                crate::runtime::windows_x86_64_async::scope_exit_function()
-            ));
+            self.emit_async_scope_exit(&scope, span)?;
         }
+        Ok(())
+    }
+
+    fn emit_async_scope_exit(&mut self, scope: &str, span: SourceSpan) -> Result<(), Diagnostic> {
+        let resume_label = self.fresh_label("scope.resume");
+        let resume_state = self.async_resume_state(&resume_label, span)?;
+        let suspend_label = self.fresh_label("scope.pending");
+        let done_label = self.fresh_label("scope.done");
+        let check = self.fresh_value();
+        let current_task = self.async_task.clone().ok_or_else(|| {
+            self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                span,
+            )
+        })?;
+        self.terminate(&format!("br label %{resume_label}"));
+        self.label(&resume_label);
+        self.instruction(&format!(
+            "{check} = call i1 @{}(ptr {current_task}, ptr {scope}, i32 {resume_state})",
+            crate::runtime::windows_x86_64_async::scope_exit_function()
+        ));
+        self.terminate(&format!(
+            "br i1 {check}, label %{done_label}, label %{suspend_label}"
+        ));
+        self.label(&suspend_label);
+        self.terminate("ret void");
+        self.label(&done_label);
+        Ok(())
     }
 
     fn emit_contract_conversion(
@@ -3068,6 +3212,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let symbol =
             vtable.ok_or_else(|| self.error("could not resolve contract dispatch table", span))?;
         let contract_ty = llvm_type(&target, span, self.source)?;
+        let value_operand = self.value_operand(&value, span)?;
         let data = if value.ty.is_struct() {
             let struct_ty = llvm_type(&value.ty, span, self.source)?;
             let size_end = self.fresh_value();
@@ -3081,10 +3226,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 "{boxed} = call ptr @{}(i64 {size})",
                 crate::runtime::windows_x86_64::object_allocator_function()
             ));
-            self.instruction(&format!("store {struct_ty} {}, ptr {boxed}", value.operand));
+            self.instruction(&format!("store {struct_ty} {value_operand}, ptr {boxed}"));
             boxed
         } else {
-            value.operand
+            value_operand
         };
         let with_object = self.fresh_value();
         let contract_value = self.fresh_value();
@@ -3153,24 +3298,25 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 let operand = self.emit_expression(operand)?;
                 let result = self.fresh_value();
                 let ty_name = llvm_type(&operand.ty, expression.span, self.source)?;
+                let operand_value = self.value_operand(&operand, expression.span)?;
                 match operator {
                     UnaryOperator::Positive => Ok(operand),
                     UnaryOperator::Negative if operand.ty == Type::Int => {
-                        self.instruction(&format!("{result} = sub i64 0, {}", operand.operand));
+                        self.instruction(&format!("{result} = sub i64 0, {operand_value}"));
                         Ok(IrValue {
                             ty: Type::Int,
                             operand: result,
                         })
                     }
                     UnaryOperator::Negative if operand.ty == Type::Float => {
-                        self.instruction(&format!("{result} = fneg double {}", operand.operand));
+                        self.instruction(&format!("{result} = fneg double {operand_value}"));
                         Ok(IrValue {
                             ty: Type::Float,
                             operand: result,
                         })
                     }
                     UnaryOperator::Not => {
-                        self.instruction(&format!("{result} = xor i1 {}, true", operand.operand));
+                        self.instruction(&format!("{result} = xor i1 {operand_value}, true"));
                         Ok(IrValue {
                             ty: Type::Bool,
                             operand: result,
@@ -3184,17 +3330,33 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             ExpressionKind::Await(operand) => {
                 let task = self.emit_expression(operand)?;
+                let task_operand = self.value_operand(&task, operand.span)?;
                 let result_type = self
                     .typed
                     .expression_type(expression)
                     .cloned()
                     .unwrap_or(Type::Error);
-                let result = self.fresh_value();
+                let resume_label = self.fresh_label("await.resume");
+                let resume_state = self.async_resume_state(&resume_label, expression.span)?;
+                let pending_label = self.fresh_label("await.pending");
+                let ready = self.fresh_value();
+                let current_task = self.async_task.clone().ok_or_else(|| {
+                    self.error_with(
+                        DiagnosticCode::InternalCompiler,
+                        INTERNAL_CODEGEN_MESSAGE,
+                        expression.span,
+                    )
+                })?;
                 self.instruction(&format!(
-                    "{result} = call ptr @{}(ptr {})",
+                    "{ready} = call i1 @{}(ptr {current_task}, ptr {task_operand}, i32 {resume_state})",
                     crate::runtime::windows_x86_64_async::await_function(),
-                    task.operand
                 ));
+                self.terminate(&format!(
+                    "br i1 {ready}, label %{resume_label}, label %{pending_label}"
+                ));
+                self.label(&pending_label);
+                self.terminate("ret void");
+                self.label(&resume_label);
                 if result_type == Type::Void {
                     Ok(IrValue {
                         ty: Type::Void,
@@ -3202,8 +3364,18 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     })
                 } else {
                     let llvm_ty = llvm_type(&result_type, expression.span, self.source)?;
+                    // The callback returns to the scheduler when `ready` is
+                    // false and is invoked again on resume. Values loaded to
+                    // SSA registers before that suspension do not survive the
+                    // call, so reload the task handle from its frame slot.
+                    let resumed_task_operand = self.value_operand(&task, operand.span)?;
+                    let result_ptr = self.fresh_value();
+                    self.instruction(&format!(
+                        "{result_ptr} = call ptr @{}(ptr {resumed_task_operand})",
+                        crate::runtime::windows_x86_64_async::result_function()
+                    ));
                     let value = self.fresh_value();
-                    self.instruction(&format!("{value} = load {llvm_ty}, ptr {result}"));
+                    self.instruction(&format!("{value} = load {llvm_ty}, ptr {result_ptr}"));
                     Ok(IrValue {
                         ty: result_type,
                         operand: value,
@@ -3212,10 +3384,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             ExpressionKind::Spawn(operand) => {
                 let task = self.emit_expression(operand)?;
+                let task_operand = self.value_operand(&task, operand.span)?;
                 self.instruction(&format!(
                     "call void @{}(ptr {})",
                     crate::runtime::windows_x86_64_async::spawn_function(),
-                    task.operand
+                    task_operand
                 ));
                 Ok(task)
             }
@@ -3281,6 +3454,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 )
             })?;
         let value = self.emit_expression(operand)?;
+        let value_operand = self.value_operand(&value, expression.span)?;
         let result_llvm_type = llvm_type(&propagation.result_type, expression.span, self.source)?;
         let result_name = propagation
             .result_type
@@ -3305,8 +3479,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
 
         let tag = self.fresh_value();
         self.instruction(&format!(
-            "{tag} = extractvalue {result_llvm_type} {}, 0",
-            value.operand
+            "{tag} = extractvalue {result_llvm_type} {value_operand}, 0"
         ));
         let is_ok = self.fresh_value();
         self.instruction(&format!("{is_ok} = icmp eq i32 {tag}, {ok_index}"));
@@ -3321,8 +3494,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let error_payload_type = format!("{{ {error_llvm_type} }}");
         let error_payload = self.fresh_value();
         self.instruction(&format!(
-            "{error_payload} = extractvalue {result_llvm_type} {}, {}",
-            value.operand,
+            "{error_payload} = extractvalue {result_llvm_type} {value_operand}, {}",
             err_index + 1
         ));
         let error_value = self.fresh_value();
@@ -3344,18 +3516,17 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             self.source,
         )?;
         if self.async_task.is_some() {
+            let propagated = self.value_operand(&propagated_error, expression.span)?;
             self.emit_store_async_result(
                 &propagation.enclosing_result_type,
-                &propagated_error.operand,
+                &propagated,
                 expression.span,
             )?;
-            self.emit_async_scope_unwind();
+            self.emit_async_scope_unwind(expression.span)?;
             self.terminate("ret void");
         } else {
-            self.terminate(&format!(
-                "ret {enclosing_llvm_type} {}",
-                propagated_error.operand
-            ));
+            let propagated = self.value_operand(&propagated_error, expression.span)?;
+            self.terminate(&format!("ret {enclosing_llvm_type} {}", propagated));
         }
 
         self.label(&success_label);
@@ -3363,8 +3534,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let success_payload_type = format!("{{ {success_llvm_type} }}");
         let success_payload = self.fresh_value();
         self.instruction(&format!(
-            "{success_payload} = extractvalue {result_llvm_type} {}, {}",
-            value.operand,
+            "{success_payload} = extractvalue {result_llvm_type} {value_operand}, {}",
             ok_index + 1
         ));
         let success_value = self.fresh_value();
@@ -3428,17 +3598,48 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         } else {
             "undef".to_owned()
         };
+        let payload_slot = if self.async_frame.is_some() && !values.is_empty() {
+            let slot = self.allocate(&payload_aggregate_type);
+            self.instruction(&format!("store {payload_aggregate_type} undef, ptr {slot}"));
+            Some(slot)
+        } else {
+            None
+        };
         for (index, (value, expected_type)) in values.iter().zip(&payload_types).enumerate() {
             if !expected_type.accepts(&value.ty) {
                 return Err(self.error("enum payload type changed after semantic analysis", span));
             }
+            let value_operand = self.value_operand(value, span)?;
+            let previous_payload = if let Some(slot) = &payload_slot {
+                let loaded = self.fresh_value();
+                self.instruction(&format!(
+                    "{loaded} = load {payload_aggregate_type}, ptr {slot}"
+                ));
+                loaded
+            } else {
+                payload_value.clone()
+            };
             let next = self.fresh_value();
             self.instruction(&format!(
-                "{next} = insertvalue {payload_aggregate_type} {payload_value}, {} {}, {index}",
-                payload_llvm_types[index], value.operand
+                "{next} = insertvalue {payload_aggregate_type} {previous_payload}, {} {}, {index}",
+                payload_llvm_types[index], value_operand
             ));
+            if let Some(slot) = &payload_slot {
+                self.instruction(&format!(
+                    "store {payload_aggregate_type} {next}, ptr {slot}"
+                ));
+            }
             payload_value = next;
         }
+        let payload_value = if let Some(slot) = payload_slot {
+            let loaded = self.fresh_value();
+            self.instruction(&format!(
+                "{loaded} = load {payload_aggregate_type}, ptr {slot}"
+            ));
+            loaded
+        } else {
+            payload_value
+        };
         let llvm_enum_type = llvm_type(enum_type, span, self.source)?;
         let tagged = self.fresh_value();
         self.instruction(&format!(
@@ -3461,6 +3662,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         expression: &Expression,
     ) -> Result<IrValue, Diagnostic> {
         let value = self.emit_expression(&matched.value)?;
+        let value_operand = self.value_operand(&value, matched.value.span)?;
         let result_type = self
             .typed
             .expression_type(expression)
@@ -3486,7 +3688,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     self.terminate(&format!("br label %{}", arm_labels[index]));
                     break;
                 }
-                let test = self.emit_pattern_test(&value.operand, &value.ty, &arm.pattern)?;
+                let test = self.emit_pattern_test(&value_operand, &value.ty, &arm.pattern)?;
                 let next_label = if index + 1 == matched.arms.len() {
                     has_fallback_edge = true;
                     fallback_label.clone()
@@ -3506,7 +3708,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         for (arm_index, arm) in matched.arms.iter().enumerate() {
             self.label(&arm_labels[arm_index]);
             self.push_scope();
-            self.bind_pattern(&value.operand, &value.ty, &arm.pattern)?;
+            self.bind_pattern(&value_operand, &value.ty, &arm.pattern)?;
             let arm_value = match &arm.body {
                 crate::ast::MatchArmBody::Expression(body) => self.emit_expression(body)?,
                 crate::ast::MatchArmBody::Block(block) => {
@@ -3521,10 +3723,15 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             };
             self.pop_scope();
             if !self.terminated {
+                let arm_operand = if result_type != Type::Void {
+                    Some(self.value_operand(&arm_value, arm.span)?)
+                } else {
+                    None
+                };
                 let predecessor = self.current_label.clone();
                 self.terminate(&format!("br label %{merge_label}"));
-                if result_type != Type::Void {
-                    incoming.push((arm_value.operand, predecessor));
+                if let Some(arm_operand) = arm_operand {
+                    incoming.push((arm_operand, predecessor));
                 }
             }
         }
@@ -3580,9 +3787,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             };
             let enum_llvm_type = llvm_type(&value.ty, matched.value.span, self.source)?;
             let tag = self.fresh_value();
+            let value_operand = self.value_operand(value, matched.value.span)?;
             self.instruction(&format!(
                 "{tag} = extractvalue {enum_llvm_type} {}, 0",
-                value.operand
+                value_operand
             ));
             let mut cases = Vec::new();
             for (arm_index, arm) in matched.arms.iter().enumerate() {
@@ -3664,7 +3872,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             (
                 llvm_type(&value.ty, matched.value.span, self.source)?,
-                value.operand.clone(),
+                self.value_operand(value, matched.value.span)?,
                 cases,
             )
         } else {
@@ -3968,12 +4176,14 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         };
         let llvm_element_type = llvm_type(&element_type, expression.span, self.source)?;
-        let element_size = self.emit_list_element_size(&element_type, expression.span)?;
+        let initial_element_size = self.emit_list_element_size(&element_type, expression.span)?;
         let list = self.fresh_value();
         self.instruction(&format!(
-            "{list} = call ptr @{}(i64 {element_size})",
+            "{list} = call ptr @{}(i64 {initial_element_size})",
             crate::runtime::windows_x86_64::list_new_function()
         ));
+        let list_slot = self.allocate("ptr");
+        self.instruction(&format!("store ptr {list}, ptr {list_slot}"));
         for element in elements {
             let value = self.emit_expression(element)?;
             if !element_type.accepts(&value.ty) {
@@ -3982,16 +4192,21 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     element.span,
                 ));
             }
+            let value_operand = self.value_operand(&value, element.span)?;
+            let current_list = self.fresh_value();
+            self.instruction(&format!("{current_list} = load ptr, ptr {list_slot}"));
+            let element_size = self.emit_list_element_size(&element_type, element.span)?;
             let slot = self.allocate(&llvm_element_type);
             self.instruction(&format!(
-                "store {llvm_element_type} {}, ptr {slot}",
-                value.operand
+                "store {llvm_element_type} {value_operand}, ptr {slot}"
             ));
             self.instruction(&format!(
-                "call void @{}(ptr {list}, i64 {element_size}, ptr {slot})",
+                "call void @{}(ptr {current_list}, i64 {element_size}, ptr {slot})",
                 crate::runtime::windows_x86_64::list_add_function()
             ));
         }
+        let list = self.fresh_value();
+        self.instruction(&format!("{list} = load ptr, ptr {list_slot}"));
         Ok(IrValue {
             ty: Type::list(element_type),
             operand: list,
@@ -4012,14 +4227,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         };
         let index_value = self.emit_expression(index)?;
+        let list_operand = self.value_operand(&list_value, object.span)?;
+        let index_operand = self.value_operand(&index_value, index.span)?;
         let llvm_element_type = llvm_type(&element_type, span, self.source)?;
         let element_size = self.emit_list_element_size(&element_type, span)?;
         let slot = self.allocate(&llvm_element_type);
         self.instruction(&format!(
             "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {slot})",
             crate::runtime::windows_x86_64::list_get_function(),
-            list_value.operand,
-            index_value.operand
+            list_operand,
+            index_operand
         ));
         let result = self.fresh_value();
         self.instruction(&format!("{result} = load {llvm_element_type}, ptr {slot}"));
@@ -4043,6 +4260,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         };
         let index_value = self.emit_expression(index)?;
+        let list_operand = self.value_operand(&list_value, object.span)?;
+        let index_operand = self.value_operand(&index_value, index.span)?;
         let llvm_element_type = llvm_type(&element_type, assignment.target.span, self.source)?;
         let element_size = self.emit_list_element_size(&element_type, assignment.target.span)?;
 
@@ -4052,23 +4271,28 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         self.instruction(&format!(
             "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {previous_slot})",
             crate::runtime::windows_x86_64::list_get_function(),
-            list_value.operand,
-            index_value.operand
+            list_operand,
+            index_operand
         ));
-        let previous = self.fresh_value();
-        self.instruction(&format!(
-            "{previous} = load {llvm_element_type}, ptr {previous_slot}"
-        ));
-
         let value = self.emit_expression(&assignment.value)?;
+        let value_operand = self.value_operand(&value, assignment.value.span)?;
         if !element_type.accepts(&value.ty) {
             return Err(self.error(
                 "list assignment type changed after semantic analysis",
                 assignment.value.span,
             ));
         }
+        // Reload addresses and the copied old element after an awaited RHS
+        // returns to this callback.
+        let list_operand = self.value_operand(&list_value, object.span)?;
+        let index_operand = self.value_operand(&index_value, index.span)?;
+        let previous = self.fresh_value();
+        self.instruction(&format!(
+            "{previous} = load {llvm_element_type}, ptr {previous_slot}"
+        ));
+        let element_size = self.emit_list_element_size(&element_type, assignment.target.span)?;
         let stored = if assignment.operator == AssignmentOperator::Assign {
-            value.operand
+            value_operand.clone()
         } else {
             match (assignment.operator, &element_type) {
                 (AssignmentOperator::AddAssign, Type::String) => {
@@ -4076,7 +4300,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     self.instruction(&format!(
                         "{combined} = call ptr @{}(ptr {previous}, ptr {})",
                         crate::runtime::windows_x86_64::string_concat_function(),
-                        value.operand
+                        value_operand
                     ));
                     combined
                 }
@@ -4090,7 +4314,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     })?;
                     self.instruction(&format!(
                         "{result} = {instruction} {llvm_element_type} {previous}, {}",
-                        value.operand
+                        value_operand
                     ));
                     result
                 }
@@ -4103,8 +4327,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         self.instruction(&format!(
             "call void @{}(ptr {}, i64 {}, i64 {element_size}, ptr {value_slot})",
             crate::runtime::windows_x86_64::list_set_function(),
-            list_value.operand,
-            index_value.operand
+            list_operand,
+            index_operand
         ));
         Ok(())
     }
@@ -4177,7 +4401,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .collect::<HashMap<_, _>>();
         let ty = substitute_codegen_type(&ty, &substitutions);
         let receiver = if class_layout {
-            self.emit_expression(object)?.operand
+            let value = self.emit_expression(object)?;
+            self.value_operand(&value, object.span)?
         } else {
             self.emit_place_address(object)?.0
         };
@@ -4239,11 +4464,12 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 ));
             }
             let receiver = self.emit_expression(object)?;
+            let receiver_operand = self.value_operand(&receiver, object.span)?;
             let result = self.fresh_value();
             self.instruction(&format!(
                 "{result} = call i64 @{}(ptr {})",
                 crate::runtime::windows_x86_64::list_length_function(),
-                receiver.operand
+                receiver_operand
             ));
             return Ok(IrValue {
                 ty: Type::Int,
@@ -4286,10 +4512,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .collect::<HashMap<_, _>>();
             let ty = substitute_codegen_type(&ty, &substitutions);
             let aggregate_type = llvm_type(&receiver.ty, member.span, self.source)?;
+            let receiver_operand = self.value_operand(&receiver, object.span)?;
             let result = self.fresh_value();
             self.instruction(&format!(
                 "{result} = extractvalue {aggregate_type} {}, {field_index}",
-                receiver.operand
+                receiver_operand
             ));
             return Ok(IrValue {
                 ty,
@@ -4323,6 +4550,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             return self.emit_named_struct_construction(&constructed_type, fields, span);
         }
         let object = self.emit_allocate_object(&constructed_type)?;
+        let object_slot = if self.async_frame.is_some() {
+            let slot = self.allocate("ptr");
+            self.instruction(&format!("store ptr {object}, ptr {slot}"));
+            Some(slot)
+        } else {
+            None
+        };
         let layout = specialized_class_type_name(&constructed_type)
             .ok_or_else(|| self.error("could not name class layout", span))?;
         let info = self
@@ -4359,16 +4593,24 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 ));
             }
             let ty_name = llvm_type(&field_type, field.span, self.source)?;
+            let value_operand = self.value_operand(&value, field.value.span)?;
+            let object_operand = if let Some(slot) = &object_slot {
+                let loaded = self.fresh_value();
+                self.instruction(&format!("{loaded} = load ptr, ptr {slot}"));
+                loaded
+            } else {
+                object.clone()
+            };
             let address = self.fresh_value();
             self.instruction(&format!(
-                "{address} = getelementptr inbounds {layout}, ptr {object}, i32 0, i32 {}",
+                "{address} = getelementptr inbounds {layout}, ptr {object_operand}, i32 0, i32 {}",
                 field_offset + 1
             ));
-            self.instruction(&format!("store {ty_name} {}, ptr {address}", value.operand));
+            self.instruction(&format!("store {ty_name} {value_operand}, ptr {address}"));
         }
         Ok(IrValue {
             ty: constructed_type,
-            operand: object,
+            operand: object_slot.unwrap_or(object),
         })
     }
 
@@ -4389,6 +4631,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .ok_or_else(|| self.error("missing semantic struct layout", span))?;
         let aggregate_type = llvm_type(struct_type, span, self.source)?;
         let mut aggregate = "undef".to_owned();
+        let aggregate_slot = if self.async_frame.is_some() {
+            let slot = self.allocate(&aggregate_type);
+            self.instruction(&format!("store {aggregate_type} undef, ptr {slot}"));
+            Some(slot)
+        } else {
+            None
+        };
         for field in fields {
             let field_index = info
                 .field_order
@@ -4415,19 +4664,34 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 ));
             }
             let llvm_field_type = llvm_type(&field_type, field.span, self.source)?;
+            let value_operand = self.value_operand(&value, field.value.span)?;
+            let aggregate_operand = if let Some(slot) = &aggregate_slot {
+                let loaded = self.fresh_value();
+                self.instruction(&format!("{loaded} = load {aggregate_type}, ptr {slot}"));
+                loaded
+            } else {
+                aggregate.clone()
+            };
             let next = self.fresh_value();
             self.instruction(&format!(
-                "{next} = insertvalue {aggregate_type} {aggregate}, {llvm_field_type} {}, {field_index}",
-                value.operand
+                "{next} = insertvalue {aggregate_type} {aggregate_operand}, {llvm_field_type} {value_operand}, {field_index}"
             ));
+            if let Some(slot) = &aggregate_slot {
+                self.instruction(&format!("store {aggregate_type} {next}, ptr {slot}"));
+            }
             aggregate = next;
         }
         if fields.is_empty() {
             aggregate = "zeroinitializer".to_owned();
+            if let Some(slot) = &aggregate_slot {
+                self.instruction(&format!(
+                    "store {aggregate_type} zeroinitializer, ptr {slot}"
+                ));
+            }
         }
         Ok(IrValue {
             ty: struct_type.clone(),
-            operand: aggregate,
+            operand: aggregate_slot.unwrap_or(aggregate),
         })
     }
 
@@ -4478,6 +4742,13 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .collect::<Result<Vec<_>, _>>()?;
         let payload_aggregate_type = format!("{{ {} }}", payload_llvm_types.join(", "));
         let mut payload_value = "zeroinitializer".to_owned();
+        let payload_slot = if self.async_frame.is_some() && !arguments.is_empty() {
+            let slot = self.allocate(&payload_aggregate_type);
+            self.instruction(&format!("store {payload_aggregate_type} undef, ptr {slot}"));
+            Some(slot)
+        } else {
+            None
+        };
         if !arguments.is_empty() {
             payload_value = "undef".to_owned();
             for (index, (argument, expected_type)) in
@@ -4490,14 +4761,38 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                         argument.span,
                     ));
                 }
+                let value_operand = self.value_operand(&value, argument.span)?;
+                let previous_payload = if let Some(slot) = &payload_slot {
+                    let loaded = self.fresh_value();
+                    self.instruction(&format!(
+                        "{loaded} = load {payload_aggregate_type}, ptr {slot}"
+                    ));
+                    loaded
+                } else {
+                    payload_value.clone()
+                };
                 let next = self.fresh_value();
                 self.instruction(&format!(
-                    "{next} = insertvalue {payload_aggregate_type} {payload_value}, {} {}, {index}",
-                    payload_llvm_types[index], value.operand
+                    "{next} = insertvalue {payload_aggregate_type} {previous_payload}, {} {value_operand}, {index}",
+                    payload_llvm_types[index]
                 ));
+                if let Some(slot) = &payload_slot {
+                    self.instruction(&format!(
+                        "store {payload_aggregate_type} {next}, ptr {slot}"
+                    ));
+                }
                 payload_value = next;
             }
         }
+        let payload_value = if let Some(slot) = payload_slot {
+            let loaded = self.fresh_value();
+            self.instruction(&format!(
+                "{loaded} = load {payload_aggregate_type}, ptr {slot}"
+            ));
+            loaded
+        } else {
+            payload_value
+        };
 
         let llvm_enum_type = llvm_type(enum_type, span, self.source)?;
         let tagged = self.fresh_value();
@@ -4659,9 +4954,10 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                         )
                     })?;
             let expected = llvm_type(&values[0].ty, span, self.source)?;
+            let value_operand = self.value_operand(&values[0], span)?;
             self.instruction(&format!(
                 "call void @{runtime}({expected} {})",
-                values[0].operand
+                value_operand
             ));
             return Ok(IrValue {
                 ty: Type::Void,
@@ -4783,15 +5079,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             }
             let llvm_element_type = llvm_type(element_type, span, self.source)?;
             let element_size = self.emit_list_element_size(element_type, span)?;
+            let value_operand = self.value_operand(&value, arguments[0].span)?;
+            let receiver_operand = self.value_operand(&receiver, object.span)?;
             let slot = self.allocate(&llvm_element_type);
             self.instruction(&format!(
-                "store {llvm_element_type} {}, ptr {slot}",
-                value.operand
+                "store {llvm_element_type} {value_operand}, ptr {slot}"
             ));
             let call = format!(
                 "call void @{}(ptr {}, i64 {element_size}, ptr {slot})",
                 crate::runtime::windows_x86_64::list_add_function(),
-                receiver.operand
+                receiver_operand
             );
             return self.emit_call_result(call, Type::Void);
         }
@@ -4867,15 +5164,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 ));
             }
             let contract_ty = llvm_type(&receiver.ty, member.span, self.source)?;
+            let receiver_operand = self.value_operand(&receiver, object.span)?;
             let object = self.fresh_value();
             let table = self.fresh_value();
             self.instruction(&format!(
                 "{object} = extractvalue {contract_ty} {}, 0",
-                receiver.operand
+                receiver_operand
             ));
             self.instruction(&format!(
                 "{table} = extractvalue {contract_ty} {}, 1",
-                receiver.operand
+                receiver_operand
             ));
             let slot = self.fresh_value();
             let target = self.fresh_value();
@@ -4886,10 +5184,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             let return_ty = llvm_type(&signature.return_type, span, self.source)?;
             let mut call_arguments = vec![format!("ptr {object}")];
             for (value, ty) in values.iter().zip(&signature.parameters) {
+                let value_operand = self.value_operand(value, span)?;
                 call_arguments.push(format!(
                     "{} {}",
                     llvm_type(ty, span, self.source)?,
-                    value.operand
+                    value_operand
                 ));
             }
             let call = format!("call {return_ty} {target}({})", call_arguments.join(", "));
@@ -4931,21 +5230,23 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         } else {
             llvm_type(&signature.return_type, span, self.source)?
         };
+        let receiver_operand = self.value_operand(&receiver, object.span)?;
         let receiver_argument = if receiver.ty.is_struct() {
             format!(
                 "{} {}",
                 llvm_type(&receiver.ty, member.span, self.source)?,
-                receiver.operand
+                receiver_operand
             )
         } else {
-            format!("ptr {}", receiver.operand)
+            format!("ptr {receiver_operand}")
         };
         let mut call_arguments = vec![receiver_argument];
         for (value, ty) in values.iter().zip(&signature.parameters) {
+            let value_operand = self.value_operand(value, span)?;
             call_arguments.push(format!(
                 "{} {}",
                 llvm_type(ty, span, self.source)?,
-                value.operand
+                value_operand
             ));
         }
         let call = format!(
@@ -4989,18 +5290,15 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         } else {
             llvm_type(&signature.return_type, span, self.source)?
         };
-        let arguments = values
-            .iter()
-            .zip(&signature.parameters)
-            .map(|(value, ty)| {
-                Ok(format!(
-                    "{} {}",
-                    llvm_type(ty, span, self.source)?,
-                    value.operand
-                ))
-            })
-            .collect::<Result<Vec<_>, Diagnostic>>()?
-            .join(", ");
+        let mut lowered_arguments = Vec::with_capacity(values.len());
+        for (value, ty) in values.iter().zip(&signature.parameters) {
+            lowered_arguments.push(format!(
+                "{} {}",
+                llvm_type(ty, span, self.source)?,
+                self.value_operand(value, span)?
+            ));
+        }
+        let arguments = lowered_arguments.join(", ");
         let call = format!("call {return_ty} @{symbol}({arguments})");
         self.emit_call_result(call, signature.call_result_type())
     }
@@ -5031,16 +5329,17 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     span,
                 ));
             }
+            let value_operand = self.value_operand(value, span)?;
             let operand = match abi_type {
                 CAbiType::Int32 => {
                     let checked = self.fresh_value();
                     self.instruction(&format!(
                         "{checked} = call i32 @princi_rt_ffi_int32_checked(i64 {})",
-                        value.operand
+                        value_operand
                     ));
                     checked
                 }
-                CAbiType::Int64 | CAbiType::Float64 => value.operand.clone(),
+                CAbiType::Int64 | CAbiType::Float64 => value_operand,
                 CAbiType::Void => {
                     return Err(
                         self.error("Void is not valid as an external function parameter", span)
@@ -5084,18 +5383,15 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
         let symbol = constructor_name_for_type(class_type)
             .ok_or_else(|| self.error("could not name class constructor", span))?;
-        let arguments = values
-            .iter()
-            .zip(&signature.parameters)
-            .map(|(value, ty)| {
-                Ok(format!(
-                    "{} {}",
-                    llvm_type(ty, span, self.source)?,
-                    value.operand
-                ))
-            })
-            .collect::<Result<Vec<_>, Diagnostic>>()?
-            .join(", ");
+        let mut lowered_arguments = Vec::with_capacity(values.len());
+        for (value, ty) in values.iter().zip(&signature.parameters) {
+            lowered_arguments.push(format!(
+                "{} {}",
+                llvm_type(ty, span, self.source)?,
+                self.value_operand(value, span)?
+            ));
+        }
+        let arguments = lowered_arguments.join(", ");
         let result = self.fresh_value();
         self.instruction(&format!("{result} = call ptr @{symbol}({arguments})"));
         Ok(IrValue {
@@ -5152,10 +5448,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 .ok_or_else(|| self.error("missing semantic struct field type", span))?;
             let field_type = substitute_codegen_type(field_type, &substitutions);
             let llvm_field_type = llvm_type(&field_type, span, self.source)?;
+            let value_operand = self.value_operand(value, span)?;
             let next = self.fresh_value();
             self.instruction(&format!(
                 "{next} = insertvalue {aggregate_type} {aggregate}, {llvm_field_type} {}, {index}",
-                value.operand
+                value_operand
             ));
             aggregate = next;
         }
@@ -5222,6 +5519,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         }
         let left_value = self.emit_expression(left)?;
         let right_value = self.emit_expression(right)?;
+        let left_operand = self.value_operand(&left_value, left.span)?;
+        let right_operand = self.value_operand(&right_value, right.span)?;
         let operand_type = self
             .typed
             .expression_type(left)
@@ -5232,8 +5531,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             self.instruction(&format!(
                 "{result} = call ptr @{}(ptr {}, ptr {})",
                 crate::runtime::windows_x86_64::string_concat_function(),
-                left_value.operand,
-                right_value.operand
+                left_operand,
+                right_operand
             ));
             return Ok(IrValue {
                 ty: Type::String,
@@ -5247,8 +5546,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             self.instruction(&format!(
                 "{comparison} = call i1 @{}(ptr {}, ptr {})",
                 crate::runtime::windows_x86_64::string_equal_function(),
-                left_value.operand,
-                right_value.operand
+                left_operand,
+                right_operand
             ));
             let result = if operator == BinaryOperator::Equal {
                 comparison
@@ -5300,7 +5599,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         };
         self.instruction(&format!(
             "{result} = {instruction} {left_ty} {}, {}",
-            left_value.operand, right_value.operand
+            left_operand, right_operand
         ));
         Ok(IrValue {
             ty: result_ty,
@@ -5315,6 +5614,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         right: &Expression,
     ) -> Result<IrValue, Diagnostic> {
         let left_value = self.emit_expression(left)?;
+        let left_operand = self.value_operand(&left_value, left.span)?;
         let left_label = self.current_label.clone();
         let rhs_label = self.fresh_label("logic.rhs");
         let merge_label = self.fresh_label("logic.end");
@@ -5325,10 +5625,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         };
         self.terminate(&format!(
             "br i1 {}, label %{true_label}, label %{false_label}",
-            left_value.operand
+            left_operand
         ));
         self.label(&rhs_label);
         let right_value = self.emit_expression(right)?;
+        let right_operand = self.value_operand(&right_value, right.span)?;
         let rhs_end = self.current_label.clone();
         if !self.terminated {
             self.terminate(&format!("br label %{merge_label}"));
@@ -5337,7 +5638,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         let result = self.fresh_value();
         self.instruction(&format!(
             "{result} = phi i1 [ {short_value}, %{left_label} ], [ {}, %{rhs_end} ]",
-            right_value.operand
+            right_operand
         ));
         Ok(IrValue {
             ty: Type::Bool,
@@ -5392,6 +5693,9 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
     }
 
     fn allocate(&mut self, ty: &str) -> String {
+        if let Some(frame) = self.async_frame.as_ref() {
+            return frame.borrow_mut().push_slot(ty);
+        }
         let address = self.fresh_value();
         self.allocas.push(format!("{address} = alloca {ty}"));
         address
@@ -5535,6 +5839,55 @@ mod tests {
         assert!(ir.contains("icmp sle i64"));
         assert!(ir.contains("define i32 @main()"));
         assert!(ir.contains("call void @princi_rt_print_int"));
+    }
+
+    #[test]
+    fn lowers_async_functions_to_resumable_frames() {
+        let ir = lower(
+            r#"async fn one() -> Int { return 1 }
+async fn load() -> Int {
+    let first = await one()
+    let second = await one()
+    return first + second
+}
+async fn identity<T>(value: T) -> T { return value }
+async fn main() {
+    let total = await load()
+    let first = await identity<Int>(total)
+    let second = await identity<Int>(first)
+    println(second)
+}"#,
+        )
+        .expect("valid async program should lower to LLVM");
+
+        assert!(ir.contains("%princi.async.frame.princi_fn_6c6f6164_async_body = type { i32"));
+        assert!(ir.contains("switch i32 %princi.resume.pc"));
+        assert!(ir.contains("call i1 @princi_rt_task_wait_on"));
+        assert!(ir.contains("await.resume"));
+        let first_resume = ir
+            .split("await.resume.0:\n")
+            .nth(1)
+            .expect("async callback should have a resume continuation");
+        let task_handle_reload = first_resume
+            .find("load ptr, ptr %princi.frame.slot.")
+            .expect("the awaited task handle should be reloaded from its frame");
+        let result_load = first_resume
+            .find("call ptr @princi_rt_task_result")
+            .expect("resume continuation should read the completed task result");
+        assert!(task_handle_reload < result_load);
+        assert_eq!(
+            ir.matches("define internal ptr @princi_generic_6964656e74697479_i(")
+                .count(),
+            1,
+            "identical async generic uses share one native specialization"
+        );
+        assert_eq!(
+            ir.matches("define internal void @princi_generic_6964656e74697479_i_async_body")
+                .count(),
+            1
+        );
+        assert!(!ir.contains("CreateFiber"));
+        assert!(!ir.contains("SwitchToFiber"));
     }
 
     #[test]

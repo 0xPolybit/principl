@@ -1559,3 +1559,119 @@ async fn main() -> Int {
         );
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn async_interface_result_is_preserved_across_await() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"interface Named { fn name() -> String }
+trait Labeled { fn label() -> String }
+class User implements Named, Labeled {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn label() -> String { return self.value }
+}
+async fn provide() -> Named { return User("Ada") }
+async fn identity<T: Labeled>(value: T) -> T { return value }
+async fn main() {
+    let named = await provide()
+    println(named.name())
+    let user = await identity<User>(User("generic"))
+    println(user.label())
+}"#;
+    let executable = dir.build("async-interface.prnc", source);
+    let run = Command::new(executable)
+        .output()
+        .expect("generated async executable should run");
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "Ada\ngeneric\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn async_state_machine_preserves_values_in_control_flow_and_expressions() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"async fn one(value: Int) -> Int { return value }
+async fn sum(a: Int, b: Int) -> Int { return a + b }
+async fn isReady(value: Int) -> Bool { return value < 2 }
+async fn factorial(value: Int) -> Int {
+    if value <= 1 { return 1 }
+    return value * await factorial(value - 1)
+}
+async fn countdown<T>(value: T, depth: Int) -> T {
+    if depth <= 0 { return value }
+    return await countdown<T>(value, depth - 1)
+}
+class Holder {
+    value: Int
+    init(value: Int) { self.value = value }
+}
+async fn pick(value: Int) -> Int {
+    return match value {
+        0 => await one(10)
+        _ => await sum(await one(value), 1)
+    }
+}
+async fn compute() -> Int {
+    let first = await one(4)
+    let second = await sum(first, await one(3))
+    var total = 0
+    if await isReady(1) {
+        total = await pick(second)
+    }
+    var index = 0
+    while await isReady(index) {
+        total += await one(1)
+        index += 1
+    }
+    for item in 0..2 {
+        total += await one(item)
+    }
+    {
+        let nested = await one(total)
+        return await one(nested)
+    }
+}
+async fn mutateManagedValues() -> Int {
+    var holder = Holder(0)
+    holder.value = await one(4)
+    let values: List<Int> = [await one(1), await one(2)]
+    values[0] = await one(values[1])
+    values.add(await one(3))
+    return holder.value + values[0] + values[1] + values[2]
+}
+async fn main() {
+    println(await factorial(5))
+    println(await countdown<String>("stable", 3))
+    println(await compute())
+    println(await mutateManagedValues())
+}"#;
+
+    for extension in ["prnc", "princi"] {
+        let executable = dir.build(&format!("async-state-machine.{extension}"), source);
+        let run = Command::new(executable)
+            .output()
+            .expect("generated async executable should run");
+        assert!(
+            run.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+            "120\nstable\n11\n11\n"
+        );
+    }
+}
