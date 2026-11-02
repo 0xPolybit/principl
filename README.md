@@ -458,9 +458,10 @@ synchronization, and project/module/package tooling. It preserves the current
 Windows x86-64 target and the standalone `.prnc` / `.princi` build workflow.
 These features are not available in v0.2. See the [canonical v0.3 scope](docs/v0.3-scope.md) for boundaries, compatibility expectations, and the tentative v0.4/v0.5 memory-system research areas.
 
-### v0.3 async syntax foundation
+### v0.3 asynchronous runtime (working tree)
 
-The frontend now recognizes the planned async/concurrency forms:
+The current working tree implements a small Windows x86-64 asynchronous
+runtime for the v0.3 syntax foundation:
 
 ```princi
 async fn fetch() -> String {
@@ -477,24 +478,27 @@ async fn main() {
 }
 ```
 
-`async fn` is currently recognized for top-level functions. `await` is a prefix
-expression at unary precedence: it applies to the next call/member/index
-expression, before surrounding binary operators. It is accepted only inside
-an `async fn`. `scope { ... }` is parsed as a task-scope statement. The
-reserved OS-thread form is `thread spawn worker(args)`.
+`async fn` is recognized for top-level functions. `await` is a prefix
+expression at unary precedence and is accepted only inside an async function.
+`scope { ... }` introduces a task scope, and `spawn` schedules a `Task<T>` as a
+child of the active scope. The reserved `thread spawn worker(args)` form is
+parsed but does not have thread runtime behavior.
 
-The semantic frontend now represents a call to `async fn f() -> T` as
-`Task<T>`, while the function body still returns `T`. `await` accepts only
-`Task<T>`, yields `T`, and is rejected outside an async function. `Task<T>` is a
-reserved compiler core generic, including `Task<Void>`; it is not implicitly
-converted to `T`. `spawn` requires a `Task<T>` in an async function, and a task
-scope introduces a lexical block. The reserved `thread spawn` form is parsed
-but not yet semantically implemented.
+Calling `async fn f() -> T` creates a cold `Task<T>`; the body runs when the
+task is awaited or spawned. Tasks use opaque runtime handles, managed result
+storage, Windows fibers, and a deterministic FIFO cooperative scheduler.
+Awaiting suspends the current fiber until the awaited task completes. Exiting a
+scope joins its spawned children. Async `main` uses a generated native wrapper
+to initialize the runtime, schedule and await the entry task, return an `Int`
+as the process status when present, shut down fibers, and then release managed
+storage. Existing synchronous `fn main()` and `fn main() -> Int` entry points
+keep their prior behavior. `.prnc` and `.princi` remain exact aliases.
 
-Async execution and Task values still have no runtime or LLVM representation.
-The compiler type-checks these constructs but stops before LLVM with an
-unsupported-feature diagnostic. The current v0.2 release remains synchronous.
-`.prnc` and `.princi` accept the same syntax and produce the same AST.
+This is the initial single-threaded runtime foundation, not the complete v0.3
+concurrency roadmap. Timers, cancellation, OS threads, channels, synchronization
+primitives, and project/package tooling are not implemented yet. The current
+published compiler version is still v0.2.0; see the [canonical v0.3
+scope](docs/v0.3-scope.md) for the full planned boundary.
 
 ## Website development
 

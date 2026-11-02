@@ -1,7 +1,7 @@
-use crate::ast::{Declaration as ProgramDeclaration, Program};
+use crate::ast::Program;
 use crate::codegen;
 use crate::compiler::BuildOptions;
-use crate::diagnostics::{Diagnostic, DiagnosticBundle, DiagnosticCode};
+use crate::diagnostics::DiagnosticBundle;
 use crate::lexer;
 use crate::modules;
 use crate::parser;
@@ -18,25 +18,6 @@ pub fn compile(source: &SourceFile, options: &BuildOptions) -> Result<(), Diagno
     if !analyzed.diagnostics.is_empty() {
         return Err(DiagnosticBundle::from_diagnostics(analyzed.diagnostics));
     }
-    if let Some(function) =
-        analyzed
-            .typed_program
-            .program
-            .declarations
-            .iter()
-            .find_map(|declaration| match declaration {
-                ProgramDeclaration::Function(function) if function.is_async => Some(function),
-                _ => None,
-            })
-    {
-        return Err(DiagnosticBundle::from(Diagnostic::at_source(
-            DiagnosticCode::UnsupportedFeature,
-            "async functions are type-checked but cannot be compiled until the async runtime is implemented",
-            &compilation_source,
-            function.span,
-        )));
-    }
-
     let llvm_ir = codegen::generate_llvm_ir(&analyzed.typed_program, &compilation_source)
         .map_err(DiagnosticBundle::from)?;
     codegen::compile_native(&llvm_ir, options).map_err(DiagnosticBundle::from)

@@ -1484,3 +1484,78 @@ fn main() {
         assert_eq!(stdout, expected);
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn async_tasks_await_and_support_v03_language_values() {
+    if skip_without_native_toolchain() {
+        return;
+    }
+    let dir = TestDir::new();
+    let source = r#"interface Named { fn name() -> String }
+trait Labeled { fn label() -> String }
+class User implements Named, Labeled {
+    value: String
+    init(value: String) { self.value = value }
+    fn name() -> String { return self.value }
+    fn label() -> String { return self.value }
+}
+struct Point { x: Int }
+enum Maybe<T> { Some(T) None }
+
+async fn identity<T: Labeled>(value: T) -> T { return value }
+async fn provide() -> Named { return User("Ada") }
+async fn point() -> Point { return Point { x: 7 } }
+async fn maybePoint() -> Maybe<Point> { return Maybe<Point>.Some(Point { x: 9 }) }
+async fn load() -> Result<User, String> { return Result<User, String>.Ok(User("from Result")) }
+async fn read() -> Result<String, String> {
+    let loaded = await load()
+    let user = loaded?
+    return Result<String, String>.Ok(user.name())
+}
+async fn announce() { println("void") }
+async fn worker(value: Int) -> Int { println(value); return value }
+
+async fn main() -> Int {
+    await announce()
+    let named = await provide()
+    println(named.name())
+    let user = await identity<User>(User("generic"))
+    println(user.label())
+    let position = await point()
+    println(position.x)
+    match await maybePoint() {
+        Some(item) => println(item.x)
+        None => println("none")
+    }
+    match await read() {
+        Ok(text) => println(text)
+        Err(message) => println(message)
+    }
+    scope {
+        let first = spawn worker(1)
+        let second = spawn worker(2)
+        println("scope")
+    }
+    return 17
+}"#;
+
+    for extension in ["prnc", "princi"] {
+        let executable = dir.build(&format!("async-runtime.{extension}"), source);
+        let run = Command::new(executable)
+            .output()
+            .expect("generated async executable should run");
+        assert_eq!(
+            run.status.code(),
+            Some(17),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+            "void\nAda\ngeneric\n7\n9\nfrom Result\nscope\n1\n2\n"
+        );
+    }
+}

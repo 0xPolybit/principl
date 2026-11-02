@@ -417,9 +417,26 @@ pub(crate) fn list_add_function() -> &'static str {
     "princi_rt_list_add"
 }
 
-/// Adapt Princi main's return value to the MinGW CRT int main() contract.
-pub(crate) fn entry_point(main_symbol: &str, returns_int: bool) -> String {
-    let body = if returns_int {
+/// Adapt a Princi main to the MinGW CRT int main() contract.
+pub(crate) fn entry_point(main_symbol: &str, returns_int: bool, is_async: bool) -> String {
+    let body = if is_async {
+        let status = if returns_int {
+            "  %princi.result = load i64, ptr %princi.result.ptr\n  %princi.exit32 = trunc i64 %princi.result to i32\n".to_owned()
+        } else {
+            String::new()
+        };
+        let result = if returns_int {
+            "  ret i32 %princi.exit32\n".to_owned()
+        } else {
+            "  ret i32 0\n".to_owned()
+        };
+        format!(
+            "  call void @{}()\n  %princi.task = call ptr @{main_symbol}()\n  %princi.result.ptr = call ptr @{}(ptr %princi.task)\n{status}  call void @{}()\n  call void @princi_rt_managed_shutdown()\n{result}",
+            crate::runtime::windows_x86_64_async::runtime_init_function(),
+            crate::runtime::windows_x86_64_async::run_main_function(),
+            crate::runtime::windows_x86_64_async::runtime_shutdown_function(),
+        )
+    } else if returns_int {
         format!(
             "  %princi.exit = call i64 @{main_symbol}()\n  call void @princi_rt_managed_shutdown()\n  %princi.exit32 = trunc i64 %princi.exit to i32\n  ret i32 %princi.exit32\n"
         )

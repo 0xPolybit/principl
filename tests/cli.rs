@@ -318,7 +318,7 @@ fn ffi_rejects_managed_values_before_native_linking() {
 }
 
 #[test]
-fn async_syntax_is_identical_but_not_compiled_for_both_extensions_yet() {
+fn async_builds_are_identical_for_both_source_extensions() {
     let dir = TestDir::new();
     let source_text = "async fn work() -> Int { return 1 }\nasync fn main() { scope { let task = spawn work()\n let value = await task } }";
 
@@ -333,17 +333,19 @@ fn async_syntax_is_identical_but_not_compiled_for_both_extensions_yet() {
             .output()
             .expect("CLI process should start");
 
-        assert!(!result.status.success());
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains("error[E0301]"), "{stderr}");
         assert!(
-            stderr.contains("async functions are type-checked but cannot be compiled"),
-            "{stderr}"
+            result.status.success(),
+            "async build failed: {}",
+            String::from_utf8_lossy(&result.stderr)
         );
+        assert!(output_path.is_file(), "expected {}", output_path.display());
+        let execution = Command::new(&output_path)
+            .output()
+            .expect("generated async executable should run");
         assert!(
-            !output_path.exists(),
-            "unsupported async source must not produce {}",
-            output_path.display()
+            execution.status.success(),
+            "async program failed: {}",
+            String::from_utf8_lossy(&execution.stderr)
         );
     }
 }

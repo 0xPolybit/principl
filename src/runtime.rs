@@ -4,3 +4,4 @@
 //! implementation symbols are compiler-private and are never source names.
 
 pub(crate) mod windows_x86_64;
+pub(crate) mod windows_x86_64_async;

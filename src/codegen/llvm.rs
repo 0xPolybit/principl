@@ -565,6 +565,7 @@ impl<'a> IrGenerator<'a> {
             "; Princi v0.2 Windows x86-64 module\ntarget datalayout = \"{WINDOWS_X86_64_DATA_LAYOUT}\"\ntarget triple = \"{WINDOWS_X86_64_TRIPLE}\"\n\n{}",
             crate::runtime::windows_x86_64::LLVM_RUNTIME
         );
+        ir.push_str(crate::runtime::windows_x86_64_async::ASYNC_RUNTIME);
         ir.push_str(crate::runtime::windows_x86_64::LIST_RUNTIME);
         ir.push('\n');
         ir.push_str("%princi.typeinfo = type { ptr }\n");
@@ -744,6 +745,7 @@ impl<'a> IrGenerator<'a> {
         ir.push_str(&crate::runtime::windows_x86_64::entry_point(
             &function_name("main"),
             main_return == Type::Int,
+            main.is_async,
         ));
         Ok(ir)
     }
@@ -1824,12 +1826,7 @@ fn llvm_type(ty: &Type, span: SourceSpan, source: &SourceFile) -> Result<String,
         Type::GenericInstance {
             constructor: GenericTypeConstructor::Task,
             ..
-        } => Err(Diagnostic::at_source(
-            DiagnosticCode::UnsupportedFeature,
-            "Task<T> requires the async runtime and has no native representation yet",
-            source,
-            span,
-        )),
+        } => Ok("ptr".to_owned()),
         Type::GenericInstance {
             constructor: GenericTypeConstructor::Class(_),
             ..
@@ -1987,13 +1984,15 @@ fn specialize_function_type(
     signature: &FunctionType,
     substitutions: &HashMap<u32, Type>,
 ) -> FunctionType {
-    FunctionType::new(
+    FunctionType::with_async(
+        Vec::new(),
         signature
             .parameters
             .iter()
             .map(|ty| substitute_codegen_type(ty, substitutions))
             .collect(),
         substitute_codegen_type(&signature.return_type, substitutions),
+        signature.is_async,
     )
 }
 
@@ -2248,6 +2247,8 @@ struct FunctionEmitter<'a, 'pool> {
     next_label: usize,
     current_label: String,
     terminated: bool,
+    async_task: Option<String>,
+    task_scopes: Vec<String>,
 }
 
 impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
@@ -2269,6 +2270,8 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             next_label: 0,
             current_label: "entry".to_owned(),
             terminated: false,
+            async_task: None,
+            task_scopes: Vec::new(),
         }
     }
 
@@ -2283,6 +2286,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             &signature,
             None,
             false,
+            None,
         )
     }
 
@@ -2301,6 +2305,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             None,
             true,
+            None,
         )
     }
 
@@ -2319,6 +2324,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             Some(Type::Class(class.name.name.clone())),
             false,
+            None,
         )
     }
 
@@ -2361,6 +2367,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             Some(owner.clone()),
             true,
+            None,
         )
     }
 
@@ -2381,6 +2388,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             Some(owner.clone()),
             internal,
+            None,
         )
     }
 
@@ -2399,6 +2407,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             Some(Type::Class(class.name.name.clone())),
             false,
+            None,
         )
     }
 
@@ -2424,7 +2433,112 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             signature,
             Some(owner.clone()),
             true,
+            None,
         )
+    }
+
+    fn emit_async_routine(
+        self,
+        symbol: &str,
+        display_name: &str,
+        name_span: SourceSpan,
+        routine_parameters: &[crate::ast::Parameter],
+        body: &Block,
+        signature: &FunctionType,
+        owner: Option<Type>,
+        internal: bool,
+    ) -> Result<String, Diagnostic> {
+        let typed = self.typed;
+        let source = self.source;
+        let strings = self.strings;
+        let generic_calls = self.generic_calls;
+        let callback_symbol = format!("{symbol}_async_body");
+        let arguments_type = format!("%princi.async.args.{callback_symbol}");
+
+        let mut argument_types = Vec::new();
+        let mut wrapper_parameters = Vec::new();
+        if let Some(owner) = owner.as_ref() {
+            let ty = llvm_type(owner, name_span, source)?;
+            argument_types.push(ty.clone());
+            wrapper_parameters.push(format!("{ty} %self"));
+        }
+        for (index, (parameter, ty)) in routine_parameters
+            .iter()
+            .zip(&signature.parameters)
+            .enumerate()
+        {
+            let llvm_ty = llvm_type(ty, parameter.type_reference.span, source)?;
+            argument_types.push(llvm_ty.clone());
+            wrapper_parameters.push(format!("{llvm_ty} %arg{index}"));
+        }
+        if argument_types.is_empty() {
+            argument_types.push("i8".to_owned());
+        }
+
+        let mut output = format!(
+            "{arguments_type} = type {{ {} }}\n",
+            argument_types.join(", ")
+        );
+        let linkage = if internal { "internal " } else { "" };
+        output.push_str(&format!(
+            "define {linkage}ptr @{symbol}({}) {{\nentry:\n  %princi.args = alloca {arguments_type}, align 8\n",
+            wrapper_parameters.join(", ")
+        ));
+
+        let mut argument_index = 0;
+        if owner.is_some() {
+            let slot = format!("%princi.arg.slot.{argument_index}");
+            output.push_str(&format!(
+                "  {slot} = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 {argument_index}\n  store {} %self, ptr {slot}\n",
+                argument_types[argument_index]
+            ));
+            argument_index += 1;
+        }
+        for (index, _) in routine_parameters.iter().enumerate() {
+            let slot = format!("%princi.arg.slot.{argument_index}");
+            output.push_str(&format!(
+                "  {slot} = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 {argument_index}\n  store {} %arg{index}, ptr {slot}\n",
+                argument_types[argument_index]
+            ));
+            argument_index += 1;
+        }
+        if routine_parameters.is_empty() && owner.is_none() {
+            output.push_str(&format!(
+                "  %princi.empty.args = getelementptr inbounds {arguments_type}, ptr %princi.args, i32 0, i32 0\n  store i8 0, ptr %princi.empty.args\n"
+            ));
+        }
+        let context_end = format!("%princi.context.end");
+        let context_size = format!("%princi.context.size");
+        output.push_str(&format!(
+            "  {context_end} = getelementptr {arguments_type}, ptr null, i32 1\n  {context_size} = ptrtoint ptr {context_end} to i64\n"
+        ));
+        let result_size = if signature.return_type.as_ref() == &Type::Void {
+            "0".to_owned()
+        } else {
+            let result_type = llvm_type(&signature.return_type, name_span, source)?;
+            output.push_str(&format!(
+                "  %princi.result.end = getelementptr {result_type}, ptr null, i32 1\n  %princi.result.size = ptrtoint ptr %princi.result.end to i64\n"
+            ));
+            "%princi.result.size".to_owned()
+        };
+        output.push_str(&format!(
+            "  %princi.task = call ptr @{}(ptr @{callback_symbol}, i64 {result_size}, ptr %princi.args, i64 {context_size})\n  ret ptr %princi.task\n}}\n\n",
+            crate::runtime::windows_x86_64_async::create_function()
+        ));
+
+        let body = FunctionEmitter::new(typed, source, strings, generic_calls).emit_routine(
+            &callback_symbol,
+            display_name,
+            name_span,
+            routine_parameters,
+            body,
+            signature,
+            owner,
+            true,
+            Some(&arguments_type),
+        )?;
+        output.push_str(&body);
+        Ok(output)
     }
 
     fn emit_routine(
@@ -2437,7 +2551,21 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
         signature: &FunctionType,
         owner: Option<Type>,
         internal: bool,
+        async_args_type: Option<&str>,
     ) -> Result<String, Diagnostic> {
+        if signature.is_async && async_args_type.is_none() {
+            return self.emit_async_routine(
+                symbol,
+                display_name,
+                name_span,
+                routine_parameters,
+                body,
+                signature,
+                owner,
+                internal,
+            );
+        }
+
         if signature.return_type.as_ref() != &Type::Void && !block_returns(body) {
             return Err(self.error_with(
                 DiagnosticCode::InvalidReturn,
@@ -2449,50 +2577,126 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             ));
         }
 
-        let return_ty = llvm_type(&signature.return_type, name_span, self.source)?;
-        let mut llvm_parameters = Vec::new();
-        if let Some(owner) = owner.as_ref() {
-            let self_type = if owner.is_struct() {
-                llvm_type(owner, name_span, self.source)?
-            } else {
-                "ptr".to_owned()
-            };
-            llvm_parameters.push(format!("{self_type} %self"));
+        let async_body = async_args_type.is_some();
+        if async_body {
+            self.async_task = Some("%princi.task".to_owned());
         }
-        for (index, (parameter, ty)) in routine_parameters
-            .iter()
-            .zip(&signature.parameters)
-            .enumerate()
-        {
-            let ty_name = llvm_type(ty, parameter.type_reference.span, self.source)?;
-            llvm_parameters.push(format!("{ty_name} %arg{index}"));
+        let return_ty = if async_body {
+            "void".to_owned()
+        } else {
+            llvm_type(&signature.return_type, name_span, self.source)?
+        };
+        let mut llvm_parameters = Vec::new();
+        if async_body {
+            llvm_parameters.extend([
+                "ptr %princi.task".to_owned(),
+                "ptr %princi.context".to_owned(),
+            ]);
+        } else {
+            if let Some(owner) = owner.as_ref() {
+                let self_type = if owner.is_struct() {
+                    llvm_type(owner, name_span, self.source)?
+                } else {
+                    "ptr".to_owned()
+                };
+                llvm_parameters.push(format!("{self_type} %self"));
+            }
+            for (index, (parameter, ty)) in routine_parameters
+                .iter()
+                .zip(&signature.parameters)
+                .enumerate()
+            {
+                let ty_name = llvm_type(ty, parameter.type_reference.span, self.source)?;
+                llvm_parameters.push(format!("{ty_name} %arg{index}"));
+            }
         }
 
         self.push_scope();
-        if let Some(owner) = owner {
-            let self_type = if owner.is_struct() {
-                llvm_type(&owner, name_span, self.source)?
-            } else {
-                "ptr".to_owned()
-            };
-            let address = self.allocate(&self_type);
-            self.instruction(&format!("store {self_type} %self, ptr {address}"));
-            self.bind("self", LocalBinding { address, ty: owner });
-        }
-        for (index, parameter) in routine_parameters.iter().enumerate() {
-            let ty = self
-                .typed
-                .parameter_type(parameter)
-                .cloned()
-                .unwrap_or(Type::Error);
-            let ty_name = llvm_type(&ty, parameter.type_reference.span, self.source)?;
-            let address = self.allocate(&ty_name);
-            self.instruction(&format!("store {ty_name} %arg{index}, ptr {address}"));
-            self.bind(&parameter.name.name, LocalBinding { address, ty });
+        if let Some(args_type) = async_args_type {
+            let mut context_index = 0;
+            if let Some(owner) = owner {
+                let self_type = llvm_type(&owner, name_span, self.source)?;
+                let slot = self.fresh_value();
+                let value = self.fresh_value();
+                self.instruction(&format!(
+                    "{slot} = getelementptr inbounds {args_type}, ptr %princi.context, i32 0, i32 {context_index}"
+                ));
+                self.instruction(&format!("{value} = load {self_type}, ptr {slot}"));
+                let address = self.allocate(&self_type);
+                self.instruction(&format!("store {self_type} {value}, ptr {address}"));
+                self.bind("self", LocalBinding { address, ty: owner });
+                context_index += 1;
+            }
+            for (index, parameter) in routine_parameters.iter().enumerate() {
+                let ty = self
+                    .typed
+                    .parameter_type(parameter)
+                    .cloned()
+                    .unwrap_or_else(|| signature.parameters[index].clone());
+                let ty_name = llvm_type(&ty, parameter.type_reference.span, self.source)?;
+                let slot = self.fresh_value();
+                let value = self.fresh_value();
+                self.instruction(&format!(
+                    "{slot} = getelementptr inbounds {args_type}, ptr %princi.context, i32 0, i32 {context_index}"
+                ));
+                self.instruction(&format!("{value} = load {ty_name}, ptr {slot}"));
+                let address = self.allocate(&ty_name);
+                self.instruction(&format!("store {ty_name} {value}, ptr {address}"));
+                self.bind(&parameter.name.name, LocalBinding { address, ty });
+                context_index += 1;
+            }
+        } else {
+            if let Some(owner) = owner {
+                let self_type = if owner.is_struct() {
+                    llvm_type(&owner, name_span, self.source)?
+                } else {
+                    "ptr".to_owned()
+                };
+                let address = self.allocate(&self_type);
+                self.instruction(&format!("store {self_type} %self, ptr {address}"));
+                self.bind("self", LocalBinding { address, ty: owner });
+            }
+            for (index, parameter) in routine_parameters.iter().enumerate() {
+                let ty = self
+                    .typed
+                    .parameter_type(parameter)
+                    .cloned()
+                    .unwrap_or(Type::Error);
+                let ty_name = llvm_type(&ty, parameter.type_reference.span, self.source)?;
+                let address = self.allocate(&ty_name);
+                self.instruction(&format!("store {ty_name} %arg{index}, ptr {address}"));
+                self.bind(&parameter.name.name, LocalBinding { address, ty });
+            }
         }
         self.emit_block_contents(body)?;
         if !self.terminated {
-            if signature.return_type.as_ref() == &Type::Void {
+            if async_body {
+                if signature.return_type.as_ref() != &Type::Void {
+                    let result_ty = llvm_type(&signature.return_type, body.span, self.source)?;
+                    let fallback = if result_ty == "double" {
+                        "0.0"
+                    } else if result_ty == "ptr" {
+                        "null"
+                    } else if matches!(
+                        signature.return_type.as_ref(),
+                        Type::Struct(_)
+                            | Type::Enum(_)
+                            | Type::Interface(_)
+                            | Type::Trait(_)
+                            | Type::GenericInstance {
+                                constructor: GenericTypeConstructor::Struct(_)
+                                    | GenericTypeConstructor::Enum(_),
+                                ..
+                            }
+                    ) {
+                        "zeroinitializer"
+                    } else {
+                        "0"
+                    };
+                    self.emit_store_async_result(&signature.return_type, fallback, body.span)?;
+                }
+                self.terminate("ret void");
+            } else if signature.return_type.as_ref() == &Type::Void {
                 self.terminate("ret void");
             } else {
                 // This is only reachable when flow-sensitive semantic checking
@@ -2754,9 +2958,16 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     } else {
                         value
                     };
-                    let ty_name = llvm_type(&value.ty, statement.span, self.source)?;
-                    self.terminate(&format!("ret {ty_name} {}", value.operand));
+                    if self.async_task.is_some() {
+                        self.emit_store_async_result(&value.ty, &value.operand, statement.span)?;
+                        self.emit_async_scope_unwind();
+                        self.terminate("ret void");
+                    } else {
+                        let ty_name = llvm_type(&value.ty, statement.span, self.source)?;
+                        self.terminate(&format!("ret {ty_name} {}", value.operand));
+                    }
                 } else {
+                    self.emit_async_scope_unwind();
                     self.terminate("ret void");
                 }
             }
@@ -2768,12 +2979,30 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 self.emit_block_contents(block)?;
                 self.pop_scope();
             }
-            StatementKind::TaskScope(_) => {
-                return Err(self.error_with(
-                    DiagnosticCode::UnsupportedFeature,
-                    "task scopes cannot be compiled until async execution is implemented",
-                    statement.span,
+            StatementKind::TaskScope(block) => {
+                if self.async_task.is_none() {
+                    return Err(self.error_with(
+                        DiagnosticCode::UnsupportedFeature,
+                        "task scopes require an async function",
+                        statement.span,
+                    ));
+                }
+                let scope = self.allocate("%princi.rt.scope");
+                self.instruction(&format!(
+                    "call void @{}(ptr {scope})",
+                    crate::runtime::windows_x86_64_async::scope_enter_function()
                 ));
+                self.task_scopes.push(scope.clone());
+                self.push_scope();
+                self.emit_block_contents(block)?;
+                self.pop_scope();
+                self.task_scopes.pop();
+                if !self.terminated {
+                    self.instruction(&format!(
+                        "call void @{}(ptr {scope})",
+                        crate::runtime::windows_x86_64_async::scope_exit_function()
+                    ));
+                }
             }
         }
         Ok(())
@@ -2785,6 +3014,38 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             return Ok(value);
         };
         self.emit_contract_conversion(value, target, expression.span)
+    }
+
+    fn emit_store_async_result(
+        &mut self,
+        ty: &Type,
+        value: &str,
+        span: SourceSpan,
+    ) -> Result<(), Diagnostic> {
+        let task = self.async_task.clone().ok_or_else(|| {
+            self.error_with(
+                DiagnosticCode::InternalCompiler,
+                INTERNAL_CODEGEN_MESSAGE,
+                span,
+            )
+        })?;
+        let result = self.fresh_value();
+        self.instruction(&format!(
+            "{result} = call ptr @{}(ptr {task})",
+            crate::runtime::windows_x86_64_async::result_function()
+        ));
+        let llvm_ty = llvm_type(ty, span, self.source)?;
+        self.instruction(&format!("store {llvm_ty} {value}, ptr {result}"));
+        Ok(())
+    }
+
+    fn emit_async_scope_unwind(&mut self) {
+        for scope in self.task_scopes.iter().rev().cloned().collect::<Vec<_>>() {
+            self.instruction(&format!(
+                "call void @{}(ptr {scope})",
+                crate::runtime::windows_x86_64_async::scope_exit_function()
+            ));
+        }
     }
 
     fn emit_contract_conversion(
@@ -2921,11 +3182,46 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                     )),
                 }
             }
-            ExpressionKind::Await(_)
-            | ExpressionKind::Spawn(_)
-            | ExpressionKind::ThreadSpawn(_) => Err(self.error_with(
+            ExpressionKind::Await(operand) => {
+                let task = self.emit_expression(operand)?;
+                let result_type = self
+                    .typed
+                    .expression_type(expression)
+                    .cloned()
+                    .unwrap_or(Type::Error);
+                let result = self.fresh_value();
+                self.instruction(&format!(
+                    "{result} = call ptr @{}(ptr {})",
+                    crate::runtime::windows_x86_64_async::await_function(),
+                    task.operand
+                ));
+                if result_type == Type::Void {
+                    Ok(IrValue {
+                        ty: Type::Void,
+                        operand: String::new(),
+                    })
+                } else {
+                    let llvm_ty = llvm_type(&result_type, expression.span, self.source)?;
+                    let value = self.fresh_value();
+                    self.instruction(&format!("{value} = load {llvm_ty}, ptr {result}"));
+                    Ok(IrValue {
+                        ty: result_type,
+                        operand: value,
+                    })
+                }
+            }
+            ExpressionKind::Spawn(operand) => {
+                let task = self.emit_expression(operand)?;
+                self.instruction(&format!(
+                    "call void @{}(ptr {})",
+                    crate::runtime::windows_x86_64_async::spawn_function(),
+                    task.operand
+                ));
+                Ok(task)
+            }
+            ExpressionKind::ThreadSpawn(_) => Err(self.error_with(
                 DiagnosticCode::UnsupportedFeature,
-                "async and thread expressions cannot be compiled until their runtime is implemented",
+                "OS-thread spawning cannot be compiled until thread support is implemented",
                 expression.span,
             )),
             ExpressionKind::Try(operand) => self.emit_try_expression(operand, expression),
@@ -3047,10 +3343,20 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             expression.span,
             self.source,
         )?;
-        self.terminate(&format!(
-            "ret {enclosing_llvm_type} {}",
-            propagated_error.operand
-        ));
+        if self.async_task.is_some() {
+            self.emit_store_async_result(
+                &propagation.enclosing_result_type,
+                &propagated_error.operand,
+                expression.span,
+            )?;
+            self.emit_async_scope_unwind();
+            self.terminate("ret void");
+        } else {
+            self.terminate(&format!(
+                "ret {enclosing_llvm_type} {}",
+                propagated_error.operand
+            ));
+        }
 
         self.label(&success_label);
         let success_llvm_type = llvm_type(&propagation.success_type, expression.span, self.source)?;
@@ -4620,7 +4926,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 span,
             ));
         }
-        let return_ty = llvm_type(&signature.return_type, span, self.source)?;
+        let return_ty = if signature.is_async {
+            "ptr".to_owned()
+        } else {
+            llvm_type(&signature.return_type, span, self.source)?
+        };
         let receiver_argument = if receiver.ty.is_struct() {
             format!(
                 "{} {}",
@@ -4648,7 +4958,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             })?,
             call_arguments.join(", ")
         );
-        self.emit_call_result(call, signature.return_type.as_ref().clone())
+        self.emit_call_result(call, signature.call_result_type())
     }
 
     fn emit_function_call(
@@ -4674,7 +4984,11 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
                 span,
             ));
         }
-        let return_ty = llvm_type(&signature.return_type, span, self.source)?;
+        let return_ty = if signature.is_async {
+            "ptr".to_owned()
+        } else {
+            llvm_type(&signature.return_type, span, self.source)?
+        };
         let arguments = values
             .iter()
             .zip(&signature.parameters)
@@ -4688,7 +5002,7 @@ impl<'a, 'pool> FunctionEmitter<'a, 'pool> {
             .collect::<Result<Vec<_>, Diagnostic>>()?
             .join(", ");
         let call = format!("call {return_ty} @{symbol}({arguments})");
-        self.emit_call_result(call, signature.return_type.as_ref().clone())
+        self.emit_call_result(call, signature.call_result_type())
     }
 
     fn emit_external_function_call(
